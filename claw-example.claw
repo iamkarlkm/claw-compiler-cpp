@@ -1,0 +1,98 @@
+// Claw Language Example: Full Stack Application
+
+// Hardware Layer - Direct GPIO Control
+hardware fn blink_led(pin: u8, duration_ms: u32) {
+    let gpio = Gpio::new(pin);
+    gpio.set_direction(Output);
+    loop {
+        gpio.write(High);
+        sleep_ms(duration_ms);
+        gpio.write(Low);  
+        sleep_ms(duration_ms);
+    }
+}
+
+// Virtual Hardware Layer - Containerized Service
+virtual fn web_server() -> Server {
+    let config = ServerConfig {
+        port: 8080,
+        max_connections: 1000,
+        tls_enabled: true,
+    };
+    Server::new(config)
+}
+
+// Kernel Layer - System Service
+kernel fn file_watcher(path: &str) -> Result<(), SystemError> {
+    let watcher = Inotify::new()?;
+    watcher.add_watch(path, IN_MODIFY | IN_CREATE)?;
+    
+    for event in watcher.events() {
+        match event.kind {
+            Modify => log!("File modified: {}", event.name),
+            Create => log!("File created: {}", event.name),
+            _ => continue,
+        }
+    }
+    Ok(())
+}
+
+// Shell Layer - Command Line Interface  
+shell fn process_images(input_dir: Path, output_dir: Path) {
+    let images = input_dir.glob("*.jpg");
+    for image in images {
+        let processed = image.resize(800, 600).compress(85);
+        output_dir.join(image.stem()).write(processed);
+    }
+    println!("Processed {} images", images.len());
+}
+
+// UI Layer - Declarative User Interface
+ui fn image_gallery() -> View {
+    let images = state!(Vec<Image>);
+    let selected = state!(Option<usize>);
+    
+    VStack {
+        H1 { "My Photo Gallery" }
+        ScrollView {
+            ForEach(images, |image, index| {
+                ImageCard {
+                    source: image.thumbnail(),
+                    onclick: move || selected.set(Some(index)),
+                    selected: selected.get() == Some(index),
+                }
+            })
+        }
+        if let Some(idx) = selected.get() {
+            Modal {
+                ImageView { source: images[idx].full_size() }
+                Button("Close") { selected.set(None) }
+            }
+        }
+    }
+}
+
+// Main entry point - orchestrates all layers
+fn main() -> Result<(), ClawError> {
+    // Start hardware LED indicator
+    spawn_hardware(blink_led(13, 1000));
+    
+    // Launch virtual web server  
+    let server = web_server();
+    spawn_virtual(server.serve());
+    
+    // Monitor file system changes
+    spawn_kernel(file_watcher("/var/log"));
+    
+    // Process command line arguments
+    if args().len() > 1 {
+        process_images(args()[1].into(), args()[2].into());
+    }
+    
+    // Launch UI if running in desktop environment
+    if is_desktop() {
+        launch_ui(image_gallery());
+    }
+    
+    Ok(())
+}

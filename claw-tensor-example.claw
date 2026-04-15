@@ -1,0 +1,309 @@
+// Claw 张量优化系统示例
+// 展示自动调度和 ML 驱动的张量计算优化
+
+// === 基础张量操作 ===
+
+fn main() {
+    // 创建张量
+    let A: tensor<f32, [1024, 1024]> = tensor::random([1024, 1024]);
+    let B: tensor<f32, [1024, 1024]> = tensor::ones([1024, 1024]);
+
+    // 基础算术运算
+    let sum = A + B;
+    let diff = A - B;
+    let product = A * B;
+
+    println("Basic operations complete!");
+}
+
+// === 自动优化的矩阵乘法 ===
+
+@auto_schedule(
+    search_space = {
+        tile_sizes = [[8, 8], [16, 16], [32, 32]],
+        vectorization = [8, 16, 32],
+        unroll_factors = [2, 4, 8],
+        parallel_strategies = ["naive", "grid", "cooperative"]
+    },
+    objective = "throughput",
+    target = "cuda"
+)
+fn matmul_optimized(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+// === 使用 RL 智能体优化 ===
+
+@rl_schedule(
+    agent = "PPO",
+    training_episodes = 10000,
+    model_path = "models/matmul_agent.pt",
+    exploration_rate = 0.1
+)
+fn matmul_rl_optimized(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+// === 使用 LLM 引导优化 ===
+
+@llm_schedule(
+    model = "codellama-34b",
+    prompt = "Generate optimal schedule for matrix multiplication on NVIDIA V100 GPU with tensor cores",
+    temperature = 0.3
+)
+fn matmul_llm_optimized(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+// === 手动调度（高级用法）===
+
+compute matmul_kernel(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>]) {
+    let C: tensor<f32, [M, N]>;
+
+    for i in 0..M {
+        for j in 0..N {
+            for k in 0..K {
+                C[i, j] += A[i, k] * B[k, j];
+            }
+        }
+    }
+
+    return C;
+}
+
+schedule matmul_kernel {
+    // 循环平铺
+    tile(i, j, [16, 16]);
+
+    // 向量化内层循环
+    vectorize(i_inner);
+
+    // 展开 k 循环
+    unroll(k_inner);
+
+    // 并行化外层循环
+    parallel(i_outer);
+
+    // 绑定到 CUDA 线程
+    bind(j_outer, "threadIdx.x");
+
+    // 共享内存缓存
+    cache_read(A, "shared");
+    cache_read(B, "shared");
+    cache_write(C, "local");
+}
+
+// === 多后端支持 ===
+
+@target(nvidia_v100)
+fn matmul_gpu(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+@target(cpu_x86_avx512)
+fn matmul_cpu(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+@target(tpu_v4)
+fn matmul_tpu(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    return A.matmul(B);
+}
+
+// === CNN 卷积层示例 ===
+
+@auto_schedule(
+    target = "cuda",
+    objective = "throughput"
+)
+fn conv2d_layer(
+    input: tensor<f32, [B, C, H, W]>,
+    weight: tensor<f32, [K, C, R, S]>,
+    bias: tensor<f32, [K]>
+) -> tensor<f32, [B, K, H_out, W_out]>
+{
+    // 卷积操作
+    let conv = tensor::conv2d(
+        input, weight,
+        padding = [1, 1],
+        stride = [1, 1]
+    );
+
+    // 添加偏置
+    let biased = conv + bias.broadcast_to([B, K, H_out, W_out]);
+
+    // ReLU 激活
+    let activated = tensor::relu(biased);
+
+    // 批归一化
+    let output = tensor::batch_norm(activated);
+
+    return output;
+}
+
+// === 完整的神经网络前向传播 ===
+
+@auto_schedule(target = "cuda")
+fn cnn_forward(
+    input: tensor<f32, [B, 3, 224, 224]>,
+    conv1_w: tensor<f32, [64, 3, 7, 7]>,
+    conv1_b: tensor<f32, [64]>,
+    conv2_w: tensor<f32, [128, 64, 3, 3]>,
+    conv2_b: tensor<f32, [128]>,
+    fc_w: tensor<f32, [1000, 512]>,
+    fc_b: tensor<f32, [1000]>
+) -> tensor<f32, [B, 1000]>
+{
+    // Conv1: 3 -> 64, 7x7, stride 2
+    let conv1 = tensor::conv2d(input, conv1_w, padding = [3, 3], stride = [2, 2]);
+    let conv1_bn = tensor::batch_norm(conv1 + conv1_b);
+    let relu1 = tensor::relu(conv1_bn);
+    let pool1 = tensor::max_pool2d(relu1, [3, 3], [2, 2], padding = [1, 1]);
+
+    // Conv2: 64 -> 128, 3x3
+    let conv2 = tensor::conv2d(pool1, conv2_w, padding = [1, 1], stride = [1, 1]);
+    let conv2_bn = tensor::batch_norm(conv2 + conv2_b);
+    let relu2 = tensor::relu(conv2_bn);
+    let pool2 = tensor::max_pool2d(relu2, [2, 2], [2, 2], padding = [0, 0]);
+
+    // Flatten
+    let flattened = pool2.reshape([B, -1]);
+
+    // 全连接层
+    let logits = flattened.matmul(fc_w.transpose([1, 0])) + fc_b;
+
+    return logits;
+}
+
+// === 运行时目标选择 ===
+
+fn adaptive_matmul(A: tensor<f32, [M, K]>, B: tensor<f32, [K, N>])
+    -> tensor<f32, [M, N]>
+{
+    let C: tensor<f32, [M, N]>;
+
+    // 根据硬件选择最优实现
+    if has_nvidia_gpu() {
+        C = matmul_gpu(A, B);
+    } else if has_x86_avx512() {
+        C = matmul_cpu(A, B);
+    } else if has_tpu() {
+        C = matmul_tpu(A, B);
+    } else {
+        // 后备实现
+        C = A.matmul(B);
+    }
+
+    return C;
+}
+
+// === 批归一化层 ===
+
+@auto_schedule(target = "cuda")
+fn batch_norm(
+    input: tensor<f32, [N, C, H, W]>,
+    gamma: tensor<f32, [C]>,
+    beta: tensor<f32, [C]>,
+    mean: tensor<f32, [C]>,
+    var: tensor<f32, [C]>,
+    epsilon: f32
+) -> tensor<f32, [N, C, H, W]>
+{
+    // 标准化
+    let normalized = (input - mean.broadcast_to([N, C, H, W])) /
+                   tensor::sqrt(var.broadcast_to([N, C, H, W]) + epsilon);
+
+    // 缩放和偏移
+    let output = normalized * gamma.broadcast_to([N, C, H, W]) +
+                 beta.broadcast_to([N, C, H, W]);
+
+    return output;
+}
+
+// === 注意力机制（Transformer） ===
+
+@auto_schedule(target = "cuda")
+fn scaled_dot_product_attention(
+    query: tensor<f32, [B, N_heads, L, D_head]>,
+    key: tensor<f32, [B, N_heads, S, D_head]>,
+    value: tensor<f32, [B, N_heads, S, D_head]>,
+    mask: tensor<bool, [B, 1, L, S]>
+) -> tensor<f32, [B, N_heads, L, D_head]>
+{
+    // QK^T / sqrt(d)
+    let scores = query.matmul(key.transpose([0, 1, 3, 2])) /
+                tensor::sqrt(D_head as f32);
+
+    // 应用掩码
+    let masked_scores = scores;
+    if mask.exists() {
+        masked_scores = scores.where(mask, -1e9);
+    }
+
+    // Softmax
+    let attention_weights = tensor::softmax(masked_scores, dim = -1);
+
+    // 加权求和
+    let output = attention_weights.matmul(value);
+
+    return output;
+}
+
+// === 基准测试函数 ===
+
+fn benchmark_matmul() {
+    println("=== Matrix Multiplication Benchmark ===");
+
+    let sizes = [512, 1024, 2048, 4096];
+
+    for size in sizes {
+        let A = tensor::random<f32, [size, size]>();
+        let B = tensor::random<f32, [size, size]>();
+
+        // 预热
+        let _ = A.matmul(B);
+
+        // 计时
+        let start = timer::now();
+        for i in 0..10 {
+            let _ = A.matmul(B);
+        }
+        let elapsed = timer::elapsed(start);
+
+        let gflops = (2.0 * size * size * size * 10) / (elapsed * 1e9);
+
+        println(f"Size {size}x{size}: {gflops:.2f} GFLOPS");
+    }
+}
+
+// === 主入口 ===
+
+fn main() {
+    println("Claw Tensor Optimization System Demo");
+    println("==================================");
+
+    // 基准测试
+    benchmark_matmul();
+
+    // 示例 CNN 前向传播
+    let input = tensor::random<f32, [1, 3, 224, 224]>();
+    let conv1_w = tensor::random<f32, [64, 3, 7, 7]>();
+    let conv1_b = tensor::zeros<f32, [64]>();
+
+    let output = conv2d_layer(input, conv1_w, conv1_b);
+    println("CNN forward pass complete!");
+
+    println("Demo finished!");
+}

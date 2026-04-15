@@ -1,0 +1,102 @@
+// Claw Minimal Syntax - Simple Keywords, Complex Power
+
+// Only 12 core keywords
+// name, fn, if, else, for, while, return, break, continue, match, unsafe, await
+
+// Everything is a named binary stream
+name data = byte[1024]        // 1024 bytes
+name num = data.u32[1]        // First 4 bytes as u32 (1-based!)
+name text = data[5..100]      // Bytes 5-100 as sub-stream
+
+// Functions are simple
+fn process(data: name byte[]) -> name byte[] {
+    name result = byte[data.len()]
+    
+    // Simple loops with 1-based indexing
+    for i in 1..data.len() {
+        result[i] = data[i] + 1
+    }
+    
+    return result
+}
+
+// Pattern matching instead of complex type declarations
+fn handle_packet(raw: name byte[]) {
+    match raw.u32[1] {           // Check first 4 bytes
+        0x01 => handle_tcp(raw),
+        0x02 => handle_udp(raw), 
+        0x03 => handle_http(raw),
+        _ => error("Unknown protocol")
+    }
+}
+
+// No complex generic syntax - just use name streams
+fn sort(items: name u32[]) -> name u32[] {
+    name sorted = items.clone()
+    for i in 1..sorted.len() {
+        for j in (i+1)..sorted.len() {
+            if sorted[i] > sorted[j] {
+                let temp = sorted[i]
+                sorted[i] = sorted[j]  
+                sorted[j] = temp
+            }
+        }
+    }
+    return sorted
+}
+
+// Memory safety without complex syntax
+fn safe_copy(src: name byte[], dst: name byte[]) {
+    let len = min(src.len(), dst.len())
+    for i in 1..len {
+        dst[i] = src[i]          // Compiler ensures bounds safety
+    }
+}
+
+// Hardware access - same simple syntax
+name gpio = byte[0x40000000, 256]
+fn led_on() {
+    gpio.u32[2] = 0xFF          // Set GPIO data register
+}
+
+// File operations - everything is a stream
+name config = file("/etc/app.conf")
+fn save_setting(value: u32) {
+    config.u32[1] = value       // Write to first 4 bytes of file
+}
+
+// Network - same model
+name socket = tcp("localhost:8080")  
+fn send_request() {
+    socket[1..16] = build_header()
+    socket[17..] = build_body()
+}
+
+// Async - simple await syntax
+fn async download(url: string) -> name byte[] {
+    name response = http_get(url)
+    return await response.body()
+}
+
+// Error handling with simple patterns
+fn read_file(path: string) -> Result<name byte[], string> {
+    if !file_exists(path) {
+        return Err("File not found")
+    }
+    return Ok(file(path))
+}
+
+// Main - simple entry point
+fn main() {
+    // Process some data
+    name input = file("input.bin")
+    name output = process(input)
+    file("output.bin") = output
+    
+    // Handle network packet
+    name packet = tcp("192.168.1.1:8080")[1..1024]
+    handle_packet(packet)
+    
+    // Blink LED
+    led_on()
+}

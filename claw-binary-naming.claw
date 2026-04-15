@@ -1,0 +1,101 @@
+// Claw Binary Naming Model - Everything is a Named Binary Stream
+
+// Core concept: All data is a named binary stream with 1-based indexing
+
+// Basic binary stream declaration
+name memory_buffer = byte[1024]        // 1024 bytes, indexed 1..1024
+name config_data = byte[256]           // Configuration block
+
+// Type reinterpretation with 1-based indexing
+name header_magic = memory_buffer.u32[1]    // First 4 bytes as u32 (bytes 1-4)
+name payload_size = memory_buffer.u32[2]    // Next 4 bytes as u32 (bytes 5-8)
+name checksum = memory_buffer.u16[5]        // Bytes 9-10 as u16
+
+// Nested structuring with named ranges
+name packet_header = memory_buffer[1..16]   // First 16 bytes as sub-stream
+name packet_body = memory_buffer[17..]      // Rest as body stream
+
+// Reinterpret sub-streams
+name version = packet_header.u16[1]         // Header bytes 1-2 as version
+name flags = packet_header.u16[2]           // Header bytes 3-4 as flags
+name timestamp = packet_header.u64[2]       // Header bytes 5-12 as timestamp
+
+// Hardware register mapping
+name gpio_registers = byte[0x40000000, 256] // Memory-mapped GPIO at address
+name gpio_direction = gpio_registers.u32[1]  // Direction register (bytes 1-4)
+name gpio_data = gpio_registers.u32[2]       // Data register (bytes 5-8)
+
+// File system integration (everything is a file/stream)
+name config_file = file("/etc/myapp.conf")   // File as binary stream
+name log_stream = file("/var/log/app.log", append=true)
+
+// Network streams
+name tcp_connection = tcp("192.168.1.100:8080")
+name http_request = tcp_connection[1..1024]
+
+// Array operations with 1-based indexing
+name numbers = u32[10]                      // Array of 10 u32 values
+numbers[1] = 42                             // First element (compiles to index 0)
+numbers[10] = 100                           // Last element (compiles to index 9)
+
+// Slicing with inclusive ranges
+name first_half = numbers[1..5]             // Elements 1-5 (indices 0-4)
+name last_three = numbers[8..10]            // Elements 8-10 (indices 7-9)
+
+// Dynamic sizing
+name dynamic_buffer = byte[]                // Initially empty
+dynamic_buffer.resize(100)                  // Now 100 bytes, indexed 1..100
+
+// Compiler magic: All 1-based indices are converted to 0-based at compile time
+// So numbers[1] becomes numbers[0] in generated code, but source stays intuitive
+
+// Unified I/O operations
+fn read_data(source: name byte[], offset: u32, length: u32) -> name byte[] {
+    return source[offset..(offset + length - 1)]  // 1-based range
+}
+
+fn write_data(dest: name byte[], data: name byte[]) {
+    dest[1..data.len()] = data                  // Copy with 1-based indexing
+}
+
+// Example: Parsing a network packet
+fn parse_packet(raw_data: name byte[]) -> Result<Packet, Error> {
+    // Validate minimum size
+    if raw_data.len() < 16 {
+        return Err(Error::InvalidSize);
+    }
+    
+    // Extract fields using 1-based indexing
+    let magic = raw_data.u32[1];
+    if magic != 0x12345678 {
+        return Err(Error::InvalidMagic);
+    }
+    
+    let size = raw_data.u32[2];
+    let payload = raw_data[17..(16 + size)];    // Payload starts at byte 17
+    
+    Ok(Packet { magic, size, payload })
+}
+
+// Main function demonstrating the model
+fn main() {
+    // Create a packet in memory
+    name packet = byte[1024];
+    packet.u32[1] = 0x12345678;                 // Magic (bytes 1-4)
+    packet.u32[2] = 100;                        // Size (bytes 5-8)
+    packet[17..116] = generate_payload();       // Fill payload (bytes 17-116)
+    
+    // Parse it back
+    match parse_packet(packet) {
+        Ok(p) => println!("Parsed packet with {} bytes payload", p.size),
+        Err(e) => println!("Error: {}", e),
+    }
+    
+    // Hardware example
+    gpio_data[1] = 0xFF;                        // Set all GPIO pins high
+    let current_state = gpio_data[1];           // Read current state
+    
+    // File example  
+    name settings = file("/tmp/settings.bin");
+    settings.u32[1] = current_state;            // Save to file
+}

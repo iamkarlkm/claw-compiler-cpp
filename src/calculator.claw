@@ -1,0 +1,49 @@
+// Simple Calculator in Claw Language
+// Demonstrates basic arithmetic operations and console output
+
+// Main function
+fn main() {
+    // Basic arithmetic with named binary streams
+    name a = u32[1]
+    name b = u32[1] 
+    
+    // Initialize values (1-based indexing)
+    a[1] = 42
+    b[1] = 18
+    
+    // Perform calculations
+    name sum = u32[1]
+    name difference = u32[1]  
+    name product = u32[1]
+    name quotient = u32[1]
+    
+    sum[1] = a[1] + b[1]
+    difference[1] = a[1] - b[1]
+    product[1] = a[1] * b[1]
+    quotient[1] = a[1] / b[1]
+    
+    // Print results to console
+    println("Calculator Demo:")
+    println("a = ", a[1])
+    println("b = ", b[1]) 
+    println("a + b = ", sum[1])
+    println("a - b = ", difference[1])
+    println("a * b = ", product[1])
+    println("a / b = ", quotient[1])
+    
+    // Demonstrate event system with calculation process
+    publish calculation_performed(a[1], b[1], sum[1])
+}
+
+// Serial process for calculation logging
+serial process calculation_performed(x: u32, y: u32, result: u32) {
+    // This process can be handled by multiple subscribers
+}
+
+// Subscribe to calculation events for logging
+subscribe calculation_performed {
+    fn log_calculation(x: u32, y: u32, result: u32) -> bool {
+        println("Event: Calculation performed - ", x, " + ", y, " = ", result)
+        return true // Stop propagation after logging
+    }
+}

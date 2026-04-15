@@ -1,0 +1,164 @@
+// Claw Event System - Everything is a Process with Pub/Sub
+
+// Serial Process: One subscriber handles, can return true to stop propagation
+serial process file_modified(path: string) {
+    // Subscribers are called in order until one returns true
+}
+
+// Parallel Process: All subscribers receive, completion based on responses  
+parallel process system_startup() {
+    // All subscribers run concurrently, process completes when all respond
+}
+
+// Hardware event as serial process
+serial process gpio_interrupt(pin: u8, value: bool) {
+    // GPIO interrupt handlers called in sequence
+}
+
+// Network event as parallel process  
+parallel process http_request_received(request: name byte[]) {
+    // Multiple services can handle the request concurrently
+}
+
+// Subscribe to serial process - first handler that returns true stops the chain
+subscribe file_modified {
+    fn handler1(path: string) -> bool {
+        if path.ends_with(".log") {
+            // Log files handled here, stop propagation
+            compress_old_logs()
+            return true  // Stop here
+        }
+        return false // Continue to next handler
+    }
+    
+    fn handler2(path: string) -> bool {
+        if path.ends_with(".conf") {
+            // Reload config, stop propagation  
+            reload_configuration()
+            return true
+        }
+        return false
+    }
+    
+    fn backup_handler(path: string) -> bool {
+        // Backup any unhandled file changes
+        backup_file(path)
+        return true // Always handle as fallback
+    }
+}
+
+// Subscribe to parallel process - all run concurrently
+subscribe system_startup {
+    fn init_database() -> Result<(), string> {
+        connect_to_db()
+        return Ok(())
+    }
+    
+    fn init_network() -> Result<(), string> {
+        start_web_server()
+        return Ok(())
+    }
+    
+    fn init_hardware() -> Result<(), string> {
+        initialize_sensors()
+        return Ok(())
+    }
+}
+
+// Hardware interrupt handling (serial)
+subscribe gpio_interrupt {
+    fn led_control(pin: u8, value: bool) -> bool {
+        if pin == 13 {
+            // Handle LED pin
+            update_led_status(value)
+            return true // Only LED handler needed
+        }
+        return false
+    }
+    
+    fn button_handler(pin: u8, value: bool) -> bool {
+        if pin == 2 && value {
+            // Button press detected
+            trigger_action()
+            return true
+        }
+        return false
+    }
+}
+
+// HTTP request handling (parallel)  
+subscribe http_request_received {
+    fn auth_middleware(request: name byte[]) -> Result<name byte[], string> {
+        if !validate_token(request) {
+            return Err("Unauthorized")
+        }
+        return Ok(request)
+    }
+    
+    fn route_handler(request: name byte[]) -> Result<name byte[], string> {
+        let response = route_request(request)
+        return Ok(response)
+    }
+    
+    fn logging_middleware(request: name byte[]) -> Result<name byte[], string> {
+        log_request(request)
+        return Ok(request) // Continue processing
+    }
+}
+
+// Publishing events - compiler determines serial vs parallel at compile time
+fn main() {
+    // Publish serial event - stops when first handler returns true
+    publish file_modified("/etc/config.conf")
+    
+    // Publish parallel event - waits for all handlers
+    publish system_startup()
+    
+    // Hardware events
+    publish gpio_interrupt(13, true)   // LED on
+    publish gpio_interrupt(2, true)    // Button pressed
+    
+    // Network events
+    name request = tcp("localhost:8080")[1..1024]
+    publish http_request_received(request)
+}
+
+// Dynamic subscription management
+fn add_file_watcher(watch_path: string) {
+    // Add new subscriber at runtime
+    subscribe file_modified {
+        fn dynamic_handler(path: string) -> bool {
+            if path.starts_with(watch_path) {
+                notify_user(path)
+                return true
+            }
+            return false
+        }
+    }
+}
+
+// Process composition
+serial process user_action(action: string) {
+    // Compose multiple processes
+}
+
+subscribe user_action {
+    fn validate_action(action: string) -> bool {
+        if !is_valid_action(action) {
+            show_error("Invalid action")
+            return true // Stop invalid actions early
+        }
+        return false
+    }
+    
+    fn execute_action(action: string) -> bool {
+        perform_action(action)
+        log_action(action)
+        return true // Action completed
+    }
+}
+
+// Publish composed process
+fn handle_user_input() {
+    publish user_action("save_document")
+}
