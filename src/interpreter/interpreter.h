@@ -678,8 +678,26 @@ public:
     bool return_flag = false;
     claw::ast::Program* current_program = nullptr;
 
-    // Variable stack for function calls
+    // Variable stack for function calls (scoped variable lookup)
     std::vector<std::map<std::string, RuntimeValue>> variable_stack;
+
+    // Scoped variable set: write to topmost stack frame, or global if no frame
+    void scoped_set(const std::string& name, const RuntimeValue& value) {
+        if (!variable_stack.empty()) {
+            variable_stack.back()[name] = value;
+        } else {
+            runtime.set_var(name, value);
+        }
+    }
+
+    // Scoped variable get: search from innermost frame outward, then global
+    RuntimeValue* scoped_get(const std::string& name) {
+        for (int i = static_cast<int>(variable_stack.size()) - 1; i >= 0; i--) {
+            auto it = variable_stack[i].find(name);
+            if (it != variable_stack[i].end()) return &it->second;
+        }
+        return runtime.get_var(name);
+    }
 
     Interpreter() {}
 
@@ -722,27 +740,18 @@ public:
     // Execute a function with arguments
     Value execute_function(claw::ast::FunctionStmt* fn,
                            const std::vector<Value>& args = {}) {
-        // Push new variable scope
+        // Push new variable scope (stack frame)
         variable_stack.push_back(std::map<std::string, RuntimeValue>());
 
-        // Bind parameters — save old values to restore after recursion
-        std::vector<std::pair<std::string, RuntimeValue>> saved_vars;
+        // Bind parameters into current stack frame
         const auto& params = fn->get_params();
         for (size_t i = 0; i < params.size() && i < args.size(); i++) {
             std::string param_name = params[i].first;
-            // Save old value
-            RuntimeValue* old = runtime.get_var(param_name);
-            if (old) {
-                saved_vars.push_back({param_name, *old});
-            } else {
-                saved_vars.push_back({param_name, RuntimeValue{}});
-            }
-            // Set new value
             RuntimeValue param_val;
             param_val.type_name = params[i].second;
             param_val.size = 1;
             param_val.scalar = args[i];
-            runtime.set_var(param_name, param_val);
+            variable_stack.back()[param_name] = param_val;
         }
 
         // Save caller's return state (fixes recursive call clobbering)
@@ -761,13 +770,8 @@ public:
         // Capture this frame's return value
         Value result = return_value;
 
-        // Pop variable scope
+        // Pop stack frame — all local variables (params + let decls) are naturally discarded
         variable_stack.pop_back();
-
-        // Restore caller's variables (fixes recursive param clobbering)
-        for (auto& [name, val] : saved_vars) {
-            runtime.set_var(name, val);
-        }
 
         // Restore caller's return state
         return_flag = saved_return_flag;
@@ -942,7 +946,7 @@ public:
             }
         }
 
-        runtime.set_var(name, val);
+        scoped_set(name, val);
     }
 
     // Execute binary assignment (a[1] = 42)
@@ -957,7 +961,7 @@ public:
 
             if (obj->get_kind() == claw::ast::Expression::Kind::Identifier) {
                 auto* ident = static_cast<claw::ast::IdentifierExpr*>(obj);
-                RuntimeValue* var = runtime.get_var(ident->get_name());
+                RuntimeValue* var = scoped_get(ident->get_name());
 
                 if (var) {
                     Value idx_val = evaluate(idx_expr_p);
@@ -969,6 +973,20 @@ public:
                         var->array[idx - 1].scalar = value;
                     }
                 }
+            }
+        } else if (target->get_kind() == claw::ast::Expression::Kind::Identifier) {
+            // Simple variable assignment: x = 10
+            auto* ident = static_cast<claw::ast::IdentifierExpr*>(target);
+            RuntimeValue* var = scoped_get(ident->get_name());
+            if (var) {
+                var->scalar = value;
+            } else {
+                // Variable not found — create it in current scope
+                RuntimeValue new_val;
+                new_val.type_name = "auto";
+                new_val.size = 1;
+                new_val.scalar = value;
+                scoped_set(ident->get_name(), new_val);
             }
         }
     }
@@ -986,7 +1004,7 @@ public:
 
             if (obj->get_kind() == claw::ast::Expression::Kind::Identifier) {
                 auto* ident = static_cast<claw::ast::IdentifierExpr*>(obj);
-                RuntimeValue* var = runtime.get_var(ident->get_name());
+                RuntimeValue* var = scoped_get(ident->get_name());
 
                 if (var) {
                     // Get index value
@@ -1057,7 +1075,7 @@ public:
                     loop_var.type_name = "u32";
                     loop_var.size = 1;
                     loop_var.scalar = static_cast<int64_t>(i);
-                    runtime.set_var(var_name, loop_var);
+                    scoped_set(var_name, loop_var);
 
                     // Execute loop body
                     execute_block(for_stmt->get_body());
@@ -1087,7 +1105,7 @@ public:
                 loop_var.type_name = "char";
                 loop_var.size = 1;
                 loop_var.scalar = static_cast<int64_t>(str[idx]);
-                runtime.set_var(var_name, loop_var);
+                scoped_set(var_name, loop_var);
                 
                 execute_block(for_stmt->get_body());
                 
@@ -1166,7 +1184,7 @@ public:
             }
             case claw::ast::Expression::Kind::Identifier: {
                 auto* ident = static_cast<claw::ast::IdentifierExpr*>(expr);
-                RuntimeValue* var = runtime.get_var(ident->get_name());
+                RuntimeValue* var = scoped_get(ident->get_name());
                 if (var) {
                     return var->at(1);  // Return scalar (index 1)
                 }
@@ -1276,7 +1294,7 @@ public:
 
         if (obj->get_kind() == claw::ast::Expression::Kind::Identifier) {
             auto* ident = static_cast<claw::ast::IdentifierExpr*>(obj);
-            RuntimeValue* var = runtime.get_var(ident->get_name());
+            RuntimeValue* var = scoped_get(ident->get_name());
 
             if (var) {
                 // Get index
