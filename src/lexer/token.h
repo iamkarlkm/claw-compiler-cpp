@@ -113,6 +113,8 @@ enum class TokenType {
     RBrace,           // }
     Comma,            // ,
     Dot,              // .
+    Op_range,         // .. (exclusive range)
+    Op_range_eq,      // ..= (inclusive range)
     Semicolon,        // ;
     Colon,            // :
     ScopeResolution,  // ::
@@ -262,6 +264,8 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::RBrace: return "}";
         case TokenType::Comma: return ",";
         case TokenType::Dot: return ".";
+        case TokenType::Op_range: return "..";
+        case TokenType::Op_range_eq: return "..=";
         case TokenType::Semicolon: return ";";
         case TokenType::Colon: return ":";
         

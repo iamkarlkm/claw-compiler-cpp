@@ -48,7 +48,7 @@ enum class SymbolVisibility {
 struct Symbol {
     std::string name;
     SymbolKind kind;
-    TypePtr type;
+    claw::type::TypePtr type;
     ast::ASTNode* definition;
     Scope* scope;
     SymbolVisibility visibility;
@@ -57,7 +57,7 @@ struct Symbol {
     bool is_captured;
     int depth;
     
-    Symbol(const std::string& n, SymbolKind k, TypePtr t, ast::ASTNode* def, Scope* s)
+    Symbol(const std::string& n, SymbolKind k, claw::type::TypePtr t, ast::ASTNode* def, Scope* s)
         : name(n), kind(k), type(t), definition(def), scope(s),
           visibility(SymbolVisibility::Private), 
           is_mutable(false), is_initialized(false), 
@@ -128,7 +128,7 @@ public:
     Scope* current_scope() { return scope_stack_.top(); }
     
     // Symbol operations
-    bool define(const std::string& name, SymbolKind kind, TypePtr type, 
+    bool define(const std::string& name, SymbolKind kind, claw::type::TypePtr type, 
                 ast::ASTNode* def, bool is_mutable = false);
     Symbol* lookup(const std::string& name);
     Symbol* lookup_local(const std::string& name);
@@ -140,8 +140,8 @@ public:
     bool in_function() const;
     
     // Get function return type
-    TypePtr current_return_type() const { return current_return_type_; }
-    void set_return_type(TypePtr type) { current_return_type_ = type; }
+    claw::type::TypePtr current_return_type() const { return current_return_type_; }
+    void set_return_type(claw::type::TypePtr type) { current_return_type_ = type; }
     
     // Get current function name
     const std::string& current_function() const { return current_function_; }
@@ -162,7 +162,7 @@ public:
     
 private:
     std::stack<Scope*> scope_stack_;
-    TypePtr current_return_type_;
+    claw::type::TypePtr current_return_type_;
     std::string current_function_;
     int loop_depth_;
     std::vector<Symbol*> functions_;
@@ -209,7 +209,7 @@ private:
     
     // Visit methods for AST nodes
     void visit_program(ast::Program* program);
-    void visit_function(ast::FunctionDecl* func);
+    void visit_function(ast::FunctionStmt* func);
     void visit_parameter(ast::ParamDecl* param);
     void visit_statement(ast::Statement* stmt);
     void visit_expression(ast::Expression* expr);
@@ -244,9 +244,9 @@ private:
     void visit_ref(ast::RefExpr* ref);
     
     // Type checking helpers
-    TypePtr infer_expression_type(ast::Expression* expr);
-    bool check_assignment(TypePtr target, TypePtr source, const SourceSpan& span);
-    bool check_compatibility(TypePtr expected, TypePtr actual, const SourceSpan& span);
+    claw::type::TypePtr infer_expression_type(ast::Expression* expr);
+    bool check_assignment(claw::type::TypePtr target, claw::type::TypePtr source, const SourceSpan& span);
+    bool check_compatibility(claw::type::TypePtr expected, claw::type::TypePtr actual, const SourceSpan& span);
     
     // Built-in type names
     std::unordered_set<std::string> builtin_types_ = {

@@ -217,11 +217,25 @@ inline void Lexer::scan_token() {
         case '{': tokens.emplace_back(TokenType::LBrace, make_span()); break;
         case '}': tokens.emplace_back(TokenType::RBrace, make_span()); break;
         case ',': tokens.emplace_back(TokenType::Comma, make_span()); break;
-        case '.': tokens.emplace_back(TokenType::Dot, make_span()); break;
+        case '.': 
+            // Check for range operators: .. or ..=
+            if (peek_next() == '.') {
+                advance(); // consume second '.'
+                if (peek() == '=') {
+                    advance();
+                    tokens.emplace_back(TokenType::Op_range_eq, make_span());
+                } else {
+                    tokens.emplace_back(TokenType::Op_range, make_span());
+                }
+            } else {
+                tokens.emplace_back(TokenType::Dot, make_span());
+            }
+            break;
         case ';': tokens.emplace_back(TokenType::Semicolon, make_span()); break;
         case '~': tokens.emplace_back(TokenType::Op_tilde, make_span()); break;
         case '?': tokens.emplace_back(TokenType::Op_question, make_span()); break;
         case '*': tokens.emplace_back(TokenType::Op_star, make_span()); break;
+        case '%': tokens.emplace_back(TokenType::Op_percent, make_span()); break;
         case ':': tokens.emplace_back(TokenType::Colon, make_span()); break;
         
         // Multi-character operators
@@ -352,6 +366,8 @@ inline void Lexer::scan_number() {
     }
     
     bool is_float = false;
+    
+    // Just emit the number normally, the range operator will be handled by the '.' case
     
     // Check for decimal point
     if (peek() == '.' && is_digit(peek_next())) {

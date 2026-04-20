@@ -1,0 +1,2 @@
+fn test<T, U>(a: T) {
+}

@@ -86,14 +86,123 @@
 
 ---
 
+## 新增功能模块（字节码 VM + JIT + 多目标机器码生成）
+
+### 14. Claw 字节码指令集 (ClawBytecode) ✅ 实现完成 (2026-04-18)
+- [x] 字节码指令集设计 (~80 条指令)
+  - **栈操作**: NOP, PUSH, POP, DUP, SWAP
+  - **整数运算**: IADD, ISUB, IMUL, IDIV, IMOD, INEG, IINC
+  - **浮点运算**: FADD, FSUB, FMUL, FDIV, FMOD, FNEG, FINC
+  - **整数比较**: IEQ, INE, ILT, ILE, IGT, IGE
+  - **浮点比较**: FEQ, FNE, FLT, FLE, FGT, FGE
+  - **逻辑/位运算**: AND, OR, NOT, BAND, BOR, BXOR, BNOT, SHL, SHR, USHR
+  - **类型转换**: I2F, F2I, I2B, B2I, I2S, F2S, S2I, S2F, TRUNC, ZEXT, SEXT, FTRUNC
+  - **局部变量**: LOAD_LOCAL, STORE_LOCAL, LOAD_LOCAL_0, LOAD_LOCAL_1
+  - **全局变量**: LOAD_GLOBAL, STORE_GLOBAL, DEFINE_GLOBAL
+  - **控制流**: JMP, JMP_IF, JMP_IF_NOT, LOOP, CALL, RET, RET_NULL, CALL_EXT
+  - **函数**: DEFINE_FUNC, CLOSURE, CLOSE_UPVALUE, GET_UPVALUE
+  - **数组**: ALLOC_ARRAY, LOAD_INDEX, STORE_INDEX, ARRAY_LEN, ARRAY_PUSH
+  - **对象**: ALLOC_OBJ, LOAD_FIELD, STORE_FIELD, OBJ_TYPE
+  - **元组**: CREATE_TUPLE, LOAD_ELEM, STORE_ELEM
+  - **张量**: TENSOR_CREATE, TENSOR_LOAD, TENSOR_STORE, TENSOR_MATMUL, TENSOR_RESHAPE
+  - **系统**: PRINT, PRINTLN, PANIC, HALT, INPUT, TYPE_OF, EXT
+- [x] 字节码序列化格式 (二进制 .claw 文件)
+- [x] 调试信息嵌入 (局部变量名映射)
+- [x] 常量池 (整数、浮点数、字符串池化)
+- **设计参考**: Lua 5.x 字节码 + Python bytecode + JVM bytecode (常量池)
+- **实际代码量**: ~1000 行 (头文件 + 实现 + 测试)
+
+### 15. 字节码编译器 (AST → Bytecode) ✅ 实现完成 (2026-04-18)
+- [x] BytecodeCompiler 编译器类
+  - AST 遍历 → 字节码指令序列
+  - 作用域管理 (局部变量槽位分配)
+  - 控制流跳转标签回填 (forward jump patching)
+  - 函数编译 (嵌套函数 → 独立字节码块)
+  - 闭包捕获 (upvalue 机制)
+- [x] 闭包与 Upvalue: Open→Closed upvalue 转换, 逃逸变量栈分配优化
+- [x] 模式匹配编译 (Match → 跳转表/二分搜索)
+- [x] 迭代器编译 (For → while + iterator protocol)
+- **实现文件**: bytecode_compiler.h + bytecode_compiler.cpp (~1123 行)
+- **设计参考**: Crafting Interpreters clox + Lua 5.x 编译器
+
+### 16. Claw 虚拟机 (ClawVM) 字节码解释器 ✅ 实现完成 (2026-04-18)
+- [x] 栈式虚拟机核心 (Stack-based VM)
+  - 值栈 (Value Stack) + 调用帧栈 (Call Frame Stack) ✅
+  - 指令派发循环 (dispatch loop) ✅
+  - 80+ 条指令完整实现 ✅
+- [x] 垃圾回收 (GC): Mark-Sweep 基础框架 ✅
+- [x] 内置函数库 (print, len, range, type, int, float, string, bool, input, panic, array) ✅
+- [x] 张量支持 (create, load, store, matmul, reshape) ✅
+- [x] 闭包与 Upvalue 机制 ✅
+- **实现文件**: vm/claw_vm.h + vm/claw_vm.cpp (~2200 行)
+- **设计参考**: Lua 5.x VM + CPython VM + Wren VM
+- **性能目标**: 比 AST 直译快 5-10 倍
+- **实际代码量**: ~2200 行
+
+### 17. Claw IR ↔ 字节码桥接层 🔄 设计完成，待实现
+- [ ] IR → Bytecode: SSA→栈式指令转换, 消除 PHI, BasicBlock→偏移量映射
+- [ ] Bytecode → IR 提升 (用于 JIT): 热点检测, 字节码块→IR 函数提升
+- [ ] 混合执行: 解释冷路径 + JIT 编译热路径
+- **预计代码量**: ~800 行
+
+### 18. 高性能 JIT 编译器 (Method JIT + Optimizing JIT) 🔄 设计完成，待实现
+- [ ] **Method JIT (基线编译器)**: 字节码→机器码 1:1 翻译, 快速编译(<1ms/函数), 类型反馈, 内联缓存(IC)
+- [ ] **Optimizing JIT (优化编译器)**: 类型特化, 内联, 逃逸分析→栈上分配, LICM, DCE, 常量折叠, 强度消减
+- [ ] **Tracing JIT (可选)**: 热循环检测→追踪记录→特化编译 (参考 LuaJIT trace compiler)
+- [ ] **JIT 基础设施**: Code Cache 管理, 去优化(Deoptimization), OSR(On-Stack Replacement), mmap+mprotect
+- **设计参考**: V8 TurboFan + LuaJIT + SpiderMonkey IonMonkey
+- **性能目标**: 比字节码解释快 10-50 倍, 达到 C/C++ 50-80% 性能
+- **预计代码量**: ~3000 行
+
+### 19. 多目标机器码生成 (x86-64 / ARM64 / RISC-V) 🔄 设计完成，待实现
+- [ ] **Machine Code Emitter**: 指令编码器, 可变/定长编码, 重定位
+- [ ] **x86-64 后端**: 寄存器分配(RAX-R15), 指令编码(MOV/ADD/SUB/IMUL/CMP/JMP/CALL/RET/LEA), SSE2/AVX, System V AMD64 ABI, PIC
+- [ ] **ARM64 后端**: 31 GPR(X0-X30)+SP, 指令编码(ADD/SUB/MUL/SDIV/LDR/STR/B/BL/RET), NEON/FP64, AAPCS64 ABI
+- [ ] **RISC-V 后端**: RV64I + M扩展(乘除) + F/D扩展(浮点), 指令编码(ADDI/ADD/SUB/MUL/DIV/LW/SW/BEQ/JAL/JALR), RISC-V ABI
+- [ ] **线性扫描寄存器分配器 (Linear Scan RA)**: 适合JIT的快速分配, 活跃区间分析, Coalescing + Spilling
+- **设计参考**: LLVM MC 层 + LuaJIT DynASM + libjit
+- **预计代码量**: ~3500 行 (x86:~1500, ARM64:~1000, RISC-V:~1000)
+
+### 20. 完整编译流水线 (多模式执行引擎) 🔄 设计完成，待实现
+- [ ] **解释模式**: AST 直译 (✅ 已实现 interpreter.h)
+- [ ] **字节码模式**: AST → Bytecode → ClawVM
+- [ ] **JIT 模式**: AST → Bytecode → (热点) → IR → 机器码
+- [ ] **AOT 模式**: AST → IR → LLVM IR → 机器码 (✅ 已部分实现 codegen/)
+- [ ] **CLI 参数**: `--interp` / `--bytecode` / `--jit` / `--aot`
+
+**编译流水线全景图**:
+```
+Claw 源码 → Lexer → Parser → AST
+       │
+       ├─[解释]→ Interpreter (✅已完成)
+       │
+       ├─[字节码]→ BytecodeCompiler → ClawVM
+       │
+       ├─[JIT]→ BytecodeCompiler → 热点检测 → IR Lifter
+       │         → JIT Optimizer → Machine Code Emitter
+       │                                    ↗ x86-64
+       │                                   → ARM64
+       │                                   → RISC-V
+       │
+       └─[AOT]→ IR Generator (✅) → IR Optimizer (✅)
+                  ├─[自研]→ Machine Code Emitter (同JIT共用)
+                  └─[LLVM]→ LLVM Codegen (✅) → LLVM Opt → 目标代码
+```
+- **预计代码量**: ~500 行 (流水线编排)
+
+---
+
 ## 后续计划
-1. 实现类型系统模块
-2. 实现语义分析 (类型检查、符号表)
-3. 实现中间代码生成
-4. 集成 LLVM 后端
+1. ~~实现类型系统模块~~ ✅
+2. ~~实现语义分析 (类型检查、符号表)~~ ✅
+3. ~~实现中间代码生成~~ ✅
+4. ~~集成 LLVM 后端~~ ✅ (部分)
 5. 添加测试用例
 6. 实现张量优化系统
 7. 集成 ML 驱动的自动调度
+8. **实现 Claw 字节码指令集 + ClawVM** (Phase 8, ~4700 行)
+9. **实现 JIT 编译器 + 多目标机器码生成** (Phase 9, ~6500 行)
+10. **完善多模式执行流水线** (Phase 10, ~500 行)
 
 ---
 

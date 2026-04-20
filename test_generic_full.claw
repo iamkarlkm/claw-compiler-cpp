@@ -1,0 +1,26 @@
+// Full test of generic functions
+fn create<T>(x: T) -> T {
+  return x;
+}
+
+fn swap<T, U>(a: T, b: U) -> (U, T) {
+  return (b, a);
+}
+
+fn nest<T>(x: (T, (T, T))) -> T {
+  let (first, _) = x;
+  return first;
+}
+
+fn array_of<T>(size: u32) -> Array<T> {
+  let arr: Array<T> = [1, 2, 3];
+  return arr;
+}
+
+fn result_ok<T>(x: T) -> Result<T, string> {
+  return Ok(x);
+}
+
+fn result_err<T, E>(e: E) -> Result<T, E> {
+  return Err(e);
+}

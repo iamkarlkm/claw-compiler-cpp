@@ -82,6 +82,7 @@ private:
     
     // Extended expression support
     llvm::Value* codegen_unary(ast::UnaryExpr* unary);
+    llvm::Value* codegen_tuple(ast::TupleExpr* tup);
     // NOTE: CompareExpr doesn't exist - comparisons handled as BinaryExpr
     // llvm::Value* codegen_compare(ast::CompareExpr* compare);
     

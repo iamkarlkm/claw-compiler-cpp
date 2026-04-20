@@ -77,6 +77,50 @@ claw-compiler/
         ├── codegen.h               # 代码生成
         └── runtime.h              # 运行时支持
     │
+    ├── === 待实现模块（字节码 VM + JIT + 机器码生成, 2026-04-17 新增）===
+    ├── bytecode/                    # 字节码系统
+    │   ├── bytecode.h              # 字节码指令集定义 (~60 条指令)
+    │   ├── bytecode_compiler.h     # AST → Bytecode 编译器
+    │   ├── bytecode_compiler.cpp   # 编译器实现
+    │   ├── constant_pool.h         # 常量池 (字符串/浮点/大整数)
+    │   └── bytecode_debug.h        # 调试信息 (行号表/变量名)
+    │
+    ├── vm/                          # Claw 虚拟机
+    │   ├── claw_vm.h               # ClawVM 主类 (栈式 VM)
+    │   ├── claw_vm.cpp             # VM 实现 (dispatch loop)
+    │   ├── value.h                 # 运行时值类型
+    │   ├── call_frame.h            # 调用帧
+    │   ├── gc.h                    # 垃圾回收 (Mark-Sweep/分代)
+    │   ├── gc.cpp                  # GC 实现
+    │   ├── builtins.h              # 内置函数库
+    │   └── ffi.h                   # C FFI 接口
+    │
+    ├── jit/                         # JIT 编译器
+    │   ├── jit_compiler.h          # JIT 主类 (Method JIT + Optimizing JIT)
+    │   ├── jit_compiler.cpp        # JIT 实现
+    │   ├── type_profiler.h         # 类型反馈收集器
+    │   ├── inline_cache.h          # 内联缓存 (IC)
+    │   ├── hot_spot.h              # 热点检测器
+    │   ├── ir_lifter.h             # Bytecode → IR 提升器
+    │   ├── jit_optimizer.h         # JIT 优化 Pass (内联/逃逸分析/LICM)
+    │   ├── deopt.h                 # 去优化 (回退到解释器)
+    │   └── osr.h                   # On-Stack Replacement
+    │
+    ├── emitter/                     # 机器码发射器 (多目标)
+    │   ├── emitter.h               # 通用发射器接口
+    │   ├── x86_64_emitter.h        # x86-64 指令编码
+    │   ├── x86_64_emitter.cpp      # x86-64 实现
+    │   ├── arm64_emitter.h         # ARM64/AArch64 指令编码
+    │   ├── arm64_emitter.cpp       # ARM64 实现
+    │   ├── riscv_emitter.h         # RISC-V 指令编码
+    │   ├── riscv_emitter.cpp       # RISC-V 实现
+    │   ├── reg_alloc.h             # 线性扫描寄存器分配器
+    │   └── reg_alloc.cpp           # 寄存器分配实现
+    │
+    └── pipeline/                    # 多模式执行流水线
+        ├── execution_engine.h      # 执行引擎 (模式选择)
+        └── execution_engine.cpp    # 流水线编排
+    │
     ├── === 测试文件 ===
     ├── test_simple.cpp                # 简单测试
     ├── test_parser.cpp                # Parser 测试

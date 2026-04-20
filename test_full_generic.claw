@@ -1,0 +1,24 @@
+// Full feature test - generic functions with complex types
+fn create<T>(x: T) -> T {
+  return x;
+}
+
+fn swap<T>(a: T, b: T) -> (T, T) {
+  return (a, b);
+}
+
+fn pair<T, U>(a: T, b: U) -> (U, T) {
+  return (b, a);
+}
+
+fn nested<T, U, V>(x: (T, (U, V))) -> V {
+  return x;
+}
+
+fn with_array<T>(arr: Array<T>) -> u32 {
+  return 1;
+}
+
+fn with_result<T>(x: Result<T, string>) -> T {
+  return x;
+}

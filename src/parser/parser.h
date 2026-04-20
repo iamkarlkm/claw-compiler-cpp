@@ -287,6 +287,43 @@ inline std::unique_ptr<ast::Statement> Parser::parse_function_declaration(bool i
     advance(); // consume function name
     fn->set_name(previous().text);
     
+    // Parse optional generic type parameters: fn foo<T, U>(...) -> ...
+    if (check(TokenType::Op_lt)) {
+        advance(); // consume '<'
+        
+        std::vector<std::string> type_params;
+        while (!check(TokenType::Op_gt) && !is_at_end()) {
+            if (check(TokenType::Identifier)) {
+                advance();
+                type_params.push_back(previous().text);
+                
+                if (check(TokenType::Comma)) {
+                    advance(); // consume ','
+                } else if (!check(TokenType::Op_gt)) {
+                    if (reporter) {
+                        reporter->error("Expected ',' or '>' in type parameters", span_from(peek()), "P010");
+                    }
+                    break;
+                }
+            } else {
+                if (reporter) {
+                    reporter->error("Expected type parameter name", span_from(peek()), "P011");
+                }
+                break;
+            }
+        }
+        
+        if (!check(TokenType::Op_gt)) {
+            if (reporter) {
+                reporter->error("Expected '>' to close type parameters", span_from(peek()), "P012");
+            }
+        } else {
+            advance(); // consume '>'
+        }
+        
+        fn->set_type_params(type_params);
+    }
+    
     // Parse parameters
     if (!check(TokenType::LParen)) {
         if (reporter) {
@@ -556,6 +593,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_let_statement() {
     
     auto let = std::make_unique<ast::LetStmt>("", span_from(previous()));
     
+    // Skip optional mut modifier
+    if (check(TokenType::Kw_mut)) {
+        advance(); // consume 'mut'
+    }
+    
     // Get variable name
     if (!check(TokenType::Identifier)) {
         if (reporter) {
@@ -668,18 +710,17 @@ inline std::unique_ptr<ast::Statement> Parser::parse_match_statement() {
         std::unique_ptr<ast::ASTNode> body;
         if (check(TokenType::LBrace)) {
             body = parse_block();
-        } else if (check(TokenType::Identifier) || check_any({TokenType::IntegerLiteral,
-            TokenType::StringLiteral, TokenType::Kw_true, TokenType::Kw_false})) {
-            // Single expression case
-            body = parse_expression();
         } else {
-            if (reporter) {
-                reporter->error("Expected case body", span_from(peek()), "P018");
-            }
-            break;
+            // Single expression case - parse any expression
+            body = parse_expression();
         }
         
         match_stmt->add_case(std::move(pattern), std::move(body));
+        
+        // Consume optional semicolon
+        if (check(TokenType::Semicolon)) {
+            advance();
+        }
         
         // Check for comma or next case
         if (check(TokenType::Comma)) {
@@ -1187,6 +1228,85 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
 inline std::string Parser::parse_type() {
     std::string type;
 
+    // Check for tensor type: tensor<T, [N, M]>
+    // Note: We need to peek at the current token first, not previous
+    if (check(TokenType::Identifier) && peek().text == "tensor") {
+        advance(); // consume 'tensor'
+        
+        if (!check(TokenType::Op_lt)) {
+            if (reporter) {
+                reporter->error("Expected '<' after tensor", span_from(peek()), "P040");
+            }
+            return "tensor";
+        }
+        advance(); // consume '<'
+        
+        type = "tensor<";
+        
+        // Parse element type
+        type += parse_type();
+        
+        if (!check(TokenType::Comma)) {
+            if (reporter) {
+                reporter->error("Expected ',' after tensor element type", span_from(peek()), "P041");
+            }
+            return type + ">";
+        }
+        type += ", ";
+        advance(); // consume ','
+        
+        // Parse dimensions: [N, M]
+        if (!check(TokenType::LBracket)) {
+            if (reporter) {
+                reporter->error("Expected '[' for tensor dimensions", span_from(peek()), "P042");
+            }
+            return type + ">";
+        }
+        type += "[";
+        advance(); // consume '['
+        
+        while (!check(TokenType::RBracket) && !is_at_end()) {
+            // Parse dimension (integer or identifier)
+            if (check(TokenType::IntegerLiteral)) {
+                type += previous().text;
+                advance();
+            } else if (check(TokenType::Identifier)) {
+                type += previous().text;
+                advance();
+            } else {
+                if (reporter) {
+                    reporter->error("Expected dimension expression", span_from(peek()), "P043");
+                }
+                break;
+            }
+            
+            if (check(TokenType::Comma)) {
+                type += ", ";
+                advance();
+            }
+        }
+        
+        if (!check(TokenType::RBracket)) {
+            if (reporter) {
+                reporter->error("Expected ']' after tensor dimensions", span_from(peek()), "P040");
+            }
+            return type;
+        }
+        type += "]";
+        advance(); // consume ']'
+        
+        if (!check(TokenType::Op_gt)) {
+            if (reporter) {
+                reporter->error("Expected '>' to close tensor type", span_from(peek()), "P041");
+            }
+            return type;
+        }
+        type += ">";
+        advance(); // consume '>'
+        
+        return type;
+    }
+
     // Check if next token is a basic type keyword
     if (match(TokenType::Type_u8)) {
         type = "u8";
@@ -1218,27 +1338,74 @@ inline std::string Parser::parse_type() {
         type = "char";
     } else if (match(TokenType::Type_byte)) {
         type = "byte";
-    } else if (check(TokenType::Identifier)) {
-        // User-defined type
-        type = previous().text;
-
-        // Check for generic parameters
+    } else if (match(TokenType::Kw_result)) {
+        // Handle Result<T, E> type - it's a keyword not an identifier
+        type = "Result";
         if (check(TokenType::Op_lt)) {
             type += "<";
-            advance();
-            
-            while (!check(TokenType::Op_gt) && !is_at_end()) {
+            advance(); // consume '<'
+            type += parse_type();
+            while (check(TokenType::Comma)) {
+                type += ", ";
+                advance(); // consume ','
                 type += parse_type();
-                if (check(TokenType::Comma)) {
-                    type += ", ";
-                    advance();
-                }
+            }
+            if (check(TokenType::Op_gt)) {
+                type += ">";
+                advance(); // consume '>'
+            }
+        }
+    } else if (check(TokenType::Identifier)) {
+        // User-defined type - must advance first to make previous() work correctly
+        advance(); // consume the identifier
+        type = previous().text;
+
+        // Check for generic parameters like Array<T> or Result<T, E>
+        if (check(TokenType::Op_lt)) {
+            type += "<";
+            advance(); // consume '<'
+            
+            // Parse first type parameter
+            type += parse_type();
+            
+            // Parse additional type parameters (for Result<T, E>)
+            while (check(TokenType::Comma)) {
+                type += ", ";
+                advance(); // consume ','
+                type += parse_type();
             }
             
             if (check(TokenType::Op_gt)) {
                 type += ">";
-                advance();
+                advance(); // consume '>'
+            } else if (reporter) {
+                reporter->error("Expected '>' to close generic type", span_from(peek()), "P045");
             }
+        }
+    } else if (check(TokenType::LParen)) {
+        // Handle tuple type: (T, U, V)
+        advance(); // consume '('
+        type = "(";
+        
+        // Parse first element type
+        if (!check(TokenType::RParen)) {
+            type += parse_type();
+            
+            // Parse additional element types
+            while (check(TokenType::Comma)) {
+                type += ", ";
+                advance(); // consume ','
+                type += parse_type();
+            }
+        }
+        
+        if (!check(TokenType::RParen)) {
+            if (reporter) {
+                reporter->error("Expected ')' in tuple type", span_from(peek()), "P047");
+            }
+        } else {
+            advance(); // consume ')'
+            type += ")";
         }
     } else {
         // Try to parse array type
@@ -1331,8 +1498,8 @@ inline std::unique_ptr<ast::Expression> Parser::parse_or() {
     auto left = parse_and();
     
     while (check(TokenType::Op_or)) {
-        auto op = previous().type;
         advance();
+        auto op = TokenType::Op_or;
         auto right = parse_and();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
                                                   span_from(previous()));
@@ -1345,8 +1512,8 @@ inline std::unique_ptr<ast::Expression> Parser::parse_and() {
     auto left = parse_bitwise_or();
     
     while (check(TokenType::Op_and)) {
-        auto op = previous().type;
         advance();
+        auto op = TokenType::Op_and;
         auto right = parse_bitwise_or();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
                                                   span_from(previous()));
@@ -1359,7 +1526,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_bitwise_or() {
     auto left = parse_bitwise_xor();
     
     while (check(TokenType::Op_pipe)) {
-        auto op = previous().type;
+        auto op = peek().type;
         advance();
         auto right = parse_bitwise_xor();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
@@ -1373,7 +1540,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_bitwise_xor() {
     auto left = parse_bitwise_and();
     
     while (check(TokenType::Op_caret)) {
-        auto op = previous().type;
+        auto op = peek().type;
         advance();
         auto right = parse_bitwise_and();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
@@ -1387,7 +1554,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_bitwise_and() {
     auto left = parse_equality();
     
     while (check(TokenType::Op_amp)) {
-        auto op = previous().type;
+        auto op = peek().type;
         advance();
         auto right = parse_equality();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
@@ -1401,8 +1568,8 @@ inline std::unique_ptr<ast::Expression> Parser::parse_equality() {
     auto left = parse_comparison();
 
     while (check_any({TokenType::Op_eq, TokenType::Op_neq})) {
+        auto op = peek().type;  // Get the operator type
         advance();  // Consume == or !=
-        auto op = previous().type;  // Get the operator type
         auto right = parse_comparison();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
                                                   span_from(previous()));
@@ -1416,8 +1583,8 @@ inline std::unique_ptr<ast::Expression> Parser::parse_comparison() {
 
     while (check_any({TokenType::Op_lt, TokenType::Op_gt,
                      TokenType::Op_lte, TokenType::Op_gte})) {
+        auto op = peek().type;  // Get the operator type
         advance();  // Consume the comparison operator
-        auto op = previous().type;  // Get the operator type
         auto right = parse_range();
         left = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right),
                                                   span_from(previous()));
@@ -1473,7 +1640,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_factor() {
 
 inline std::unique_ptr<ast::Expression> Parser::parse_unary() {
     if (check_any({TokenType::Op_bang, TokenType::Op_minus, TokenType::Op_amp, TokenType::Op_star})) {
-        auto op = previous().type;
+        auto op = peek().type;
         advance();
         auto operand = parse_unary();
         
@@ -1525,22 +1692,38 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
                 break;
             }
 
-            // Member access
+            // Member access or tuple index (tuple.0, tuple.1, etc.)
             advance(); // consume '.'
+            
+            std::string member;
+            SourceSpan member_span = span_from(previous());  // span of '.'
 
-            if (!check(TokenType::Identifier)) {
+            // After consuming '.', current is now the member/index token
+            // peek() returns the current token (the member/index)
+            if (check(TokenType::Identifier)) {
+                // Regular member access: obj.field
+                member = peek().text;  // Get the identifier text
+                advance();  // consume the identifier
+            } else if (check(TokenType::IntegerLiteral)) {
+                // Tuple index: tuple.0, tuple.1
+                // Convert to internal format: __tuple_index_0, __tuple_index_1, etc.
+                try {
+                    size_t idx = std::stoull(peek().text);
+                    member = "__tuple_index_" + std::to_string(idx);
+                } catch (...) {
+                    member = peek().text;
+                }
+                advance();  // consume the integer
+            } else {
                 if (reporter) {
-                    reporter->error("Expected member name", span_from(peek()), "P041");
+                    reporter->error("Expected member name or tuple index", span_from(peek()), "P041");
                 }
                 break;
             }
             
-            std::string member = previous().text;
-            advance();
-            
             expr = std::make_unique<ast::MemberExpr>(
                 std::move(expr), member,
-                span_from(previous())
+                member_span
             );
         } else if (check(TokenType::LParen)) {
             // Function call
@@ -1633,6 +1816,39 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return std::make_unique<ast::IdentifierExpr>("<error>", span_from(tok));
     }
     
+    // Array literal [a, b, c]
+    if (check(TokenType::LBracket)) {
+        advance(); // consume '['
+        
+        // Check for empty array: []
+        if (check(TokenType::RBracket)) {
+            advance(); // consume ']'
+            return std::make_unique<ast::ArrayExpr>(
+                std::vector<std::unique_ptr<ast::Expression>>{},
+                span_from(previous())
+            );
+        }
+        
+        std::vector<std::unique_ptr<ast::Expression>> elements;
+        elements.push_back(parse_expression());
+        
+        while (check(TokenType::Comma)) {
+            advance(); // consume ','
+            if (check(TokenType::RBracket)) break; // trailing comma
+            elements.push_back(parse_expression());
+        }
+        
+        if (!check(TokenType::RBracket)) {
+            if (reporter) {
+                reporter->error("Expected ']' after array elements", span_from(peek()), "P050");
+            }
+        } else {
+            advance(); // consume ']'
+        }
+        
+        return std::make_unique<ast::ArrayExpr>(std::move(elements), span_from(previous()));
+    }
+    
     // Identifier
     if (check(TokenType::Identifier)) {
         advance();  // consume identifier first
@@ -1640,10 +1856,37 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return std::make_unique<ast::IdentifierExpr>(name, span_from(previous()));
     }
     
-    // Parenthesized expression
+    // Parenthesized expression - also handles tuples like (1, 2)
     if (check(TokenType::LParen)) {
         advance();
-        auto expr = parse_expression();
+        
+        // Check for empty tuple: ()
+        if (check(TokenType::RParen)) {
+            advance(); // consume ')'
+            // Return empty tuple
+            return std::make_unique<ast::TupleExpr>(
+                std::vector<std::unique_ptr<ast::Expression>>{},
+                span_from(previous())
+            );
+        }
+        
+        // Parse first expression
+        auto first = parse_expression();
+        std::vector<std::unique_ptr<ast::Expression>> elements;
+        elements.push_back(std::move(first));
+        
+        // Check for tuple: (expr, expr, ...)
+        while (check(TokenType::Comma)) {
+            advance(); // consume ','
+            
+            // Check for trailing comma: (expr,)
+            if (check(TokenType::RParen)) {
+                break;
+            }
+            
+            auto next_elem = parse_expression();
+            elements.push_back(std::move(next_elem));
+        }
         
         if (!check(TokenType::RParen)) {
             if (reporter) {
@@ -1653,7 +1896,13 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
             advance(); // consume ')'
         }
         
-        return expr;
+        // If single element in parens, return just the expression
+        // Otherwise, create a tuple
+        if (elements.size() == 1) {
+            return std::move(elements[0]);
+        }
+        
+        return std::make_unique<ast::TupleExpr>(std::move(elements), span_from(previous()));
     }
     
     // Error

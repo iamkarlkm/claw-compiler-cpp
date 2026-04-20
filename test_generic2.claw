@@ -1,0 +1,23 @@
+// Test generic function declarations
+fn create_array<T>(size: u32) -> T {
+  let x: T = size;
+  return x;
+}
+
+fn identity<T>(x: T) -> T {
+  return x;
+}
+
+fn make_pair<T, U>(a: T, b: U) -> (T, U) {
+  return (a, b);
+}
+
+fn swap<T, U>(pair: (T, U)) -> (U, T) {
+  let (a, b) = pair;
+  return (b, a);
+}
+
+fn first<T, U>(pair: (T, U)) -> T {
+  let (a, _) = pair;
+  return a;
+}

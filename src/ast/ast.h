@@ -27,6 +27,11 @@ public:
     
     virtual std::string to_string() const = 0;
     
+    // Clone AST node - default returns nullptr (not all nodes are cloneable)
+    virtual std::unique_ptr<ASTNode> clone() const {
+        return nullptr;
+    }
+    
     // Accept visitor
     template<typename Visitor>
     auto accept(Visitor& visitor) -> decltype(auto) {
@@ -247,6 +252,69 @@ private:
     std::unique_ptr<Expression> object_;
     std::unique_ptr<Expression> start_;
     std::unique_ptr<Expression> end_;
+};
+
+// Tuple expression: (expr1, expr2, expr3)
+class TupleExpr : public Expression {
+public:
+    TupleExpr(std::vector<std::unique_ptr<Expression>> elements,
+              const SourceSpan& span)
+        : Expression(Kind::Tuple, span), elements_(std::move(elements)) {}
+    
+    const auto& get_elements() const { return elements_; }
+    size_t size() const { return elements_.size(); }
+    Expression* get_element(size_t i) const { 
+        return i < elements_.size() ? elements_[i].get() : nullptr; 
+    }
+    
+    std::string to_string() const override {
+        std::string s = "(";
+        for (size_t i = 0; i < elements_.size(); i++) {
+            if (i > 0) s += ", ";
+            s += elements_[i]->to_string();
+        }
+        s += ")";
+        return s;
+    }
+    
+    std::unique_ptr<ASTNode> clone() const override {
+        // Clone not needed for this task
+        return nullptr;
+    }
+    
+private:
+    std::vector<std::unique_ptr<Expression>> elements_;
+};
+
+// Array literal expression [a, b, c]
+class ArrayExpr : public Expression {
+public:
+    ArrayExpr(std::vector<std::unique_ptr<Expression>> elements,
+              const SourceSpan& span)
+        : Expression(Kind::Array, span), elements_(std::move(elements)) {}
+    
+    const auto& get_elements() const { return elements_; }
+    size_t size() const { return elements_.size(); }
+    Expression* get_element(size_t i) const {
+        return i < elements_.size() ? elements_[i].get() : nullptr;
+    }
+    
+    std::string to_string() const override {
+        std::string s = "[";
+        for (size_t i = 0; i < elements_.size(); i++) {
+            if (i > 0) s += ", ";
+            s += elements_[i]->to_string();
+        }
+        s += "]";
+        return s;
+    }
+    
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+    
+private:
+    std::vector<std::unique_ptr<Expression>> elements_;
 };
 
 // Member access expression (expr.member)
@@ -572,6 +640,14 @@ public:
     
     void set_name(const std::string& name) { name_ = name; }
     
+    // Generic type parameters support (e.g., fn foo<T>(x: T) -> T)
+    void set_type_params(std::vector<std::string> type_params) {
+        type_params_ = std::move(type_params);
+    }
+    void add_type_param(const std::string& param) {
+        type_params_.push_back(param);
+    }
+    
     void set_params(std::vector<std::pair<std::string, std::string>> params) {
         params_ = std::move(params);
     }
@@ -581,16 +657,28 @@ public:
     void set_is_async(bool is_async) { is_async_ = is_async; }
     
     const std::string& get_name() const { return name_; }
+    const auto& get_type_params() const { return type_params_; }
     const auto& get_params() const { return params_; }
     const std::string& get_return_type() const { return return_type_; }
     ASTNode* get_body() const { return body_.get(); }
     bool is_serial() const { return is_serial_; }
     bool is_async() const { return is_async_; }
+    bool has_type_params() const { return !type_params_.empty(); }
     
     std::string to_string() const override {
         std::string result = std::string(is_serial_ ? "serial " : "") + 
                             std::string(is_async_ ? "async " : "") +
-                            "fn " + name_ + "(";
+                            "fn " + name_;
+        // Add type parameters if present
+        if (!type_params_.empty()) {
+            result += "<";
+            for (size_t i = 0; i < type_params_.size(); i++) {
+                result += type_params_[i];
+                if (i < type_params_.size() - 1) result += ", ";
+            }
+            result += ">";
+        }
+        result += "(";
         for (size_t i = 0; i < params_.size(); i++) {
             result += params_[i].first + ": " + params_[i].second;
             if (i < params_.size() - 1) result += ", ";
@@ -603,6 +691,7 @@ public:
     
 private:
     std::string name_;
+    std::vector<std::string> type_params_;  // Generic type parameters (e.g., T, U)
     std::vector<std::pair<std::string, std::string>> params_;
     std::string return_type_;
     std::unique_ptr<ASTNode> body_;

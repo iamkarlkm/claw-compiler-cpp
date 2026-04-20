@@ -1,0 +1,6 @@
+fn foo() -> u32 {
+  return 1;
+}
+fn bar() -> (u32) {
+  return 1;
+}

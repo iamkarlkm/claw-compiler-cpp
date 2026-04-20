@@ -1,0 +1,13 @@
+// Test generic functions with tuple return type
+fn make_pair<T, U>(a: T, b: U) -> (T, U) {
+  let x = a;
+  return x;
+}
+
+fn identity<T>(x: T) -> T {
+  return x;
+}
+
+fn get_first<T>(x: (T, u32)) -> T {
+  return x;
+}

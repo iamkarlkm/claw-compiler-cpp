@@ -441,6 +441,8 @@ Value* CodeGenerator::codegen_expression(ast::Expression* expr) {
             return codegen_call(static_cast<ast::CallExpr*>(expr));
         case ast::Expression::Kind::Index:
             return codegen_index(static_cast<ast::IndexExpr*>(expr));
+        case ast::Expression::Kind::Tuple:
+            return codegen_tuple(static_cast<ast::TupleExpr*>(expr));
         default:
             return nullptr;
     }
@@ -700,6 +702,16 @@ Value* CodeGenerator::get_element_ptr(Value* array, Value* index, Type* element_
     // For single-element allocations (u32[1]), just return the pointer directly
     // No need for GEP - the alloca IS the element
     return array;
+}
+
+// Generate code for tuple expression
+Value* CodeGenerator::codegen_tuple(ast::TupleExpr* tup) {
+    // For now, return the first element as placeholder
+    // Full tuple codegen requires struct type support
+    if (tup->size() > 0) {
+        return codegen_expression(tup->get_element(0));
+    }
+    return ConstantInt::get(Type::getInt32Ty(context_), 0);
 }
 
 // Generate code for for loop

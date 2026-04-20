@@ -675,6 +675,7 @@ public:
     bool break_flag = false;
     bool continue_flag = false;
     Value return_value;
+    bool return_flag = false;
     claw::ast::Program* current_program = nullptr;
 
     // Variable stack for function calls
@@ -724,10 +725,19 @@ public:
         // Push new variable scope
         variable_stack.push_back(std::map<std::string, RuntimeValue>());
 
-        // Bind parameters
+        // Bind parameters — save old values to restore after recursion
+        std::vector<std::pair<std::string, RuntimeValue>> saved_vars;
         const auto& params = fn->get_params();
         for (size_t i = 0; i < params.size() && i < args.size(); i++) {
             std::string param_name = params[i].first;
+            // Save old value
+            RuntimeValue* old = runtime.get_var(param_name);
+            if (old) {
+                saved_vars.push_back({param_name, *old});
+            } else {
+                saved_vars.push_back({param_name, RuntimeValue{}});
+            }
+            // Set new value
             RuntimeValue param_val;
             param_val.type_name = params[i].second;
             param_val.size = 1;
@@ -735,19 +745,35 @@ public:
             runtime.set_var(param_name, param_val);
         }
 
-        // Reset return value
+        // Save caller's return state (fixes recursive call clobbering)
+        Value saved_return_value = return_value;
+        bool saved_return_flag = return_flag;
+
+        // Reset return state for this frame
         return_value = Value();
+        return_flag = false;
 
         // Execute function body
         if (fn->get_body()) {
             execute_block(fn->get_body());
         }
 
+        // Capture this frame's return value
+        Value result = return_value;
+
         // Pop variable scope
         variable_stack.pop_back();
 
-        // Return the return value
-        return return_value;
+        // Restore caller's variables (fixes recursive param clobbering)
+        for (auto& [name, val] : saved_vars) {
+            runtime.set_var(name, val);
+        }
+
+        // Restore caller's return state
+        return_flag = saved_return_flag;
+        return_value = saved_return_value;
+
+        return result;
     }
 
     // Execute a block
@@ -759,7 +785,7 @@ public:
             auto* block = static_cast<claw::ast::BlockStmt*>(node);
             for (const auto& stmt : block->get_statements()) {
                 execute_statement(stmt.get());
-                if (break_flag || continue_flag) break;
+                if (break_flag || continue_flag || return_flag) break;
             }
         }
     }
@@ -830,6 +856,7 @@ public:
                 } else {
                     return_value = Value();
                 }
+                return_flag = true;
                 break;
             }
             case claw::ast::Statement::Kind::Publish: {
@@ -1035,6 +1062,7 @@ public:
                     // Execute loop body
                     execute_block(for_stmt->get_body());
 
+                    if (return_flag) break;
                     if (break_flag) {
                         break_flag = false;
                         break;
@@ -1051,74 +1079,6 @@ public:
         // Support array/tensor iteration
         Value arr_val = evaluate(iterable);
         
-        // RuntimeValue is not in variant, handle iteration differently
-        // Check if it's a scalar value that can be iterated
-            
-            if (arr.size > 1 && !arr.array.empty()) {
-                // It's an array: iterate over elements
-                for (size_t idx = 0; idx < arr.array.size(); idx++) {
-                    RuntimeValue loop_var = arr.array[idx];
-                    // Convert 0-based to 1-based index for Claw semantics
-                    loop_var.scalar = static_cast<int64_t>(idx + 1);
-                    runtime.set_var(var_name, loop_var);
-                    
-                    execute_block(for_stmt->get_body());
-                    
-                    if (break_flag) {
-                        break_flag = false;
-                        break;
-                    }
-                    if (continue_flag) {
-                        continue_flag = false;
-                        continue;
-                    }
-                }
-                return;
-            } else if (arr.size == 1) {
-                // Single element: iterate once
-                RuntimeValue loop_var = arr;
-                loop_var.scalar = 1;
-                runtime.set_var(var_name, loop_var);
-                execute_block(for_stmt->get_body());
-                return;
-            }
-        }
-        
-        // Handle vector iteration (std::vector<Value>)
-        if (std::holds_alternative<std::vector<Value>>(arr_val)) {
-            auto vec = std::get<std::vector<Value>>(arr_val);
-            for (size_t idx = 0; idx < vec.size(); idx++) {
-                const auto& elem = vec[idx];
-                RuntimeValue loop_var;
-                loop_var.type_name = "unknown";
-                loop_var.size = 1;
-                
-                // Extract scalar from variant
-                if (std::holds_alternative<int64_t>(elem)) {
-                    loop_var.scalar = std::get<int64_t>(elem);
-                } else if (std::holds_alternative<double>(elem)) {
-                    loop_var.scalar = static_cast<int64_t>(std::get<double>(elem));
-                } else if (std::holds_alternative<bool>(elem)) {
-                    loop_var.scalar = std::get<bool>(elem) ? 1 : 0;
-                } else {
-                    loop_var.scalar = 0;
-                }
-                
-                runtime.set_var(var_name, loop_var);
-                execute_block(for_stmt->get_body());
-                
-                if (break_flag) {
-                    break_flag = false;
-                    break;
-                }
-                if (continue_flag) {
-                    continue_flag = false;
-                    continue;
-                }
-            }
-            return;
-        }
-        
         // Handle string iteration (character by character)
         if (std::holds_alternative<std::string>(arr_val)) {
             auto str = std::get<std::string>(arr_val);
@@ -1130,6 +1090,8 @@ public:
                 runtime.set_var(var_name, loop_var);
                 
                 execute_block(for_stmt->get_body());
+                
+                if (return_flag) break;
                 
                 if (break_flag) {
                     break_flag = false;
@@ -1160,6 +1122,8 @@ public:
 
             // Execute loop body
             execute_block(while_stmt->get_body());
+
+            if (return_flag) break;
 
             if (break_flag) {
                 break_flag = false;

@@ -1,0 +1,8 @@
+fn create_array<T>(size: u32) -> T {
+  let x: T = size;
+  return x;
+}
+
+fn identity<T>(x: T) -> T {
+  return x;
+}

@@ -1,0 +1,12 @@
+fn make_pair<T, U>(a: T, b: U) -> (T, U) {
+  return (a, b);
+}
+
+fn identity<T>(x: T) -> T {
+  return x;
+}
+
+fn first<T, U>(pair: (T, U)) -> T {
+  let (a, b) = pair;
+  return a;
+}
