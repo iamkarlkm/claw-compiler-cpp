@@ -678,10 +678,27 @@ public:
     bool return_flag = false;
     claw::ast::Program* current_program = nullptr;
 
-    // Variable stack for function calls (scoped variable lookup)
+    // Variable stack — every {block} pushes a frame, } pops it.
+    // Function calls also push a frame for params + locals.
+    // Only top-level const/global declarations live outside the stack.
     std::vector<std::map<std::string, RuntimeValue>> variable_stack;
 
-    // Scoped variable set: write to topmost stack frame, or global if no frame
+    // Push a new scope (called for every block entry)
+    void push_scope() { variable_stack.emplace_back(); }
+
+    // Pop scope — local variables (including heap-allocated arrays/tensors) die here
+    void pop_scope() {
+        if (variable_stack.empty()) return;
+        auto& frame = variable_stack.back();
+        // RAII: free heap allocations owned by this frame
+        for (auto& [name, val] : frame) {
+            // Shared_ptr tensors auto-decrement refcount; arrays are inline
+            if (val.tensor) val.tensor.reset();
+        }
+        variable_stack.pop_back();
+    }
+
+    // Scoped set: write to topmost stack frame, or global if no frame
     void scoped_set(const std::string& name, const RuntimeValue& value) {
         if (!variable_stack.empty()) {
             variable_stack.back()[name] = value;
@@ -690,7 +707,7 @@ public:
         }
     }
 
-    // Scoped variable get: search from innermost frame outward, then global
+    // Scoped get: search from innermost frame outward, then global
     RuntimeValue* scoped_get(const std::string& name) {
         for (int i = static_cast<int>(variable_stack.size()) - 1; i >= 0; i--) {
             auto it = variable_stack[i].find(name);
@@ -780,9 +797,11 @@ public:
         return result;
     }
 
-    // Execute a block
+    // Execute a block — each block gets its own scope
     void execute_block(claw::ast::ASTNode* node) {
         if (!node) return;
+
+        push_scope();
 
         auto kind = static_cast<const claw::ast::Statement*>(node)->get_kind();
         if (kind == claw::ast::Statement::Kind::Block) {
@@ -792,6 +811,8 @@ public:
                 if (break_flag || continue_flag || return_flag) break;
             }
         }
+
+        pop_scope();
     }
 
     // Execute a statement
