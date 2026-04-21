@@ -398,6 +398,8 @@ public:
         Subscribe,
         SerialProcess,
         Const,
+        Try,
+        Throw,
     };
     
     Statement(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -613,6 +615,71 @@ public:
     std::string to_string() const override {
         if (value_) return "return " + value_->to_string() + ";";
         return "return;";
+    }
+    
+private:
+    std::unique_ptr<Expression> value_;
+};
+
+// Catch clause for try statement
+class CatchClause : public ASTNode {
+public:
+    CatchClause(const std::string& name, const std::string& type_name, 
+                std::unique_ptr<Statement> body, const SourceSpan& span)
+        : name_(name), type_name_(type_name), body_(std::move(body)), span_(span) {}
+    
+    const std::string& get_name() const { return name_; }
+    const std::string& get_type_name() const { return type_name_; }
+    Statement* get_body() const { return body_.get(); }
+    const SourceSpan& get_span() const { return span_; }
+    
+    std::string to_string() const override {
+        return "catch " + name_ + ": " + type_name_ + " " + body_->to_string();
+    }
+    
+private:
+    std::string name_;
+    std::string type_name_;
+    std::unique_ptr<Statement> body_;
+    SourceSpan span_;
+};
+
+// Try statement with catch clauses
+class TryStmt : public Statement {
+public:
+    TryStmt(const SourceSpan& span) : Statement(Kind::Try, span) {}
+    
+    void set_body(std::unique_ptr<Statement> body) { body_ = std::move(body); }
+    Statement* get_body() const { return body_.get(); }
+    
+    void add_catch(std::unique_ptr<CatchClause> clause) {
+        catches_.push_back(std::move(clause));
+    }
+    const std::vector<std::unique_ptr<CatchClause>>& get_catches() const { return catches_; }
+    
+    std::string to_string() const override {
+        std::string result = "try " + body_->to_string();
+        for (const auto& c : catches_) {
+            result += " " + c->to_string();
+        }
+        return result;
+    }
+    
+private:
+    std::unique_ptr<Statement> body_;
+    std::vector<std::unique_ptr<CatchClause>> catches_;
+};
+
+// Throw statement
+class ThrowStmt : public Statement {
+public:
+    ThrowStmt(std::unique_ptr<Expression> value, const SourceSpan& span)
+        : Statement(Kind::Throw, span), value_(std::move(value)) {}
+    
+    Expression* get_value() const { return value_.get(); }
+    
+    std::string to_string() const override {
+        return "throw " + value_->to_string() + ";";
     }
     
 private:

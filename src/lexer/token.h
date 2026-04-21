@@ -63,6 +63,9 @@ enum class TokenType {
     Kw_const,
     Kw_self,
     Kw_super,
+    Kw_try,
+    Kw_catch,
+    Kw_throw,
     
     // Built-in types
     Type_u8, Type_u16, Type_u32, Type_u64, Type_usize,
@@ -277,6 +280,9 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::Op_range_eq: return "..=";
         case TokenType::Semicolon: return ";";
         case TokenType::Colon: return ":";
+        case TokenType::Kw_try: return "try";
+        case TokenType::Kw_catch: return "catch";
+        case TokenType::Kw_throw: return "throw";
         
         default: return "unknown";
     }
@@ -284,7 +290,7 @@ inline const char* token_type_to_string(TokenType type) {
 
 // Implementation of Token helper methods
 inline bool Token::is_keyword() const {
-    return type >= TokenType::Kw_name && type <= TokenType::Kw_self;
+    return type >= TokenType::Kw_name && type <= TokenType::Kw_throw;
 }
 
 inline bool Token::is_literal() const {

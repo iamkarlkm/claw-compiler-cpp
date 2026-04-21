@@ -706,6 +706,9 @@ inline void KeywordMap::init() {
     keywords["const"] = TokenType::Kw_const;
     keywords["self"] = TokenType::Kw_self;
     keywords["super"] = TokenType::Kw_super;
+    keywords["try"] = TokenType::Kw_try;
+    keywords["catch"] = TokenType::Kw_catch;
+    keywords["throw"] = TokenType::Kw_throw;
 }
 
 inline TokenType KeywordMap::lookup(const std::string& text) {
