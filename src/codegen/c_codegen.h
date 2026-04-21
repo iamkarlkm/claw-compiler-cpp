@@ -799,10 +799,14 @@ private:
         const auto& catches = try_stmt->get_catches();
         if (!catches.empty()) {
             const auto& clause = catches[0];
-            code_ << "        // [claw] catch " << clause->get_name() 
-                  << ": " << clause->get_type_name() << "\n";
-            code_ << "        ClawValue " << clause->get_name() 
-                  << " = claw_try_" << try_id << "_err;\n";
+            if (clause->is_catch_all()) {
+                code_ << "        // [claw] catch-all\n";
+            } else {
+                code_ << "        // [claw] catch " << clause->get_name() 
+                      << ": " << clause->get_type_name() << "\n";
+                code_ << "        ClawValue " << clause->get_name() 
+                      << " = claw_try_" << try_id << "_err;\n";
+            }
             
             if (clause->get_body()) {
                 auto kind = clause->get_body()->get_kind();

@@ -634,8 +634,11 @@ public:
     const SourceSpan& get_span() const { return span_; }
     
     std::string to_string() const override {
+        if (name_.empty()) return "catch " + body_->to_string();
         return "catch " + name_ + ": " + type_name_ + " " + body_->to_string();
     }
+    
+    bool is_catch_all() const { return name_.empty(); }
     
 private:
     std::string name_;

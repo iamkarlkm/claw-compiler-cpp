@@ -1314,12 +1314,14 @@ public:
                 
                 throw_flag = false;
                 
-                // Bind exception to catch variable
+                // Bind exception to catch variable (skip if bare catch-all)
                 push_scope();
-                RuntimeValue err_rv;
-                err_rv.scalar = exception_value;
-                err_rv.type_name = "Error";
-                scoped_set(clause->get_name(), err_rv);
+                if (!clause->is_catch_all()) {
+                    RuntimeValue err_rv;
+                    err_rv.scalar = exception_value;
+                    err_rv.type_name = "Error";
+                    scoped_set(clause->get_name(), err_rv);
+                }
                 
                 // Execute catch body
                 auto* body = clause->get_body();

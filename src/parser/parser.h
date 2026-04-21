@@ -911,29 +911,31 @@ inline std::unique_ptr<ast::Statement> Parser::parse_try_statement() {
     while (check(TokenType::Kw_catch)) {
         advance(); // consume 'catch'
         
-        // catch variable name
-        if (!check(TokenType::Identifier)) {
-            std::cerr << "Parse error: expected identifier after 'catch' at line "
-                      << peek().span.start.line << "\n";
-            return nullptr;
-        }
-        std::string var_name = peek().text;
-        advance();
+        // catch { } — bare catch-all (no variable, no type)
+        // catch e { } — catch with variable, default type "Error"
+        // catch e: Type { } — catch with variable and explicit type
+        std::string var_name = "";
+        std::string type_name = "Error";
         
-        // expect ':'
-        std::string type_name = "Error"; // default
-        if (match(TokenType::Colon)) {
-            // type name
-            if (check(TokenType::Identifier)) {
-                type_name = peek().text;
-                advance();
+        if (check(TokenType::Identifier)) {
+            // Named catch: catch e[:Type]
+            var_name = peek().text;
+            advance();
+            
+            if (match(TokenType::Colon)) {
+                if (check(TokenType::Identifier)) {
+                    type_name = peek().text;
+                    advance();
+                }
             }
         }
+        // else: bare catch { } — catch-all, no variable binding
         
         // catch body (block)
         auto catch_body = parse_block();
         if (!catch_body) {
-            std::cerr << "Parse error: expected block after 'catch " << var_name 
+            std::cerr << "Parse error: expected block after 'catch"
+                      << (var_name.empty() ? "" : " " + var_name)
                       << "' at line " << previous().span.start.line << "\n";
             return nullptr;
         }
