@@ -1,0 +1,50 @@
+# 构建产物
+claw
+claw-opt
+claw-tests
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+
+# 调试/测试二进制
+src/debug_*
+src/test_debug*
+src/test_*
+!src/test/run_tests.cpp
+!src/test/test_lexer.cpp
+!src/test/test_parser.cpp
+!src/test/integration_test.h
+!src/test/test.h
+src/bytecode/test_*
+
+# 临时测试文件
+test_*.cpp
+test_*.claw
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude AI 配置
+.claude/
+
+# CMake
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# 日志
+*.log

@@ -1,4 +1,0 @@
-fn test(a: (u32, u32)) -> u32 {
-  let (x, y) = a;
-  return x;
-}

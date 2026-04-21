@@ -469,7 +469,7 @@ FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 ## 贡献者
 
-- **核心团队**: OpenClaw (自动化开发)
+- **核心团队**: q3lives.com
 - **设计文档**: AI 辅助设计 (2025-04-11)
 - **参考资料**: TVM、PyTorch、TensorFlow 等开源项目
 

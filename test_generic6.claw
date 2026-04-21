@@ -1,4 +1,0 @@
-fn make_pair<T, U>(a: T, b: U) -> (T, U) {
-  let x = a;
-  return x;
-}

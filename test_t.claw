@@ -1,3 +1,0 @@
-fn foo(a: T) -> T {
-  return a;
-}

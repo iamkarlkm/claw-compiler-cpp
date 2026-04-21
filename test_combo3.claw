@@ -1,3 +1,0 @@
-fn make_pair<T>(a: T, b: T) -> (T, T, T) {
-  return a;
-}
