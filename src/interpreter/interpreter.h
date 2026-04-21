@@ -734,6 +734,8 @@ public:
     bool continue_flag = false;
     Value return_value;
     bool return_flag = false;
+    bool throw_flag = false;
+    Value exception_value;
     claw::ast::Program* current_program = nullptr;
 
     // Variable stack — every {block} pushes a frame, } pops it.
@@ -866,7 +868,7 @@ public:
             auto* block = static_cast<claw::ast::BlockStmt*>(node);
             for (const auto& stmt : block->get_statements()) {
                 execute_statement(stmt.get());
-                if (break_flag || continue_flag || return_flag) break;
+                if (break_flag || continue_flag || return_flag || throw_flag) break;
             }
         }
 
@@ -986,6 +988,16 @@ public:
                 if (proc_body) {
                     event_system.register_process(proc_name, proc_body);
                 }
+                break;
+            }
+            case claw::ast::Statement::Kind::Try: {
+                execute_try(static_cast<claw::ast::TryStmt*>(stmt));
+                break;
+            }
+            case claw::ast::Statement::Kind::Throw: {
+                auto* throw_stmt = static_cast<claw::ast::ThrowStmt*>(stmt);
+                exception_value = evaluate(throw_stmt->get_value());
+                throw_flag = true;
                 break;
             }
             default:
@@ -1183,7 +1195,7 @@ public:
                     // Execute loop body
                     execute_block(for_stmt->get_body());
 
-                    if (return_flag) break;
+                    if (return_flag || throw_flag) break;
                     if (break_flag) {
                         break_flag = false;
                         break;
@@ -1212,7 +1224,7 @@ public:
 
                 execute_block(for_stmt->get_body());
 
-                if (return_flag) break;
+                if (return_flag || throw_flag) break;
                 if (break_flag) {
                     break_flag = false;
                     break;
@@ -1237,7 +1249,7 @@ public:
                 
                 execute_block(for_stmt->get_body());
                 
-                if (return_flag) break;
+                if (return_flag || throw_flag) break;
                 
                 if (break_flag) {
                     break_flag = false;
@@ -1269,7 +1281,7 @@ public:
             // Execute loop body
             execute_block(while_stmt->get_body());
 
-            if (return_flag) break;
+            if (return_flag || throw_flag) break;
 
             if (break_flag) {
                 break_flag = false;
@@ -1279,6 +1291,69 @@ public:
                 continue_flag = false;
                 continue;
             }
+        }
+    }
+
+    // Execute try/catch statement
+    void execute_try(claw::ast::TryStmt* try_stmt) {
+        if (!try_stmt) return;
+        
+        // Save throw state
+        bool saved_throw_flag = throw_flag;
+        Value saved_exception = exception_value;
+        throw_flag = false;
+        
+        // Execute try body
+        execute_block(try_stmt->get_body());
+        
+        // If exception was thrown, try to match catch clauses
+        if (throw_flag) {
+            bool caught = false;
+            for (const auto& clause : try_stmt->get_catches()) {
+                // Type matching: catch all if type is "Error" or matches
+                // For now, first catch clause wins (can add type matching later)
+                (void)clause->get_type_name(); // suppress unused warning
+                
+                throw_flag = false;
+                
+                // Bind exception to catch variable
+                push_scope();
+                RuntimeValue err_rv;
+                err_rv.scalar = exception_value;
+                err_rv.type_name = "Error";
+                scoped_set(clause->get_name(), err_rv);
+                
+                // Execute catch body
+                auto* body = clause->get_body();
+                if (body) {
+                    auto kind = body->get_kind();
+                    if (kind == claw::ast::Statement::Kind::Block) {
+                        auto* block = static_cast<claw::ast::BlockStmt*>(body);
+                        for (const auto& stmt : block->get_statements()) {
+                            execute_statement(stmt.get());
+                            if (break_flag || continue_flag || return_flag || throw_flag) break;
+                        }
+                    } else {
+                        execute_statement(body);
+                    }
+                }
+                
+                pop_scope();
+                caught = true;
+                break;
+            }
+            
+            // If not caught, exception propagates up (throw_flag stays true)
+            if (!caught) {
+                // Restore throw state so it propagates
+                // throw_flag is already true
+            }
+        }
+        
+        // If no exception or caught, restore saved state
+        if (!throw_flag) {
+            // Don't restore saved_throw_flag if we caught something
+            // that might have return_flag set
         }
     }
 

@@ -889,6 +889,91 @@ inline std::unique_ptr<ast::Statement> Parser::parse_return_statement() {
     return ret;
 }
 
+// Parse try statement
+// try { ... } catch e: ErrorType { ... } catch e2: OtherType { ... }
+inline std::unique_ptr<ast::Statement> Parser::parse_try_statement() {
+    if (!match(TokenType::Kw_try)) {
+        return nullptr;
+    }
+    
+    auto try_stmt = std::make_unique<ast::TryStmt>(span_from(previous()));
+    
+    // Parse try body (block)
+    auto body = parse_block();
+    if (!body) {
+        std::cerr << "Parse error: expected block after 'try' at line " 
+                  << previous().span.start.line << "\n";
+        return nullptr;
+    }
+    try_stmt->set_body(std::move(body));
+    
+    // Parse one or more catch clauses
+    while (check(TokenType::Kw_catch)) {
+        advance(); // consume 'catch'
+        
+        // catch variable name
+        if (!check(TokenType::Identifier)) {
+            std::cerr << "Parse error: expected identifier after 'catch' at line "
+                      << peek().span.start.line << "\n";
+            return nullptr;
+        }
+        std::string var_name = peek().text;
+        advance();
+        
+        // expect ':'
+        std::string type_name = "Error"; // default
+        if (match(TokenType::Colon)) {
+            // type name
+            if (check(TokenType::Identifier)) {
+                type_name = peek().text;
+                advance();
+            }
+        }
+        
+        // catch body (block)
+        auto catch_body = parse_block();
+        if (!catch_body) {
+            std::cerr << "Parse error: expected block after 'catch " << var_name 
+                      << "' at line " << previous().span.start.line << "\n";
+            return nullptr;
+        }
+        
+        auto clause = std::make_unique<ast::CatchClause>(
+            var_name, type_name, std::move(catch_body), 
+            span_from(previous()));
+        try_stmt->add_catch(std::move(clause));
+    }
+    
+    return try_stmt;
+}
+
+// Parse throw statement
+// throw Error("message", code)
+// throw expression
+inline std::unique_ptr<ast::Statement> Parser::parse_throw_statement() {
+    if (!match(TokenType::Kw_throw)) {
+        return nullptr;
+    }
+    
+    // Parse expression (can be Error(...) constructor call, string, variable, etc.)
+    auto expr = parse_expression();
+    if (!expr) {
+        std::cerr << "Parse error: expected expression after 'throw' at line "
+                  << previous().span.start.line << "\n";
+        return nullptr;
+    }
+    
+    auto throw_stmt = std::make_unique<ast::ThrowStmt>(
+        std::move(expr), span_from(previous()));
+    
+    // Consume optional semicolon
+    if (check(TokenType::Semicolon)) {
+        advance();
+    }
+    
+    return throw_stmt;
+}
+
 // Parse break statement
 inline std::unique_ptr<ast::Statement> Parser::parse_break_statement() {
     if (!match(TokenType::Kw_break)) {

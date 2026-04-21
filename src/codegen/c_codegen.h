@@ -161,7 +161,8 @@ private:
         header_ << "#include <stdlib.h>\n";
         header_ << "#include <string.h>\n";
         header_ << "#include <math.h>\n";
-        header_ << "#include <stdbool.h>\n\n";
+        header_ << "#include <stdbool.h>\n";
+        header_ << "#include <setjmp.h>\n\n";
     }
     
     void generate_runtime_definitions() {
@@ -171,7 +172,12 @@ private:
         header_ << "void* claw_alloc(size_t size);\n";
         header_ << "void claw_free(void* ptr);\n";
         header_ << "void claw_event_dispatch(const char* event_name, void** args, int num_args);\n";
-        header_ << "int claw_event_subscribe(const char* event_name, void(*handler)(void**));\n\n";
+        header_ << "int claw_event_subscribe(const char* event_name, void(*handler)(void**));\n";
+        header_ << "\n// Exception handling runtime\n";
+        header_ << "typedef void* ClawError;\n";
+        header_ << "typedef void* ClawValue;\n";
+        header_ << "extern jmp_buf claw_try_buf;\n";
+        header_ << "extern ClawError claw_last_error;\n\n";
         
         // Runtime implementations
         code_ << "// ============== RUNTIME IMPLEMENTATIONS ==============\n\n";
@@ -378,6 +384,12 @@ private:
                 return generate_subscribe(static_cast<ast::SubscribeStmt*>(stmt));
             case ast::Statement::Kind::Expression:
                 return generate_expr_stmt(static_cast<ast::ExprStmt*>(stmt));
+            case ast::Statement::Kind::Try:
+                return generate_try(static_cast<ast::TryStmt*>(stmt));
+            case ast::Statement::Kind::Throw:
+                return generate_throw(static_cast<ast::ThrowStmt*>(stmt));
+            case ast::Statement::Kind::Const:
+                return true;
             default:
                 return true;
         }
@@ -747,6 +759,82 @@ private:
         return true;
     }
     
+    // Generate try/catch statement
+    // Uses setjmp/longjmp for exception propagation
+    bool generate_try(ast::TryStmt* try_stmt) {
+        if (!try_stmt) return true;
+        
+        static int try_counter = 0;
+        int try_id = try_counter++;
+        
+        // Declare jmp_buf and exception holder
+        code_ << "    jmp_buf claw_try_" << try_id << "_buf;\n";
+        code_ << "    ClawError* claw_try_" << try_id << "_err = NULL;\n";
+        code_ << "    // [claw] try-enter\n";
+        
+        // try body: setjmp returns 0 on first call, non-zero on longjmp
+        code_ << "    if (setjmp(claw_try_" << try_id << "_buf) == 0) {\n";
+        code_ << "        // [claw] try-body\n";
+        
+        // Generate try body statements
+        if (try_stmt->get_body()) {
+            auto kind = try_stmt->get_body()->get_kind();
+            if (kind == ast::Statement::Kind::Block) {
+                auto* block = static_cast<ast::BlockStmt*>(try_stmt->get_body());
+                for (const auto& s : block->get_statements()) {
+                    generate_statement(s.get());
+                }
+            }
+        }
+        
+        code_ << "    } else {\n";
+        code_ << "        // [claw] catch-block: error caught via longjmp\n";
+        
+        // Generate catch clauses
+        // For now, first catch wins (type matching can be added later)
+        const auto& catches = try_stmt->get_catches();
+        if (!catches.empty()) {
+            // Use the first catch clause
+            const auto& clause = catches[0];
+            code_ << "        // [claw] catch " << clause->get_name() 
+                  << ": " << clause->get_type_name() << "\n";
+            
+            // Bind error to catch variable
+            code_ << "        ClawValue " << clause->get_name() 
+                  << " = claw_try_" << try_id << "_err;\n";
+            
+            // Generate catch body
+            if (clause->get_body()) {
+                auto kind = clause->get_body()->get_kind();
+                if (kind == ast::Statement::Kind::Block) {
+                    auto* block = static_cast<ast::BlockStmt*>(clause->get_body());
+                    for (const auto& s : block->get_statements()) {
+                        generate_statement(s.get());
+                    }
+                }
+            }
+        }
+        
+        code_ << "    }\n";
+        code_ << "    // [claw] try-exit\n";
+        
+        return true;
+    }
+    
+    // Generate throw statement
+    bool generate_throw(ast::ThrowStmt* throw_stmt) {
+        if (!throw_stmt) return true;
+        
+        // Find the nearest enclosing try block's jmp_buf
+        // For simplicity, use a global error variable + longjmp
+        code_ << "    // [claw] throw\n";
+        std::string val = generate_expression(throw_stmt->get_value());
+        code_ << "    claw_last_error = (ClawError*)" << val << ";\n";
+        code_ << "    longjmp(claw_try_buf, 1);\n";
+        
+        return true;
+    }
+
     bool generate_break(ast::BreakStmt* brk) {
         code_ << "    break;\n";
         return true;
