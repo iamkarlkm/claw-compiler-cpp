@@ -397,6 +397,7 @@ public:
         Publish,
         Subscribe,
         SerialProcess,
+        Const,
     };
     
     Statement(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -441,6 +442,36 @@ public:
     
     std::string to_string() const override {
         std::string result = "let " + name_;
+        if (!type_.empty()) result += ": " + type_;
+        if (initializer_) result += " = " + initializer_->to_string();
+        result += ";";
+        return result;
+    }
+    
+private:
+    std::string name_;
+    std::string type_;
+    std::unique_ptr<Expression> initializer_;
+};
+
+// Const declaration statement
+class ConstStmt : public Statement {
+public:
+    ConstStmt(const std::string& name, const SourceSpan& span)
+        : Statement(Kind::Const, span), name_(name) {}
+    
+    void set_type(const std::string& type) { type_ = type; }
+    void set_name(const std::string& name) { name_ = name; }
+    void set_initializer(std::unique_ptr<Expression> init) {
+        initializer_ = std::move(init);
+    }
+    
+    const std::string& get_name() const { return name_; }
+    const std::string& get_type() const { return type_; }
+    Expression* get_initializer() const { return initializer_.get(); }
+    
+    std::string to_string() const override {
+        std::string result = "const " + name_;
         if (!type_.empty()) result += ": " + type_;
         if (initializer_) result += " = " + initializer_->to_string();
         result += ";";

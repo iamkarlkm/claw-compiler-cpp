@@ -398,10 +398,10 @@ inline void Lexer::scan_number() {
     
     if (is_float) {
         double value = std::stod(text);
-        tokens.emplace_back(TokenType::FloatLiteral, span, LiteralValue(value));
+        tokens.emplace_back(TokenType::FloatLiteral, span, LiteralValue(value), text);
     } else {
         int64_t value = std::stoll(text);
-        tokens.emplace_back(TokenType::IntegerLiteral, span, LiteralValue(value));
+        tokens.emplace_back(TokenType::IntegerLiteral, span, LiteralValue(value), text);
     }
 }
 
@@ -446,7 +446,7 @@ inline void Lexer::scan_string() {
     advance(); // consume closing "
     
     SourceSpan span = make_span();
-    tokens.emplace_back(TokenType::StringLiteral, span, LiteralValue(value));
+    tokens.emplace_back(TokenType::StringLiteral, span, LiteralValue(value), value);
 }
 
 // Scan byte literals (single quotes)
@@ -473,7 +473,8 @@ inline void Lexer::scan_byte_literal() {
         
         advance(); // consume closing '
         SourceSpan span = make_span();
-        tokens.emplace_back(TokenType::ByteLiteral, span, LiteralValue(c));
+        std::string byte_text = std::string(1, c);
+        tokens.emplace_back(TokenType::ByteLiteral, span, LiteralValue(c), byte_text);
     } else {
         char c = advance();
         if (peek() != '\'') {
@@ -485,7 +486,8 @@ inline void Lexer::scan_byte_literal() {
         advance(); // consume closing '
         
         SourceSpan span = make_span();
-        tokens.emplace_back(TokenType::ByteLiteral, span, LiteralValue(c));
+        std::string byte_text = std::string(1, c);
+        tokens.emplace_back(TokenType::ByteLiteral, span, LiteralValue(c), byte_text);
     }
 }
 
@@ -701,6 +703,7 @@ inline void KeywordMap::init() {
     keywords["in"] = TokenType::Kw_in;
     keywords["move"] = TokenType::Kw_move;
     keywords["ref"] = TokenType::Kw_ref;
+    keywords["const"] = TokenType::Kw_const;
     keywords["self"] = TokenType::Kw_self;
     keywords["super"] = TokenType::Kw_super;
 }

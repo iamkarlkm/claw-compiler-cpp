@@ -71,6 +71,15 @@ struct CTypeMapper {
     }
 };
 
+// Scope info for unified lifecycle management
+struct ScopeInfo {
+    int depth;                          // 0 = function body, 1+ = nested blocks
+    std::string label;                  // e.g. "fn_foo", "scope_1", "for_2"
+    std::vector<std::string> heap_vars; // variable names that need claw_free
+    std::vector<std::string> stack_vars;// variable names (stack-allocated, for documentation)
+    std::vector<std::string> var_types; // C type of each var (parallel to heap_vars + stack_vars)
+};
+
 // Code generator state
 struct CGState {
     std::set<std::string> included_headers;
@@ -80,15 +89,29 @@ struct CGState {
     std::map<std::string, std::string> variable_names;
     int temp_var_counter = 0;
     int label_counter = 0;
+    int scope_counter = 0;              // unique scope id generator
     std::stack<std::string> loop_continue_stack;
     std::stack<std::string> loop_break_stack;
-    
+    std::stack<ScopeInfo> scope_stack;  // scope lifecycle tracking
+
+    bool needs_heap_alloc(const std::string& claw_type) {
+        // Arrays (type contains []), strings, tensors → heap
+        if (claw_type.find('[') != std::string::npos) return true;
+        if (claw_type == "string") return true;
+        if (claw_type.find("tensor") != std::string::npos) return true;
+        return false;
+    }
+
     std::string make_temp() {
         return "__claw_temp_" + std::to_string(temp_var_counter++);
     }
-    
+
     std::string make_label() {
         return "__claw_label_" + std::to_string(label_counter++);
+    }
+
+    std::string make_scope_label(const std::string& prefix = "scope") {
+        return prefix + "_" + std::to_string(scope_counter++);
     }
 };
 
@@ -146,6 +169,7 @@ private:
         header_ << "// Runtime function declarations\n";
         header_ << "void claw_panic(const char* msg);\n";
         header_ << "void* claw_alloc(size_t size);\n";
+        header_ << "void claw_free(void* ptr);\n";
         header_ << "void claw_event_dispatch(const char* event_name, void** args, int num_args);\n";
         header_ << "int claw_event_subscribe(const char* event_name, void(*handler)(void**));\n\n";
         
@@ -161,6 +185,10 @@ private:
         code_ << "    void* ptr = malloc(size);\n";
         code_ << "    if (!ptr) claw_panic(\"Out of memory\");\n";
         code_ << "    return ptr;\n";
+        code_ << "}\n\n";
+        
+        code_ << "void claw_free(void* ptr) {\n";
+        code_ << "    if (ptr) free(ptr);\n";
         code_ << "}\n\n";
         
         code_ << "void claw_event_dispatch(const char* event_name, void** args, int num_args) {\n";
@@ -232,12 +260,13 @@ private:
         current_function_ = fn->get_name();
         state_.variable_types.clear();
         state_.variable_names.clear();
+        state_.scope_counter = 0;
         
         std::string ret_type = fn->get_return_type().empty() ? 
             "int" : CTypeMapper::to_c_type(fn->get_return_type());
         
         // Generate function signature
-        code_ << "// Function: " << fn->get_name() << "\n";
+        code_ << "\n// [claw] ========== Function: " << fn->get_name() << " ==========\n";
         code_ << ret_type << " " << fn->get_name() << "(";
         
         const auto& params = fn->get_params();
@@ -249,6 +278,12 @@ private:
         }
         
         code_ << ") {\n";
+        
+        // Push function-level scope
+        ScopeInfo fn_scope;
+        fn_scope.depth = 0;
+        fn_scope.label = "fn_" + fn->get_name();
+        state_.scope_stack.push(fn_scope);
         
         // Generate function body
         ast::ASTNode* body = fn->get_body();
@@ -263,12 +298,18 @@ private:
             }
         }
         
+        // Emit scope-exit cleanup for function level
+        emit_scope_cleanup("fn_" + fn->get_name(), 0);
+        
         // Add default return for main
         if (fn->get_name() == "main") {
             code_ << "    return 0;\n";
         }
         
-        code_ << "}\n\n";
+        code_ << "} // [claw] ========== End Function: " << fn->get_name() << " ==========\n\n";
+        
+        // Pop function-level scope
+        if (!state_.scope_stack.empty()) state_.scope_stack.pop();
         
         return true;
     }
@@ -346,20 +387,80 @@ private:
         if (!let) return false;
         
         std::string var_name = let->get_name();
-        std::string var_type = let->get_type().empty() ? "int" : CTypeMapper::to_c_type(let->get_type());
+        std::string claw_type = let->get_type().empty() ? "int" : let->get_type();
+        std::string c_type = CTypeMapper::to_c_type(claw_type);
         
-        state_.variable_types[var_name] = let->get_type();
+        state_.variable_types[var_name] = claw_type;
         state_.variable_names[var_name] = var_name;
         
-        code_ << "    " << var_type << " " << var_name;
+        bool is_heap = state_.needs_heap_alloc(claw_type);
         
-        if (let->get_initializer()) {
-            code_ << " = " << generate_expression(let->get_initializer());
+        if (is_heap) {
+            // Heap allocation: array or string
+            code_ << "    // [claw] alloc: " << var_name << " (heap, type=" << claw_type << ")\n";
+            
+            if (claw_type.find('[') != std::string::npos) {
+                // Array type: e.g. "u32[10]"
+                size_t bracket_pos = claw_type.find('[');
+                size_t end_bracket = claw_type.find(']');
+                std::string base_type = claw_type.substr(0, bracket_pos);
+                std::string size_str = claw_type.substr(bracket_pos + 1, end_bracket - bracket_pos - 1);
+                std::string c_base = CTypeMapper::to_c_type(base_type);
+                
+                code_ << "    " << c_base << "* " << var_name 
+                      << " = (" << c_base << "*)claw_alloc(" 
+                      << size_str << " * sizeof(" << c_base << "));"
+                      << " // [claw] alloc: " << var_name << " [" << size_str << "]\n";
+                
+                // Zero-initialize
+                if (let->get_initializer()) {
+                    code_ << "    memset(" << var_name << ", 0, " << size_str << " * sizeof(" << c_base << "));\n";
+                    // TODO: handle initializer properly for arrays
+                } else {
+                    code_ << "    memset(" << var_name << ", 0, " << size_str << " * sizeof(" << c_base << "));\n";
+                }
+            } else if (claw_type == "string") {
+                // String type
+                if (let->get_initializer()) {
+                    code_ << "    char* " << var_name << " = " 
+                          << generate_expression(let->get_initializer()) 
+                          << "; // [claw] alloc: " << var_name << " (string)\n";
+                } else {
+                    code_ << "    char* " << var_name 
+                          << " = (char*)claw_alloc(1); " << var_name << "[0] = '\\0';"
+                          << " // [claw] alloc: " << var_name << " (string, empty)\n";
+                }
+            } else {
+                // Tensor or other heap type
+                code_ << "    void* " << var_name << " = NULL; // [claw] alloc: " << var_name 
+                      << " (type=" << claw_type << ", heap)\n";
+                if (let->get_initializer()) {
+                    code_ << "    " << var_name << " = " << generate_expression(let->get_initializer()) << ";\n";
+                }
+            }
+            
+            // Track in current scope for cleanup
+            if (!state_.scope_stack.empty()) {
+                state_.scope_stack.top().heap_vars.push_back(var_name);
+            }
         } else {
-            code_ << " = 0";
+            // Stack allocation: scalar types
+            code_ << "    // [claw] alloc: " << var_name << " (stack, type=" << claw_type << ")\n";
+            code_ << "    " << c_type << " " << var_name;
+            
+            if (let->get_initializer()) {
+                code_ << " = " << generate_expression(let->get_initializer());
+            } else {
+                code_ << " = 0";
+            }
+            
+            code_ << ";\n";
+            
+            // Track in current scope for documentation
+            if (!state_.scope_stack.empty()) {
+                state_.scope_stack.top().stack_vars.push_back(var_name);
+            }
         }
-        
-        code_ << ";\n";
         
         return true;
     }
@@ -402,6 +503,34 @@ private:
     bool generate_return(ast::ReturnStmt* ret) {
         if (!ret) return true;
         
+        // Find return value variable name (if it's a simple identifier)
+        std::string return_var_name;
+        if (ret->get_value() && ret->get_value()->get_kind() == ast::Expression::Kind::Identifier) {
+            return_var_name = static_cast<ast::IdentifierExpr*>(ret->get_value())->get_name();
+        }
+        
+        // Emit cleanup for all active scopes (innermost first)
+        // This ensures heap variables are freed before return, preventing leaks
+        // and avoiding unreachable-code warnings from gcc
+        std::vector<ScopeInfo> scopes;
+        auto temp_stack = state_.scope_stack;
+        while (!temp_stack.empty()) {
+            scopes.push_back(temp_stack.top());
+            temp_stack.pop();
+        }
+        
+        for (const auto& scope : scopes) {
+            if (scope.heap_vars.empty()) continue;
+            code_ << "    // [claw] pre-return cleanup: " << scope.label << "\n";
+            for (const auto& var_name : scope.heap_vars) {
+                if (var_name == return_var_name) {
+                    code_ << "    // [claw] skip-free: " << var_name << " (is return value)\n";
+                    continue;
+                }
+                code_ << "    claw_free((void*)" << var_name << ");\n";
+            }
+        }
+        
         if (ret->get_value()) {
             std::string val = generate_expression(ret->get_value());
             code_ << "    return " << val << ";\n";
@@ -419,6 +548,8 @@ private:
         const auto& bodies = if_stmt->get_bodies();
         
         if (conds.empty()) return true;
+        
+        code_ << "    // [claw] if-branch\n";
         
         // Generate if-else chain
         for (size_t i = 0; i < conds.size(); i++) {
@@ -450,15 +581,46 @@ private:
     bool generate_block(ast::BlockStmt* block) {
         if (!block) return true;
         
+        // Push block scope
+        std::string scope_label = state_.make_scope_label("block");
+        int depth = static_cast<int>(state_.scope_stack.size());
+        
+        ScopeInfo blk_scope;
+        blk_scope.depth = depth;
+        blk_scope.label = scope_label;
+        state_.scope_stack.push(blk_scope);
+        
+        std::string indent(depth * 4, ' ');
+        code_ << indent << "// [claw] scope-enter: " << scope_label << " (depth=" << depth << ")\n";
+        
         for (const auto& s : block->get_statements()) {
             generate_statement(s.get());
         }
+        
+        // Emit cleanup for this scope's heap vars
+        emit_scope_cleanup(scope_label, depth);
+        
+        code_ << indent << "// [claw] scope-exit: " << scope_label << "\n";
+        
+        if (!state_.scope_stack.empty()) state_.scope_stack.pop();
         
         return true;
     }
     
     void generate_block_body(ast::ASTNode* body) {
         if (!body) return;
+        
+        // Push block scope for if/while/for body
+        std::string scope_label = state_.make_scope_label("block");
+        int depth = static_cast<int>(state_.scope_stack.size());
+        
+        ScopeInfo blk_scope;
+        blk_scope.depth = depth;
+        blk_scope.label = scope_label;
+        state_.scope_stack.push(blk_scope);
+        
+        std::string indent(depth * 4, ' ');
+        code_ << indent << "// [claw] scope-enter: " << scope_label << " (depth=" << depth << ")\n";
         
         auto* block = dynamic_cast<ast::BlockStmt*>(body);
         if (block) {
@@ -470,6 +632,29 @@ private:
             if (stmt) {
                 generate_statement(stmt);
             }
+        }
+        
+        // Emit cleanup
+        emit_scope_cleanup(scope_label, depth);
+        
+        code_ << indent << "// [claw] scope-exit: " << scope_label << "\n";
+        
+        if (!state_.scope_stack.empty()) state_.scope_stack.pop();
+    }
+    
+    // Emit cleanup code for a scope — free all heap-allocated variables
+    void emit_scope_cleanup(const std::string& scope_label, int depth) {
+        if (state_.scope_stack.empty()) return;
+        
+        const auto& scope = state_.scope_stack.top();
+        if (scope.heap_vars.empty()) return;
+        
+        std::string indent((depth + 1) * 4, ' ');
+        code_ << indent << "// [claw] scope-free: " << scope_label 
+              << " (" << scope.heap_vars.size() << " heap var(s))\n";
+        
+        for (const auto& var_name : scope.heap_vars) {
+            code_ << indent << "claw_free((void*)" << var_name << "); // [claw] free: " << var_name << "\n";
         }
     }
     
@@ -495,14 +680,28 @@ private:
         state_.loop_continue_stack.push("");
         state_.loop_break_stack.push("");
         
+        // Push for-loop scope
+        std::string scope_label = state_.make_scope_label("for");
+        int depth = static_cast<int>(state_.scope_stack.size());
+        ScopeInfo for_scope;
+        for_scope.depth = depth;
+        for_scope.label = scope_label;
+        for_scope.stack_vars.push_back(var);
+        state_.scope_stack.push(for_scope);
+        
+        code_ << "    // [claw] scope-enter: " << scope_label << " (for-loop, depth=" << depth << ")\n";
         code_ << "    for (int " << var << " = 1; " << var << " <= " << count << "; " << var << "++) {\n";
         
         if (body) {
             generate_block_body(body);
         }
         
-        code_ << "    }\n";
+        // Emit cleanup for for-loop scope's heap vars
+        emit_scope_cleanup(scope_label, depth);
         
+        code_ << "    } // [claw] scope-exit: " << scope_label << "\n";
+        
+        if (!state_.scope_stack.empty()) state_.scope_stack.pop();
         state_.loop_continue_stack.pop();
         state_.loop_break_stack.pop();
         
@@ -521,14 +720,27 @@ private:
         state_.loop_continue_stack.push(continue_label);
         state_.loop_break_stack.push(break_label);
         
+        // Push while-loop scope
+        std::string scope_label = state_.make_scope_label("while");
+        int depth = static_cast<int>(state_.scope_stack.size());
+        ScopeInfo while_scope;
+        while_scope.depth = depth;
+        while_scope.label = scope_label;
+        state_.scope_stack.push(while_scope);
+        
+        code_ << "    // [claw] scope-enter: " << scope_label << " (while-loop, depth=" << depth << ")\n";
         code_ << "    while (" << cond << ") {\n";
         
         if (body) {
             generate_block_body(body);
         }
         
-        code_ << "    }\n";
+        // Emit cleanup
+        emit_scope_cleanup(scope_label, depth);
         
+        code_ << "    } // [claw] scope-exit: " << scope_label << "\n";
+        
+        if (!state_.scope_stack.empty()) state_.scope_stack.pop();
         state_.loop_continue_stack.pop();
         state_.loop_break_stack.pop();
         
@@ -607,6 +819,14 @@ private:
         ast::Expression* expr = expr_stmt->get_expr();
         if (!expr) return true;
         
+        // Check if this is an assignment expression (x = value)
+        if (expr->get_kind() == ast::Expression::Kind::Binary) {
+            auto* bin = static_cast<ast::BinaryExpr*>(expr);
+            if (bin->get_operator() == claw::TokenType::Op_eq_assign) {
+                return generate_binary_assignment_expr(bin);
+            }
+        }
+        
         std::string result = generate_expression(expr);
         
         // Only output if not a function call that returns void
@@ -614,6 +834,35 @@ private:
         code_ << "    (void)" << result << ";\n";
         
         return true;
+    }
+    
+    // Handle assignment as expression: x = value
+    bool generate_binary_assignment_expr(ast::BinaryExpr* bin) {
+        if (!bin) return false;
+        
+        auto* target = bin->get_left();
+        std::string value = generate_expression(bin->get_right());
+        
+        if (!target) return false;
+        
+        // Simple identifier assignment: x = value
+        if (target->get_kind() == ast::Expression::Kind::Identifier) {
+            std::string var_name = static_cast<ast::IdentifierExpr*>(target)->get_name();
+            code_ << "    " << var_name << " = " << value << ";\n";
+            return true;
+        }
+        
+        // Index assignment: arr[i] = value
+        if (target->get_kind() == ast::Expression::Kind::Index) {
+            auto* idx_expr = static_cast<ast::IndexExpr*>(target);
+            std::string obj = generate_expression(idx_expr->get_object());
+            std::string idx = generate_expression(idx_expr->get_index());
+            // Claw is 1-based, C is 0-based
+            code_ << "    " << obj << "[" << idx << " - 1] = " << value << ";\n";
+            return true;
+        }
+        
+        return false;
     }
     
     std::string generate_expression(ast::Expression* expr) {

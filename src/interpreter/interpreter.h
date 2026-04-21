@@ -410,6 +410,64 @@ public:
             }
             return {int64_t(0)};
         };
+
+        // Type conversion: int(x) — string/float → i64
+        builtins["int"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {int64_t(0)};
+            if (std::holds_alternative<int64_t>(args[0])) {
+                return {std::get<int64_t>(args[0])};
+            } else if (std::holds_alternative<double>(args[0])) {
+                return {static_cast<int64_t>(std::get<double>(args[0]))};
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                try { return {static_cast<int64_t>(std::stoll(std::get<std::string>(args[0])))}; }
+                catch (...) { return {int64_t(0)}; }
+            }
+            return {int64_t(0)};
+        };
+
+        // Type conversion: float(x) — string/int → f64
+        builtins["float"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {double(0.0)};
+            if (std::holds_alternative<double>(args[0])) {
+                return {std::get<double>(args[0])};
+            } else if (std::holds_alternative<int64_t>(args[0])) {
+                return {static_cast<double>(std::get<int64_t>(args[0]))};
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                try { return {std::stod(std::get<std::string>(args[0]))}; }
+                catch (...) { return {double(0.0)}; }
+            }
+            return {double(0.0)};
+        };
+
+        // Type conversion: str(x) — any → string
+        builtins["str"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {std::string("")};
+            if (std::holds_alternative<std::string>(args[0])) {
+                return {std::get<std::string>(args[0])};
+            } else if (std::holds_alternative<int64_t>(args[0])) {
+                return {std::to_string(std::get<int64_t>(args[0]))};
+            } else if (std::holds_alternative<double>(args[0])) {
+                return {std::to_string(std::get<double>(args[0]))};
+            } else if (std::holds_alternative<bool>(args[0])) {
+                return {std::get<bool>(args[0]) ? std::string("true") : std::string("false")};
+            }
+            return {std::string("")};
+        };
+
+        // Type conversion: bool(x) — any → bool
+        builtins["bool"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {false};
+            if (std::holds_alternative<bool>(args[0])) {
+                return {std::get<bool>(args[0])};
+            } else if (std::holds_alternative<int64_t>(args[0])) {
+                return {std::get<int64_t>(args[0]) != 0};
+            } else if (std::holds_alternative<double>(args[0])) {
+                return {std::get<double>(args[0]) != 0.0};
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                return {!std::get<std::string>(args[0]).empty()};
+            }
+            return {false};
+        };
     }
 
     // Convert value to string
@@ -827,6 +885,11 @@ public:
                 execute_let(let_stmt);
                 break;
             }
+            case claw::ast::Statement::Kind::Const: {
+                auto* const_stmt = static_cast<claw::ast::ConstStmt*>(stmt);
+                execute_const(const_stmt);
+                break;
+            }
             case claw::ast::Statement::Kind::Assign: {
                 auto* assign = static_cast<claw::ast::AssignStmt*>(stmt);
                 execute_assign(assign);
@@ -968,6 +1031,25 @@ public:
         }
 
         scoped_set(name, val);
+    }
+
+    // Execute const statement — same as let but write to global scope
+    void execute_const(claw::ast::ConstStmt* con) {
+        std::string name = con->get_name();
+        std::string type_str = con->get_type();
+
+        RuntimeValue val;
+        val.type_name = type_str.empty() ? "auto" : type_str;
+        val.size = 1;
+
+        // const must have initializer
+        if (con->get_initializer()) {
+            Value init_val = evaluate(con->get_initializer());
+            val.scalar = init_val;
+        }
+
+        // const always writes to global scope (not stack frame)
+        runtime.set_var(name, val);
     }
 
     // Execute binary assignment (a[1] = 42)
@@ -1117,6 +1199,31 @@ public:
 
         // Support array/tensor iteration
         Value arr_val = evaluate(iterable);
+        
+        // Handle integer literal as range: for i in 10 → 1..10 (Claw 1-based)
+        if (std::holds_alternative<int64_t>(arr_val)) {
+            int64_t end = std::get<int64_t>(arr_val);
+            for (int64_t i = 1; i <= end; i++) {
+                RuntimeValue loop_var;
+                loop_var.type_name = "i64";
+                loop_var.size = 1;
+                loop_var.scalar = static_cast<int64_t>(i);
+                scoped_set(var_name, loop_var);
+
+                execute_block(for_stmt->get_body());
+
+                if (return_flag) break;
+                if (break_flag) {
+                    break_flag = false;
+                    break;
+                }
+                if (continue_flag) {
+                    continue_flag = false;
+                    continue;
+                }
+            }
+            return;
+        }
         
         // Handle string iteration (character by character)
         if (std::holds_alternative<std::string>(arr_val)) {

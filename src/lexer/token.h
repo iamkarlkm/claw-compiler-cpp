@@ -60,6 +60,7 @@ enum class TokenType {
     Kw_in,
     Kw_move,
     Kw_ref,
+    Kw_const,
     Kw_self,
     Kw_super,
     
@@ -145,18 +146,26 @@ struct Token {
     TokenType type;
     SourceSpan span;
     LiteralValue value;
-    std::string text;  // Original text for identifiers and literals
+    std::string text;  // Original source text (always populated for identifiers & literals)
     
     Token() : type(TokenType::EndOfFile), span() {}
     
+    // Operators, punctuation — no value, no text
     Token(TokenType type, const SourceSpan& span)
         : type(type), span(span) {}
     
-    Token(TokenType type, const SourceSpan& span, const LiteralValue& val)
-        : type(type), span(span), value(val) {}
+    // Unified constructor: value + text always together
+    // This is the ONLY constructor that should be used for literals and identifiers
+    Token(TokenType type, const SourceSpan& span, const LiteralValue& val, const std::string& txt)
+        : type(type), span(span), value(val), text(txt) {}
     
+    // Legacy: identifier/keyword with text only (value remains monostate)
     Token(TokenType type, const SourceSpan& span, const std::string& txt)
         : type(type), span(span), text(txt) {}
+    
+    // Legacy: literal with value only (text remains empty — DEPRECATED, use 4-arg)
+    Token(TokenType type, const SourceSpan& span, const LiteralValue& val)
+        : type(type), span(span), value(val) {}
     
     // Helper methods
     bool is_keyword() const;
@@ -315,7 +324,16 @@ inline bool Token::as_bool() const {
 
 inline std::string Token::lexeme() const {
     if (!text.empty()) return text;
-    return token_type_to_string(type);
+    // Fallback: reconstruct text from value for literal tokens
+    return std::visit([](auto&& val) -> std::string {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, int64_t>) return std::to_string(val);
+        else if constexpr (std::is_same_v<T, double>) return std::to_string(val);
+        else if constexpr (std::is_same_v<T, std::string>) return val;
+        else if constexpr (std::is_same_v<T, bool>) return val ? "true" : "false";
+        else if constexpr (std::is_same_v<T, char>) return std::string(1, val);
+        else return token_type_to_string(TokenType::EndOfFile);
+    }, value);
 }
 
 } // namespace claw

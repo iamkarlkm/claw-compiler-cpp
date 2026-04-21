@@ -65,6 +65,7 @@ private:
     std::unique_ptr<ast::Statement> parse_name_statement();
     std::unique_ptr<ast::Statement> parse_serial_process_declaration();
     std::unique_ptr<ast::Statement> parse_let_statement();
+    std::unique_ptr<ast::Statement> parse_const_statement();
     std::unique_ptr<ast::Statement> parse_if_statement();
     std::unique_ptr<ast::Statement> parse_match_statement();
     std::unique_ptr<ast::Statement> parse_for_statement();
@@ -625,6 +626,44 @@ inline std::unique_ptr<ast::Statement> Parser::parse_let_statement() {
     return let;
 }
 
+// Parse const declaration
+inline std::unique_ptr<ast::Statement> Parser::parse_const_statement() {
+    if (!match(TokenType::Kw_const)) {
+        return nullptr;
+    }
+    
+    auto con = std::make_unique<ast::ConstStmt>("", span_from(previous()));
+    
+    // Get constant name
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected constant name", span_from(peek()), "P013");
+        }
+        return nullptr;
+    }
+    advance(); // consume constant name
+    con->set_name(previous().text);
+    
+    // Parse type annotation
+    if (check(TokenType::Colon)) {
+        advance(); // consume ':'
+        con->set_type(parse_type());
+    }
+    
+    // Parse initializer (required for const)
+    if (check(TokenType::Op_eq_assign)) {
+        advance(); // consume '='
+        con->set_initializer(parse_expression());
+    } else {
+        if (reporter) {
+            reporter->error("const declaration requires an initializer", span_from(peek()), "P014");
+        }
+        return nullptr;
+    }
+    
+    return con;
+}
+
 // Parse if statement
 inline std::unique_ptr<ast::Statement> Parser::parse_if_statement() {
     auto if_stmt = std::make_unique<ast::IfStmt>(span_from(peek()));
@@ -1165,6 +1204,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
         return parse_let_statement();
     }
     
+    // Const declaration
+    if (check(TokenType::Kw_const)) {
+        return parse_const_statement();
+    }
+    
     // Name binding statement
     if (check(TokenType::Kw_name)) {
         return parse_name_statement();
@@ -1268,11 +1312,11 @@ inline std::string Parser::parse_type() {
         while (!check(TokenType::RBracket) && !is_at_end()) {
             // Parse dimension (integer or identifier)
             if (check(TokenType::IntegerLiteral)) {
-                type += previous().text;
                 advance();
+                type += std::to_string(previous().as_integer());
             } else if (check(TokenType::Identifier)) {
-                type += previous().text;
                 advance();
+                type += previous().text;
             } else {
                 if (reporter) {
                     reporter->error("Expected dimension expression", span_from(peek()), "P043");
@@ -1415,11 +1459,11 @@ inline std::string Parser::parse_type() {
             
             // Check for size
             if (check(TokenType::IntegerLiteral)) {
-                type += previous().text;
-                advance();
+                advance(); // consume the integer
+                type += std::to_string(previous().as_integer());
             } else if (check(TokenType::Identifier)) {
+                advance(); // consume the identifier
                 type += previous().text;
-                advance();
             }
             
             if (!check(TokenType::RBracket)) {
@@ -1430,6 +1474,32 @@ inline std::string Parser::parse_type() {
                 advance(); // consume ']'
                 type += "]";
             }
+        }
+    }
+    
+    // Handle array type suffix: T[N] (e.g. u32[5], f64[1024])
+    // This runs after parsing the base type (u32, f64, etc.)
+    if (check(TokenType::LBracket)) {
+        type += "[";
+        advance(); // consume '['
+        
+        // Parse size expression (integer literal or identifier)
+        if (check(TokenType::IntegerLiteral)) {
+            advance(); // consume the integer
+            // Token stores value in LiteralValue, not in .text
+            type += std::to_string(previous().as_integer());
+        } else if (check(TokenType::Identifier)) {
+            advance(); // consume the identifier
+            type += previous().text;
+        }
+        
+        if (!check(TokenType::RBracket)) {
+            if (reporter) {
+                reporter->error("Expected ']' in array type", span_from(peek()), "P048");
+            }
+        } else {
+            advance(); // consume ']'
+            type += "]";
         }
     }
     
