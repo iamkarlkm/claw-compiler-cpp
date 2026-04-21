@@ -78,6 +78,8 @@ private:
     std::unique_ptr<ast::Statement> parse_expression_statement();
     std::unique_ptr<ast::Statement> parse_publish_statement();
     std::unique_ptr<ast::Statement> parse_subscribe_statement();
+    std::unique_ptr<ast::Statement> parse_try_statement();
+    std::unique_ptr<ast::Statement> parse_throw_statement();
     
     // Helper methods
     std::unique_ptr<ast::Statement> parse_block_statement();
@@ -1257,6 +1259,16 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
     // Continue statement
     if (check(TokenType::Kw_continue)) {
         return parse_continue_statement();
+    }
+    
+    // Try statement
+    if (check(TokenType::Kw_try)) {
+        return parse_try_statement();
+    }
+    
+    // Throw statement
+    if (check(TokenType::Kw_throw)) {
+        return parse_throw_statement();
     }
     
     // Block

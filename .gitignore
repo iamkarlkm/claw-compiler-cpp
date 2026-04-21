@@ -48,3 +48,6 @@ cmake_install.cmake
 
 # 日志
 *.log
+
+dev-logs/
+test/
