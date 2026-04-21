@@ -810,6 +810,16 @@ public:
         // Execute main if found
         if (main_fn) {
             execute_function(main_fn);
+
+            // Top-level uncaught exception guard
+            if (throw_flag) {
+                std::cerr << "\n[Claw Runtime] Unhandled exception";
+                if (std::holds_alternative<std::string>(exception_value)) {
+                    std::cerr << ": " << std::get<std::string>(exception_value);
+                }
+                std::cerr << "\n";
+                throw_flag = false;
+            }
         } else {
             std::cerr << "Error: No main function found\n";
         }
