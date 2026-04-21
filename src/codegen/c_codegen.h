@@ -93,6 +93,7 @@ struct CGState {
     std::stack<std::string> loop_continue_stack;
     std::stack<std::string> loop_break_stack;
     std::stack<ScopeInfo> scope_stack;  // scope lifecycle tracking
+    std::stack<std::string> try_buf_stack;  // nested try: current active jmp_buf name
 
     bool needs_heap_alloc(const std::string& claw_type) {
         // Arrays (type contains []), strings, tensors → heap
@@ -766,14 +767,18 @@ private:
         
         static int try_counter = 0;
         int try_id = try_counter++;
+        std::string buf_name = "claw_try_" + std::to_string(try_id) + "_buf";
+        
+        // Push this try's jmp_buf onto the stack
+        state_.try_buf_stack.push(buf_name);
         
         // Declare jmp_buf and exception holder
-        code_ << "    jmp_buf claw_try_" << try_id << "_buf;\n";
-        code_ << "    ClawError* claw_try_" << try_id << "_err = NULL;\n";
+        code_ << "    jmp_buf " << buf_name << ";\n";
+        code_ << "    ClawError claw_try_" << try_id << "_err = NULL;\n";
         code_ << "    // [claw] try-enter\n";
         
         // try body: setjmp returns 0 on first call, non-zero on longjmp
-        code_ << "    if (setjmp(claw_try_" << try_id << "_buf) == 0) {\n";
+        code_ << "    if (setjmp(" << buf_name << ") == 0) {\n";
         code_ << "        // [claw] try-body\n";
         
         // Generate try body statements
@@ -791,19 +796,14 @@ private:
         code_ << "        // [claw] catch-block: error caught via longjmp\n";
         
         // Generate catch clauses
-        // For now, first catch wins (type matching can be added later)
         const auto& catches = try_stmt->get_catches();
         if (!catches.empty()) {
-            // Use the first catch clause
             const auto& clause = catches[0];
             code_ << "        // [claw] catch " << clause->get_name() 
                   << ": " << clause->get_type_name() << "\n";
-            
-            // Bind error to catch variable
             code_ << "        ClawValue " << clause->get_name() 
                   << " = claw_try_" << try_id << "_err;\n";
             
-            // Generate catch body
             if (clause->get_body()) {
                 auto kind = clause->get_body()->get_kind();
                 if (kind == ast::Statement::Kind::Block) {
@@ -818,6 +818,9 @@ private:
         code_ << "    }\n";
         code_ << "    // [claw] try-exit\n";
         
+        // Pop this try's jmp_buf from the stack
+        state_.try_buf_stack.pop();
+        
         return true;
     }
     
@@ -825,12 +828,18 @@ private:
     bool generate_throw(ast::ThrowStmt* throw_stmt) {
         if (!throw_stmt) return true;
         
-        // Find the nearest enclosing try block's jmp_buf
-        // For simplicity, use a global error variable + longjmp
         code_ << "    // [claw] throw\n";
         std::string val = generate_expression(throw_stmt->get_value());
-        code_ << "    claw_last_error = (ClawError*)" << val << ";\n";
-        code_ << "    longjmp(claw_try_buf, 1);\n";
+        code_ << "    claw_last_error = (ClawError)" << val << ";\n";
+        
+        // longjmp to the nearest enclosing try's jmp_buf
+        if (!state_.try_buf_stack.empty()) {
+            code_ << "    longjmp(" << state_.try_buf_stack.top() << ", 1);\n";
+        } else {
+            // No enclosing try — terminate
+            code_ << "    fprintf(stderr, \"Unhandled exception\\n\");\n";
+            code_ << "    exit(1);\n";
+        }
         
         return true;
     }

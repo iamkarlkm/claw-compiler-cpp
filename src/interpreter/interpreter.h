@@ -1310,9 +1310,7 @@ public:
         if (throw_flag) {
             bool caught = false;
             for (const auto& clause : try_stmt->get_catches()) {
-                // Type matching: catch all if type is "Error" or matches
-                // For now, first catch clause wins (can add type matching later)
-                (void)clause->get_type_name(); // suppress unused warning
+                (void)clause->get_type_name();
                 
                 throw_flag = false;
                 
@@ -1344,16 +1342,15 @@ public:
             }
             
             // If not caught, exception propagates up (throw_flag stays true)
-            if (!caught) {
-                // Restore throw state so it propagates
-                // throw_flag is already true
-            }
         }
         
-        // If no exception or caught, restore saved state
-        if (!throw_flag) {
-            // Don't restore saved_throw_flag if we caught something
-            // that might have return_flag set
+        // If exception was caught and handled, but caller had a pending
+        // exception — don't restore it (the try/catch consumed the throw).
+        // If no exception happened at all, restore caller's throw state.
+        if (!throw_flag && saved_throw_flag) {
+            // Caller had an unhandled exception — propagate it
+            throw_flag = true;
+            exception_value = saved_exception;
         }
     }
 
