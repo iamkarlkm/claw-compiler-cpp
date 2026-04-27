@@ -4,6 +4,9 @@
 #include "vm/claw_vm.h"
 #include <cctype>
 #include <csignal>
+#include <random>
+#include <fstream>
+#include <filesystem>
 
 namespace claw {
 namespace vm {
@@ -260,8 +263,9 @@ void VMRuntime::setup_builtins() {
     };
     
     // Panic function
-    builtins["panic"] = [](VMRuntime& rt) {
+    builtins["panic"] = [](VMRuntime& rt) -> Value {
         throw std::runtime_error(rt.pop().to_string());
+        return Value::nil();
     };
 }
 
@@ -347,7 +351,7 @@ void GarbageCollector::collect(VMRuntime& runtime) {
     // Mark all values in call frames
     for (auto& frame : runtime.call_frames) {
         if (frame.closure) {
-            mark_closure(frame.closure.get());
+            mark_closure(frame.closure);
         }
     }
     
@@ -368,7 +372,8 @@ void GarbageCollector::collect(VMRuntime& runtime) {
 void GarbageCollector::sweep(VMRuntime& runtime) {
     // For simplicity, just reset marked flags
     // Full implementation would free unmarked objects
-    runtime.gc_cycles++;
+    // Note: gc_cycles is now in ClawVM, not VMRuntime
+    // This is handled externally if needed
 }
 
 // ============================================================================
@@ -388,34 +393,44 @@ bool ClawVM::load_module(const bytecode::Module& module) {
 
 bool ClawVM::load_module_from_file(const std::string& path) {
     bytecode::BytecodeReader reader;
-    bytecode::Module module;
     
-    if (!reader.read(path, module)) {
-        last_error = "Failed to load bytecode file: " + path;
+    auto module_opt = reader.read_from_file(path);
+    if (!module_opt) {
+        last_error = "Failed to load bytecode file: " + path + " - " + reader.get_error();
         had_error = true;
         return false;
     }
     
-    return load_module(module);
+    return load_module(*module_opt);
 }
 
 Value ClawVM::execute() {
     running = true;
     instructions_executed = 0;
     ip = 0;
+    current_function = nullptr;
+    current_function_idx = 0;
     
     try {
-        // Find main function
-        int32_t main_idx = runtime.get_global_idx("main");
+        // Find main function in module
+        int32_t main_idx = -1;
+        for (size_t i = 0; i < current_module.functions.size(); i++) {
+            if (current_module.functions[i].name == "main") {
+                main_idx = static_cast<int32_t>(i);
+                break;
+            }
+        }
+        
         if (main_idx < 0) {
-            error("No main function found");
+            error("No main function found in bytecode module");
             return Value::nil();
         }
         
-        // Call main
-        runtime.push(runtime.get_global(main_idx));
-        runtime.push(Value::nil());  // self argument
+        // Setup current function context
+        current_function_idx = static_cast<uint32_t>(main_idx);
+        current_function = &current_module.functions[current_function_idx];
         
+        // Call main function with 0 arguments
         op_call();
         
         // Run dispatch loop
@@ -489,11 +504,11 @@ Value& ClawVM::current_closure() {
 }
 
 int32_t ClawVM::read_byte() {
-    if (ip >= static_cast<int32_t>(current_module.instructions.size())) {
+    if (!current_function || ip >= static_cast<int32_t>(current_function->code.size())) {
         error("Unexpected end of bytecode");
         return 0;
     }
-    return current_module.instructions[ip++].opcode;
+    return static_cast<int32_t>(current_function->code[ip++].op);
 }
 
 int32_t ClawVM::read_short() {
@@ -513,16 +528,16 @@ int32_t ClawVM::read_int() {
 double ClawVM::read_double() {
     // Read from constants pool
     int32_t idx = read_int();
-    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.size())) {
-        return current_module.constants[idx].get_double();
+    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.floats.size())) {
+        return current_module.constants.get_double(static_cast<uint32_t>(idx));
     }
     return 0.0;
 }
 
 std::string ClawVM::read_string() {
     int32_t idx = read_int();
-    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.size())) {
-        return current_module.constants[idx].get_string();
+    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.strings.size())) {
+        return current_module.constants.get_string(static_cast<uint32_t>(idx));
     }
     return "";
 }
@@ -542,146 +557,153 @@ void ClawVM::error(const std::string& msg) {
 // ============================================================================
 
 bool ClawVM::dispatch() {
-    if (!running || ip >= static_cast<int32_t>(current_module.instructions.size())) {
+    if (!running || !current_function || ip >= static_cast<int32_t>(current_function->code.size())) {
         running = false;
         return false;
     }
     
     int32_t op = read_byte();
     
-    switch (op) {
-        // Stack operations
-        case bytecode::OpCode::NOP: return op_nop();
-        case bytecode::OpCode::PUSH: return op_push();
-        case bytecode::OpCode::POP: return op_pop();
-        case bytecode::OpCode::DUP: return op_dup();
-        case bytecode::OpCode::SWAP: return op_swap();
-        
-        // Integer ops
-        case bytecode::OpCode::IADD: return op_iadd();
-        case bytecode::OpCode::ISUB: return op_isub();
-        case bytecode::OpCode::IMUL: return op_imul();
-        case bytecode::OpCode::IDIV: return op_idiv();
-        case bytecode::OpCode::IMOD: return op_imod();
-        case bytecode::OpCode::INEG: return op_ineg();
-        case bytecode::OpCode::IINC: return op_iinc();
-        
-        // Float ops
-        case bytecode::OpCode::FADD: return op_fadd();
-        case bytecode::OpCode::FSUB: return op_fsub();
-        case bytecode::OpCode::FMUL: return op_fmul();
-        case bytecode::OpCode::FDIV: return op_fdiv();
-        case bytecode::OpCode::FMOD: return op_fmod();
-        case bytecode::OpCode::FNEG: return op_fneg();
-        case bytecode::OpCode::FINC: return op_finc();
-        
-        // Comparison ops
-        case bytecode::OpCode::IEQ: return op_ieq();
-        case bytecode::OpCode::INE: return op_ine();
-        case bytecode::OpCode::ILT: return op_ilt();
-        case bytecode::OpCode::ILE: return op_ile();
-        case bytecode::OpCode::IGT: return op_igt();
-        case bytecode::OpCode::IGE: return op_ige();
-        
-        case bytecode::OpCode::FEQ: return op_feq();
-        case bytecode::OpCode::FNE: return op_fne();
-        case bytecode::OpCode::FLT: return op_flt();
-        case bytecode::OpCode::FLE: return op_fle();
-        case bytecode::OpCode::FGT: return op_fgt();
-        case bytecode::OpCode::FGE: return op_fge();
-        
-        // Logical/bit ops
-        case bytecode::OpCode::AND: return op_and();
-        case bytecode::OpCode::OR: return op_or();
-        case bytecode::OpCode::NOT: return op_not();
-        case bytecode::OpCode::BAND: return op_band();
-        case bytecode::OpCode::BOR: return op_bor();
-        case bytecode::OpCode::BXOR: return op_bxor();
-        case bytecode::OpCode::BNOT: return op_bnot();
-        case bytecode::OpCode::SHL: return op_shl();
-        case bytecode::OpCode::SHR: return op_shr();
-        case bytecode::OpCode::USHR: return op_ushr();
-        
-        // Type conversions
-        case bytecode::OpCode::I2F: return op_i2f();
-        case bytecode::OpCode::F2I: return op_f2i();
-        case bytecode::OpCode::I2B: return op_i2b();
-        case bytecode::OpCode::B2I: return op_b2i();
-        case bytecode::OpCode::I2S: return op_i2s();
-        case bytecode::OpCode::F2S: return op_f2s();
-        case bytecode::OpCode::S2I: return op_s2i();
-        case bytecode::OpCode::S2F: return op_s2f();
-        
-        // Local variables
-        case bytecode::OpCode::LOAD_LOCAL: return op_load_local();
-        case bytecode::OpCode::STORE_LOCAL: return op_store_local();
-        case bytecode::OpCode::LOAD_LOCAL_0: return op_load_local_0();
-        case bytecode::OpCode::LOAD_LOCAL_1: return op_load_local_1();
-        
-        // Global variables
-        case bytecode::OpCode::LOAD_GLOBAL: return op_load_global();
-        case bytecode::OpCode::STORE_GLOBAL: return op_store_global();
-        case bytecode::OpCode::DEFINE_GLOBAL: return op_define_global();
-        
-        // Control flow
-        case bytecode::OpCode::JMP: return op_jmp();
-        case bytecode::OpCode::JMP_IF: return op_jmp_if();
-        case bytecode::OpCode::JMP_IF_NOT: return op_jmp_if_not();
-        case bytecode::OpCode::LOOP: return op_loop();
-        case bytecode::OpCode::CALL: return op_call();
-        case bytecode::OpCode::RET: return op_ret();
-        case bytecode::OpCode::RET_NULL: return op_ret_null();
-        case bytecode::OpCode::CALL_EXT: return op_call_ext();
-        
-        // Functions
-        case bytecode::OpCode::DEFINE_FUNC: return op_define_func();
-        case bytecode::OpCode::CLOSURE: return op_closure();
-        case bytecode::OpCode::CLOSE_UPVALUE: return op_close_upvalue();
-        case bytecode::OpCode::GET_UPVALUE: return op_get_upvalue();
-        case bytecode::OpCode::SET_UPVALUE: return op_set_upvalue();
-        
-        // Arrays
-        case bytecode::OpCode::ALLOC_ARRAY: return op_alloc_array();
-        case bytecode::OpCode::LOAD_INDEX: return op_load_index();
-        case bytecode::OpCode::STORE_INDEX: return op_store_index();
-        case bytecode::OpCode::ARRAY_LEN: return op_array_len();
-        case bytecode::OpCode::ARRAY_PUSH: return op_array_push();
-        
-        // Objects
-        case bytecode::OpCode::ALLOC_OBJ: return op_alloc_obj();
-        case bytecode::OpCode::LOAD_FIELD: return op_load_field();
-        case bytecode::OpCode::STORE_FIELD: return op_store_field();
-        case bytecode::OpCode::OBJ_TYPE: return op_obj_type();
-        
-        // Tuples
-        case bytecode::OpCode::CREATE_TUPLE: return op_create_tuple();
-        case bytecode::OpCode::LOAD_ELEM: return op_load_elem();
-        case bytecode::OpCode::STORE_ELEM: return op_store_elem();
-        
-        // Tensors
-        case bytecode::OpCode::TENSOR_CREATE: return op_tensor_create();
-        case bytecode::OpCode::TENSOR_LOAD: return op_tensor_load();
-        case bytecode::OpCode::TENSOR_STORE: return op_tensor_store();
-        case bytecode::OpCode::TENSOR_MATMUL: return op_tensor_matmul();
-        case bytecode::OpCode::TENSOR_RESHAPE: return op_tensor_reshape();
-        
-        // System
-        case bytecode::OpCode::PRINT: return op_print();
-        case bytecode::OpCode::PRINTLN: return op_println();
-        case bytecode::OpCode::PANIC: return op_panic();
-        case bytecode::OpCode::HALT: 
-            running = false; 
-            return false;
-        case bytecode::OpCode::INPUT: return op_input();
-        case bytecode::OpCode::TYPE_OF: return op_type_of();
-        case bytecode::OpCode::EXT: return op_ext();
-        
-        default:
-            error("Unknown opcode: " + std::to_string(op));
-            return false;
-    }
+    // Use if-else chain instead of switch for OpCode enum class
+    // Stack operations
+    if (op == static_cast<int32_t>(bytecode::OpCode::NOP)) return op_nop();
+    if (op == static_cast<int32_t>(bytecode::OpCode::PUSH)) return op_push();
+    if (op == static_cast<int32_t>(bytecode::OpCode::POP)) return op_pop();
+    if (op == static_cast<int32_t>(bytecode::OpCode::DUP)) return op_dup();
+    if (op == static_cast<int32_t>(bytecode::OpCode::SWAP)) return op_swap();
     
-    return true;
+    // Integer ops
+    if (op == static_cast<int32_t>(bytecode::OpCode::IADD)) return op_iadd();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ISUB)) return op_isub();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IMUL)) return op_imul();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IDIV)) return op_idiv();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IMOD)) return op_imod();
+    if (op == static_cast<int32_t>(bytecode::OpCode::INEG)) return op_ineg();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IINC)) return op_iinc();
+    
+    // Float ops
+    if (op == static_cast<int32_t>(bytecode::OpCode::FADD)) return op_fadd();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FSUB)) return op_fsub();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FMUL)) return op_fmul();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FDIV)) return op_fdiv();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FMOD)) return op_fmod();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FNEG)) return op_fneg();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FINC)) return op_finc();
+    
+    // Comparison ops
+    if (op == static_cast<int32_t>(bytecode::OpCode::IEQ)) return op_ieq();
+    if (op == static_cast<int32_t>(bytecode::OpCode::INE)) return op_ine();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ILT)) return op_ilt();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ILE)) return op_ile();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IGT)) return op_igt();
+    if (op == static_cast<int32_t>(bytecode::OpCode::IGE)) return op_ige();
+    
+    if (op == static_cast<int32_t>(bytecode::OpCode::FEQ)) return op_feq();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FNE)) return op_fne();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FLT)) return op_flt();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FLE)) return op_fle();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FGT)) return op_fgt();
+    if (op == static_cast<int32_t>(bytecode::OpCode::FGE)) return op_fge();
+    
+    // Logical/bit ops
+    if (op == static_cast<int32_t>(bytecode::OpCode::AND)) return op_and();
+    if (op == static_cast<int32_t>(bytecode::OpCode::OR)) return op_or();
+    if (op == static_cast<int32_t>(bytecode::OpCode::NOT)) return op_not();
+    if (op == static_cast<int32_t>(bytecode::OpCode::BAND)) return op_band();
+    if (op == static_cast<int32_t>(bytecode::OpCode::BOR)) return op_bor();
+    if (op == static_cast<int32_t>(bytecode::OpCode::BXOR)) return op_bxor();
+    if (op == static_cast<int32_t>(bytecode::OpCode::BNOT)) return op_bnot();
+    if (op == static_cast<int32_t>(bytecode::OpCode::SHL)) return op_shl();
+    if (op == static_cast<int32_t>(bytecode::OpCode::SHR)) return op_shr();
+    if (op == static_cast<int32_t>(bytecode::OpCode::USHR)) return op_ushr();
+    
+    // Type conversions
+    if (op == static_cast<int32_t>(bytecode::OpCode::I2F)) return op_i2f();
+    if (op == static_cast<int32_t>(bytecode::OpCode::F2I)) return op_f2i();
+    if (op == static_cast<int32_t>(bytecode::OpCode::I2B)) return op_i2b();
+    if (op == static_cast<int32_t>(bytecode::OpCode::B2I)) return op_b2i();
+    if (op == static_cast<int32_t>(bytecode::OpCode::I2S)) return op_i2s();
+    if (op == static_cast<int32_t>(bytecode::OpCode::F2S)) return op_f2s();
+    if (op == static_cast<int32_t>(bytecode::OpCode::S2I)) return op_s2i();
+    if (op == static_cast<int32_t>(bytecode::OpCode::S2F)) return op_s2f();
+    
+    // Local variables
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_LOCAL)) return op_load_local();
+    if (op == static_cast<int32_t>(bytecode::OpCode::STORE_LOCAL)) return op_store_local();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_LOCAL_0)) return op_load_local_0();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_LOCAL_1)) return op_load_local_1();
+    
+    // Global variables
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_GLOBAL)) return op_load_global();
+    if (op == static_cast<int32_t>(bytecode::OpCode::STORE_GLOBAL)) return op_store_global();
+    if (op == static_cast<int32_t>(bytecode::OpCode::DEFINE_GLOBAL)) return op_define_global();
+    
+    // Control flow
+    if (op == static_cast<int32_t>(bytecode::OpCode::JMP)) return op_jmp();
+    if (op == static_cast<int32_t>(bytecode::OpCode::JMP_IF)) return op_jmp_if();
+    if (op == static_cast<int32_t>(bytecode::OpCode::JMP_IF_NOT)) return op_jmp_if_not();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOOP)) return op_loop();
+    if (op == static_cast<int32_t>(bytecode::OpCode::CALL)) return op_call();
+    if (op == static_cast<int32_t>(bytecode::OpCode::RET)) return op_ret();
+    if (op == static_cast<int32_t>(bytecode::OpCode::RET_NULL)) return op_ret_null();
+    if (op == static_cast<int32_t>(bytecode::OpCode::CALL_EXT)) return op_call_ext();
+    
+    // Functions
+    if (op == static_cast<int32_t>(bytecode::OpCode::DEFINE_FUNC)) return op_define_func();
+    if (op == static_cast<int32_t>(bytecode::OpCode::CLOSURE)) return op_closure();
+    if (op == static_cast<int32_t>(bytecode::OpCode::CLOSE_UPVALUE)) return op_close_upvalue();
+    if (op == static_cast<int32_t>(bytecode::OpCode::GET_UPVALUE)) return op_get_upvalue();
+    if (op == static_cast<int32_t>(bytecode::OpCode::SET_UPVALUE)) return op_set_upvalue();
+    
+    // Arrays
+    if (op == static_cast<int32_t>(bytecode::OpCode::ALLOC_ARRAY)) return op_alloc_array();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_INDEX)) return op_load_index();
+    if (op == static_cast<int32_t>(bytecode::OpCode::STORE_INDEX)) return op_store_index();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ARRAY_LEN)) return op_array_len();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ARRAY_PUSH)) return op_array_push();
+    
+    // Objects
+    if (op == static_cast<int32_t>(bytecode::OpCode::ALLOC_OBJ)) return op_alloc_obj();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_FIELD)) return op_load_field();
+    if (op == static_cast<int32_t>(bytecode::OpCode::STORE_FIELD)) return op_store_field();
+    if (op == static_cast<int32_t>(bytecode::OpCode::OBJ_TYPE)) return op_obj_type();
+    
+    // Tuples
+    if (op == static_cast<int32_t>(bytecode::OpCode::CREATE_TUPLE)) return op_create_tuple();
+    if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_ELEM)) return op_load_elem();
+    if (op == static_cast<int32_t>(bytecode::OpCode::STORE_ELEM)) return op_store_elem();
+    
+    // Tensors
+    if (op == static_cast<int32_t>(bytecode::OpCode::TENSOR_CREATE)) return op_tensor_create();
+    if (op == static_cast<int32_t>(bytecode::OpCode::TENSOR_LOAD)) return op_tensor_load();
+    if (op == static_cast<int32_t>(bytecode::OpCode::TENSOR_STORE)) return op_tensor_store();
+    if (op == static_cast<int32_t>(bytecode::OpCode::TENSOR_MATMUL)) return op_tensor_matmul();
+    if (op == static_cast<int32_t>(bytecode::OpCode::TENSOR_RESHAPE)) return op_tensor_reshape();
+    
+    // System
+    if (op == static_cast<int32_t>(bytecode::OpCode::PRINT)) return op_print();
+    if (op == static_cast<int32_t>(bytecode::OpCode::PRINTLN)) return op_println();
+    
+    // Iterators (NEW - 2026-04-26)
+    if (op == static_cast<int32_t>(bytecode::OpCode::EXT)) {
+        int32_t ext_op = read_byte();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_CREATE)) return op_iter_create();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_NEXT)) return op_iter_next();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_HAS_NEXT)) return op_iter_has_next();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_RESET)) return op_iter_reset();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_GET_INDEX)) return op_iter_get_index();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::RANGE_CREATE)) return op_range_create();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ENUMERATE_CREATE)) return op_enumerate_create();
+        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ZIP_CREATE)) return op_zip_create();
+    }
+    if (op == static_cast<int32_t>(bytecode::OpCode::PANIC)) return op_panic();
+    if (op == static_cast<int32_t>(bytecode::OpCode::HALT)) { running = false; return false; }
+    if (op == static_cast<int32_t>(bytecode::OpCode::INPUT)) return op_input();
+    if (op == static_cast<int32_t>(bytecode::OpCode::TYPE_OF)) return op_type_of();
+    if (op == static_cast<int32_t>(bytecode::OpCode::EXT)) return op_ext();
+    
+    error("Unknown opcode: " + std::to_string(op));
+    return false;
 }
 
 // ============================================================================
@@ -1227,30 +1249,16 @@ bool ClawVM::op_call_ext() {
 // ============================================================================
 
 bool ClawVM::op_define_func() {
-    int32_t func_id = read_int();
     int32_t arity = read_byte();
     int32_t upvalue_count = read_byte();
     int32_t local_count = read_byte();
     int32_t max_stack = read_byte();
     
     auto fn = std::make_shared<FunctionValue>();
-    fn->func_id = func_id;
     fn->arity = arity;
     fn->upvalue_count = upvalue_count;
     fn->local_count = local_count;
     fn->max_stack = max_stack;
-    
-    // Find in module constants (function info)
-    for (auto& c : current_module.constants) {
-        if (c.type == bytecode::ValueType::FUNCTION_INFO) {
-            fn->name = c.get_string();
-            fn->instructions = c.get_instructions();
-            fn->constants = c.get_constants();
-        }
-    }
-    
-    // Store as constant
-    current_module.constants.push_back(bytecode::Constant{fn});
     
     runtime.push(Value{ValueTag::FUNCTION, fn});
     return true;
@@ -1259,21 +1267,15 @@ bool ClawVM::op_define_func() {
 bool ClawVM::op_closure() {
     int32_t func_idx = read_int();
     
-    // Get function from constant pool
-    if (func_idx >= static_cast<int32_t>(current_module.constants.size())) {
+    // Get function from module (by index into functions vector)
+    if (func_idx < 0 || func_idx >= static_cast<int32_t>(current_module.functions.size())) {
         error("Invalid function index");
         return false;
     }
     
-    auto& c = current_module.constants[func_idx];
-    std::shared_ptr<FunctionValue> fn;
-    if (c.type == bytecode::ValueType::FUNCTION_INFO) {
-        fn = std::make_shared<FunctionValue>();
-        fn->name = c.get_string();
-        fn->instructions = c.get_instructions();
-    } else {
-        fn = std::get<std::shared_ptr<FunctionValue>>(c.data);
-    }
+    auto& func = current_module.functions[func_idx];
+    std::shared_ptr<FunctionValue> fn = std::make_shared<FunctionValue>();
+    fn->name = func.name;
     
     // Create closure with upvalues
     auto closure = std::make_shared<ClosureValue>();
@@ -1434,6 +1436,238 @@ bool ClawVM::op_array_push() {
     arr->elements.push_back(val);
     
     runtime.push(arr_val);
+    return true;
+}
+
+// ============================================================================
+// Iterator Operations (NEW - 2026-04-26)
+// ============================================================================
+
+bool ClawVM::op_iter_create() {
+    // Create iterator from iterable (array)
+    // Stack: [array] -> [iterator]
+    Value iterable = runtime.pop();
+    
+    auto iter = std::make_shared<IteratorValue>();
+    
+    if (iterable.is_array()) {
+        auto arr = std::get<std::shared_ptr<ArrayValue>>(iterable.data);
+        iter->kind = "array";
+        iter->size = static_cast<int64_t>(arr->elements.size());
+        iter->index = 0;
+    } else if (iterable.is_string()) {
+        const std::string& s = iterable.as_string();
+        iter->kind = "array";
+        iter->size = static_cast<int64_t>(s.size());
+        iter->index = 0;
+    } else {
+        error("Cannot create iterator from this type");
+        return false;
+    }
+    
+    runtime.push(Value::iterator_v(iter));
+    return true;
+}
+
+bool ClawVM::op_iter_next() {
+    // Get next element from iterator
+    // Stack: [iterator] -> [value, done]
+    Value iter_val = runtime.pop();
+    
+    if (!iter_val.is_iterator()) {
+        error("Expected iterator");
+        return false;
+    }
+    
+    auto iter = std::get<std::shared_ptr<IteratorValue>>(iter_val.data);
+    Value result;
+    Value done;
+    
+    if (iter->kind == "array") {
+        if (iter->index < iter->size) {
+            // Get array element at current index - simplified: return index
+            result = Value::int_v(iter->index);
+            iter->index++;
+            done = Value::bool_v(false);
+        } else {
+            result = Value::nil();
+            done = Value::bool_v(true);
+        }
+    } else if (iter->kind == "range") {
+        if ((iter->step > 0 && iter->index < iter->end) || 
+            (iter->step < 0 && iter->index > iter->end)) {
+            result = Value::int_v(iter->index);
+            iter->index += iter->step;
+            done = Value::bool_v(false);
+        } else {
+            result = Value::nil();
+            done = Value::bool_v(true);
+        }
+    } else if (iter->kind == "enumerate") {
+        if (iter->index < iter->size) {
+            // Return tuple (index, value)
+            result = Value::int_v(iter->outer_index);
+            iter->index++;
+            iter->outer_index++;
+            done = Value::bool_v(false);
+        } else {
+            result = Value::nil();
+            done = Value::bool_v(true);
+        }
+    } else if (iter->kind == "zip") {
+        if (iter->index < iter->size) {
+            result = Value::int_v(iter->index);
+            iter->index++;
+            done = Value::bool_v(false);
+        } else {
+            result = Value::nil();
+            done = Value::bool_v(true);
+        }
+    } else {
+        error("Unknown iterator kind");
+        return false;
+    }
+    
+    runtime.push(result);
+    runtime.push(done);
+    return true;
+}
+
+bool ClawVM::op_iter_has_next() {
+    // Check if iterator has more elements
+    // Stack: [iterator] -> [bool]
+    Value iter_val = runtime.pop();
+    
+    if (!iter_val.is_iterator()) {
+        error("Expected iterator");
+        return false;
+    }
+    
+    auto iter = std::get<std::shared_ptr<IteratorValue>>(iter_val.data);
+    bool has_next = false;
+    
+    if (iter->kind == "array") {
+        has_next = iter->index < iter->size;
+    } else if (iter->kind == "range") {
+        has_next = (iter->step > 0 && iter->index < iter->end) || 
+                   (iter->step < 0 && iter->index > iter->end);
+    } else if (iter->kind == "enumerate") {
+        has_next = iter->index < iter->size;
+    } else if (iter->kind == "zip") {
+        has_next = iter->index < iter->size;
+    }
+    
+    runtime.push(Value::bool_v(has_next));
+    return true;
+}
+
+bool ClawVM::op_iter_reset() {
+    // Reset iterator to beginning
+    // Stack: [iterator] -> [iterator]
+    Value iter_val = runtime.pop();
+    
+    if (!iter_val.is_iterator()) {
+        error("Expected iterator");
+        return false;
+    }
+    
+    auto iter = std::get<std::shared_ptr<IteratorValue>>(iter_val.data);
+    iter->index = 0;
+    
+    if (iter->kind == "range") {
+        iter->index = iter->start;
+    } else if (iter->kind == "enumerate") {
+        iter->outer_index = 0;
+    }
+    
+    runtime.push(iter_val);
+    return true;
+}
+
+bool ClawVM::op_iter_get_index() {
+    // Get current index
+    // Stack: [iterator] -> [index]
+    Value iter_val = runtime.pop();
+    
+    if (!iter_val.is_iterator()) {
+        error("Expected iterator");
+        return false;
+    }
+    
+    auto iter = std::get<std::shared_ptr<IteratorValue>>(iter_val.data);
+    runtime.push(Value::int_v(iter->index));
+    return true;
+}
+
+bool ClawVM::op_range_create() {
+    // Create range iterator: start, end, step
+    // Stack: [start, end, step] -> [iterator]
+    int64_t step = 1;
+    int64_t end = 0;
+    int64_t start = 0;
+    
+    // Pop in reverse order
+    Value step_val = runtime.pop();
+    Value end_val = runtime.pop();
+    Value start_val = runtime.pop();
+    
+    if (step_val.is_int()) {
+        step = std::get<int64_t>(step_val.data);
+    }
+    if (end_val.is_int()) {
+        end = std::get<int64_t>(end_val.data);
+    }
+    if (start_val.is_int()) {
+        start = std::get<int64_t>(start_val.data);
+    }
+    
+    auto iter = IteratorValue::create_range_iterator(start, end, step);
+    runtime.push(Value::iterator_v(iter));
+    return true;
+}
+
+bool ClawVM::op_enumerate_create() {
+    // Create enumerate iterator
+    // Stack: [array] -> [iterator]
+    Value arr_val = runtime.pop();
+    
+    if (!arr_val.is_array()) {
+        error("enumerate requires an array");
+        return false;
+    }
+    
+    auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+    auto iter = IteratorValue::create_enumerate_iterator(arr->elements);
+    runtime.push(Value::iterator_v(iter));
+    return true;
+}
+
+bool ClawVM::op_zip_create() {
+    // Create zip iterator from multiple arrays
+    // Stack: [count, array1, array2, ...] -> [iterator]
+    Value count_val = runtime.pop();
+    int32_t count = 1;
+    
+    if (count_val.is_int()) {
+        count = static_cast<int32_t>(std::get<int64_t>(count_val.data));
+    }
+    
+    std::vector<std::vector<Value>> arrays;
+    arrays.reserve(count);
+    
+    for (int32_t i = 0; i < count; i++) {
+        Value arr_val = runtime.pop();
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            arrays.push_back(arr->elements);
+        } else {
+            error("zip requires arrays");
+            return false;
+        }
+    }
+    
+    auto iter = IteratorValue::create_zip_iterator(arrays);
+    runtime.push(Value::iterator_v(iter));
     return true;
 }
 
@@ -1666,8 +1900,955 @@ bool ClawVM::op_type_of() {
 }
 
 bool ClawVM::op_ext() {
-    // Extension opcode - for custom extensions
-    return true;
+    // Extension opcode - for stdlib function calls
+    // Format: EXT <opcode>
+    int opcode = read_byte();
+    
+    auto& stack = runtime.stack;
+    
+    switch (opcode) {
+        // ========== I/O 函数 (0-9) ==========
+        case 0: { // print
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            std::cout << v.to_string();
+            stack.pop_back();
+            return true;
+        }
+        case 1: { // println
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            std::cout << v.to_string() << "\n";
+            stack.pop_back();
+            return true;
+        }
+        case 2: { // input
+            std::string line;
+            std::getline(std::cin, line);
+            runtime.push(Value::string_v(line));
+            return true;
+        }
+        case 3: { // input_str
+            if (stack.empty()) return true;
+            std::string prompt = stack.back().to_string();
+            stack.pop_back();
+            std::cout << prompt;
+            std::string line;
+            std::getline(std::cin, line);
+            runtime.push(Value::string_v(line));
+            return true;
+        }
+        
+        // ========== 字符串函数 (10-29) ==========
+        case 10: { // str_len
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            int64_t len = 0;
+            if (v.tag == ValueTag::STRING) {
+                len = std::get<std::string>(v.data).size();
+            } else if (v.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+                len = arr ? arr->elements.size() : 0;
+            }
+            stack.back() = Value::int_v(len);
+            return true;
+        }
+        case 15: { // str_upper
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::STRING) {
+                std::string s = std::get<std::string>(v.data);
+                for (char& c : s) c = toupper(c);
+                stack.back() = Value::string_v(s);
+            }
+            return true;
+        }
+        case 16: { // str_lower
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::STRING) {
+                std::string s = std::get<std::string>(v.data);
+                for (char& c : s) c = tolower(c);
+                stack.back() = Value::string_v(s);
+            }
+            return true;
+        }
+        case 17: { // str_trim
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::STRING) {
+                std::string s = std::get<std::string>(v.data);
+                size_t start = s.find_first_not_of(" \t\n\r");
+                size_t end = s.find_last_not_of(" \t\n\r");
+                if (start == std::string::npos) {
+                    stack.back() = Value::string_v("");
+                } else {
+                    stack.back() = Value::string_v(s.substr(start, end - start + 1));
+                }
+            }
+            return true;
+        }
+        
+        // ========== 数学函数 (30-59) ==========
+        case 30: { // abs
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::INT) {
+                int64_t x = v.as_int();
+                stack.back() = Value::int_v(x < 0 ? -x : x);
+            } else if (v.tag == ValueTag::FLOAT) {
+                double x = v.as_float();
+                stack.back() = Value::float_v(x < 0 ? -x : x);
+            }
+            return true;
+        }
+        case 31: { // sin
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::sin(x));
+            return true;
+        }
+        case 32: { // cos
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::cos(x));
+            return true;
+        }
+        case 33: { // tan
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::tan(x));
+            return true;
+        }
+        case 38: { // sqrt
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::sqrt(x));
+            return true;
+        }
+        case 39: { // pow
+            if (stack.size() < 2) return true;
+            double base = stack[stack.size() - 2].as_float();
+            double exp = stack[stack.size() - 1].as_float();
+            stack.pop_back();
+            stack.back() = Value::float_v(std::pow(base, exp));
+            return true;
+        }
+        case 43: { // floor
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::floor(x));
+            return true;
+        }
+        case 44: { // ceil
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::ceil(x));
+            return true;
+        }
+        case 45: { // round
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            double x = v.as_float();
+            stack.back() = Value::float_v(std::round(x));
+            return true;
+        }
+        case 51: { // pi
+            runtime.push(Value::float_v(3.14159265358979323846));
+            return true;
+        }
+        case 52: { // e
+            runtime.push(Value::float_v(2.71828182845904523536));
+            return true;
+        }
+        case 53: { // random
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            static std::uniform_real_distribution<> dis(0.0, 1.0);
+            runtime.push(Value::float_v(dis(gen)));
+            return true;
+        }
+        
+        // ========== 数组函数 (60-79) ==========
+        case 60: { // arr_len
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            size_t len = 0;
+            if (v.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+                len = arr ? arr->elements.size() : 0;
+            }
+            stack.back() = Value::int_v(static_cast<int64_t>(len));
+            return true;
+        }
+        case 61: { // arr_push
+            if (stack.size() < 2) return true;
+            Value arr_val = stack[stack.size() - 2];
+            Value elem = stack.back();
+            stack.pop_back();
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    arr->elements.push_back(elem);
+                }
+            }
+            stack.back() = arr_val;
+            return true;
+        }
+        case 62: { // arr_pop
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+                if (arr && !arr->elements.empty()) {
+                    stack.back() = arr->elements.back();
+                    arr->elements.pop_back();
+                }
+            }
+            return true;
+        }
+        case 65: { // arr_sort
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            if (v.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+                if (arr) {
+                    std::sort(arr->elements.begin(), arr->elements.end(), 
+                        [](const Value& a, const Value& b) {
+                            return a.as_float() < b.as_float();
+                        });
+                }
+            }
+            return true;
+        }
+        
+        // ========== 类型转换函数 (90-99) ==========
+        case 90: { // to_int
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            stack.back() = Value::int_v(static_cast<int64_t>(v.as_float()));
+            return true;
+        }
+        case 91: { // to_float
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            stack.back() = Value::float_v(v.as_float());
+            return true;
+        }
+        case 92: { // to_string
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            stack.back() = Value::string_v(v.to_string());
+            return true;
+        }
+        case 93: { // to_bool
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            stack.back() = Value::bool_v(v.as_bool());
+            return true;
+        }
+        case 94: { // type_of
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            std::string type_name;
+            switch (v.tag) {
+                case ValueTag::NIL: type_name = "nil"; break;
+                case ValueTag::BOOL: type_name = "bool"; break;
+                case ValueTag::INT: type_name = "int"; break;
+                case ValueTag::FLOAT: type_name = "float"; break;
+                case ValueTag::STRING: type_name = "string"; break;
+                case ValueTag::ARRAY: type_name = "array"; break;
+                case ValueTag::TUPLE: type_name = "tuple"; break;
+                case ValueTag::TENSOR: type_name = "tensor"; break;
+                case ValueTag::FUNCTION: type_name = "function"; break;
+                case ValueTag::CLOSURE: type_name = "closure"; break;
+                default: type_name = "unknown"; break;
+            }
+            stack.back() = Value::string_v(type_name);
+            return true;
+        }
+        
+        // ========== 更多字符串函数 (10-29) ==========
+        case 11: { // str_contains
+            if (stack.size() < 2) return true;
+            std::string sub = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            stack.back() = Value::bool_v(s.find(sub) != std::string::npos);
+            return true;
+        }
+        case 12: { // str_find
+            if (stack.size() < 2) return true;
+            std::string sub = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            size_t pos = s.find(sub);
+            stack.back() = Value::int_v(pos == std::string::npos ? -1 : static_cast<int64_t>(pos));
+            return true;
+        }
+        case 13: { // str_replace
+            if (stack.size() < 3) return true;
+            std::string to = stack.back().as_string();
+            stack.pop_back();
+            std::string from = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            size_t pos = 0;
+            while ((pos = s.find(from, pos)) != std::string::npos) {
+                s.replace(pos, from.length(), to);
+                pos += to.length();
+            }
+            stack.back() = Value::string_v(s);
+            return true;
+        }
+        case 14: { // str_split
+            if (stack.size() < 2) return true;
+            std::string delim = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            std::vector<Value> result;
+            size_t start = 0, end = 0;
+            while ((end = s.find(delim, start)) != std::string::npos) {
+                result.push_back(Value::string_v(s.substr(start, end - start)));
+                start = end + delim.length();
+            }
+            result.push_back(Value::string_v(s.substr(start)));
+            auto arr = std::make_shared<ArrayValue>();
+            arr->elements = result;
+            stack.back() = Value::array_v(arr);
+            return true;
+        }
+        case 18: { // str_substring
+            if (stack.size() < 3) return true;
+            int64_t len = stack.back().as_int();
+            stack.pop_back();
+            int64_t start = stack.back().as_int();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            if (start < 0) start = 0;
+            if (start >= static_cast<int64_t>(s.length())) {
+                stack.back() = Value::string_v("");
+            } else {
+                auto max_len = static_cast<size_t>(s.length() - start);
+                auto actual_len = len > 0 ? std::min(static_cast<size_t>(len), max_len) : max_len;
+                stack.back() = Value::string_v(s.substr(start, actual_len));
+            }
+            return true;
+        }
+        case 19: { // str_starts_with
+            if (stack.size() < 2) return true;
+            std::string prefix = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            stack.back() = Value::bool_v(s.rfind(prefix, 0) == 0);
+            return true;
+        }
+        case 20: { // str_ends_with
+            if (stack.size() < 2) return true;
+            std::string suffix = stack.back().as_string();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            if (suffix.length() > s.length()) {
+                stack.back() = Value::bool_v(false);
+            } else {
+                stack.back() = Value::bool_v(s.compare(s.length() - suffix.length(), suffix.length(), suffix) == 0);
+            }
+            return true;
+        }
+        case 21: { // str_reverse
+            if (stack.empty()) return true;
+            std::string s = stack.back().as_string();
+            std::reverse(s.begin(), s.end());
+            stack.back() = Value::string_v(s);
+            return true;
+        }
+        case 22: { // str_repeat
+            if (stack.size() < 2) return true;
+            int64_t n = stack.back().as_int();
+            stack.pop_back();
+            std::string s = stack.back().as_string();
+            if (n <= 0) {
+                stack.back() = Value::string_v("");
+            } else {
+                std::string result;
+                result.reserve(s.length() * n);
+                for (int64_t i = 0; i < n; ++i) {
+                    result += s;
+                }
+                stack.back() = Value::string_v(result);
+            }
+            return true;
+        }
+        case 23: { // str_join
+            if (stack.size() < 2) return true;
+            std::string delim = stack.back().as_string();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            std::string result;
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    for (size_t i = 0; i < arr->elements.size(); ++i) {
+                        if (i > 0) result += delim;
+                        result += arr->elements[i].to_string();
+                    }
+                }
+            }
+            stack.back() = Value::string_v(result);
+            return true;
+        }
+        case 24: { // format - simplified version
+            // Just concat all args for now
+            // Would need proper format string parsing for full support
+            return true;
+        }
+        
+        // ========== 更多数学函数 (30-59) ==========
+        case 34: { // asin
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::asin(x));
+            return true;
+        }
+        case 35: { // acos
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::acos(x));
+            return true;
+        }
+        case 36: { // atan
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::atan(x));
+            return true;
+        }
+        case 37: { // atan2
+            if (stack.size() < 2) return true;
+            double y = stack.back().as_float();
+            stack.pop_back();
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::atan2(y, x));
+            return true;
+        }
+        case 40: { // exp
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::exp(x));
+            return true;
+        }
+        case 41: { // log
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::log(x));
+            return true;
+        }
+        case 42: { // log10
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::log10(x));
+            return true;
+        }
+        case 46: { // trunc
+            if (stack.empty()) return true;
+            double x = stack.back().as_float();
+            stack.back() = Value::float_v(std::trunc(x));
+            return true;
+        }
+        case 47: { // min
+            if (stack.size() < 2) return true;
+            Value b = stack.back();
+            stack.pop_back();
+            Value a = stack.back();
+            if (a.tag == ValueTag::INT && b.tag == ValueTag::INT) {
+                stack.back() = Value::int_v(std::min(a.as_int(), b.as_int()));
+            } else {
+                stack.back() = Value::float_v(std::min(a.as_float(), b.as_float()));
+            }
+            return true;
+        }
+        case 48: { // max
+            if (stack.size() < 2) return true;
+            Value b = stack.back();
+            stack.pop_back();
+            Value a = stack.back();
+            if (a.tag == ValueTag::INT && b.tag == ValueTag::INT) {
+                stack.back() = Value::int_v(std::max(a.as_int(), b.as_int()));
+            } else {
+                stack.back() = Value::float_v(std::max(a.as_float(), b.as_float()));
+            }
+            return true;
+        }
+        case 49: { // mod
+            if (stack.size() < 2) return true;
+            Value b = stack.back();
+            stack.pop_back();
+            Value a = stack.back();
+            if (a.tag == ValueTag::INT && b.tag == ValueTag::INT) {
+                stack.back() = Value::int_v(a.as_int() % b.as_int());
+            } else {
+                stack.back() = Value::float_v(std::fmod(a.as_float(), b.as_float()));
+            }
+            return true;
+        }
+        case 50: { // sign
+            if (stack.empty()) return true;
+            Value v = stack.back();
+            int64_t result = 0;
+            if (v.tag == ValueTag::INT) {
+                int64_t iv = v.as_int();
+                result = (iv > 0) - (iv < 0);
+            } else {
+                double fv = v.as_float();
+                result = (fv > 0) - (fv < 0);
+            }
+            stack.back() = Value::int_v(result);
+            return true;
+        }
+        case 54: { // random_int
+            if (stack.size() < 2) return true;
+            int64_t max = stack.back().as_int();
+            stack.pop_back();
+            int64_t min = stack.back().as_int();
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            std::uniform_int_distribution<int64_t> dist(min, max);
+            stack.back() = Value::int_v(dist(gen));
+            return true;
+        }
+        case 55: { // random_seed
+            if (!stack.empty()) stack.pop_back();
+            return true;
+        }
+        
+        // ========== 更多数组函数 (60-79) ==========
+        case 63: { // arr_insert
+            if (stack.size() < 3) return true;
+            Value val = stack.back();
+            stack.pop_back();
+            int64_t idx = stack.back().as_int();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr && idx >= 0 && idx <= static_cast<int64_t>(arr->elements.size())) {
+                    arr->elements.insert(arr->elements.begin() + idx, val);
+                }
+            }
+            stack.back() = arr_val;
+            return true;
+        }
+        case 64: { // arr_remove
+            if (stack.size() < 2) return true;
+            int64_t idx = stack.back().as_int();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr && idx >= 0 && idx < static_cast<int64_t>(arr->elements.size())) {
+                    arr->elements.erase(arr->elements.begin() + idx);
+                }
+            }
+            stack.back() = arr_val;
+            return true;
+        }
+        case 66: { // arr_reverse
+            if (stack.empty()) return true;
+            Value arr_val = stack.back();
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    std::reverse(arr->elements.begin(), arr->elements.end());
+                }
+            }
+            return true;
+        }
+        case 67: { // arr_find
+            if (stack.size() < 2) return true;
+            Value val = stack.back();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            int64_t result = -1;
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    for (size_t i = 0; i < arr->elements.size(); ++i) {
+                        if (arr->elements[i].to_string() == val.to_string()) {
+                            result = static_cast<int64_t>(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            stack.back() = Value::int_v(result);
+            return true;
+        }
+        case 68: { // arr_contains
+            if (stack.size() < 2) return true;
+            Value val = stack.back();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            bool found = false;
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    for (const auto& elem : arr->elements) {
+                        if (elem.to_string() == val.to_string()) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            stack.back() = Value::bool_v(found);
+            return true;
+        }
+        case 69: { // arr_unique
+            if (stack.empty()) return true;
+            Value arr_val = stack.back();
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    std::vector<Value> unique_vals;
+                    for (const auto& elem : arr->elements) {
+                        bool found = false;
+                        for (const auto& u : unique_vals) {
+                            if (u.to_string() == elem.to_string()) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) unique_vals.push_back(elem);
+                    }
+                    auto new_arr = std::make_shared<ArrayValue>();
+                    new_arr->elements = unique_vals;
+                    stack.back() = Value::array_v(new_arr);
+                }
+            }
+            return true;
+        }
+        case 70: { // arr_concat
+            if (stack.size() < 2) return true;
+            Value arr2_val = stack.back();
+            stack.pop_back();
+            Value arr1_val = stack.back();
+            std::vector<Value> result;
+            if (arr1_val.tag == ValueTag::ARRAY) {
+                auto arr1 = std::get<std::shared_ptr<ArrayValue>>(arr1_val.data);
+                if (arr1) {
+                    for (const auto& v : arr1->elements) result.push_back(v);
+                }
+            }
+            if (arr2_val.tag == ValueTag::ARRAY) {
+                auto arr2 = std::get<std::shared_ptr<ArrayValue>>(arr2_val.data);
+                if (arr2) {
+                    for (const auto& v : arr2->elements) result.push_back(v);
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements = result;
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 71: { // arr_slice
+            if (stack.size() < 3) return true;
+            int64_t end = stack.back().as_int();
+            stack.pop_back();
+            int64_t start = stack.back().as_int();
+            stack.pop_back();
+            Value arr_val = stack.back();
+            std::vector<Value> result;
+            if (arr_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+                if (arr) {
+                    auto sz = arr->elements.size();
+                    if (start < 0) start = 0;
+                    if (end > static_cast<int64_t>(sz)) end = sz;
+                    if (start < end) {
+                        for (auto i = start; i < end; ++i) {
+                            result.push_back(arr->elements[i]);
+                        }
+                    }
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements = result;
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 72: { // arr_range
+            if (stack.size() < 3) return true;
+            int64_t step = stack.back().as_int();
+            stack.pop_back();
+            int64_t end = stack.back().as_int();
+            stack.pop_back();
+            int64_t start = stack.back().as_int();
+            std::vector<Value> result;
+            if (step != 0) {
+                if (step > 0) {
+                    for (int64_t i = start; i < end; i += step) {
+                        result.push_back(Value::int_v(i));
+                    }
+                } else {
+                    for (int64_t i = start; i > end; i += step) {
+                        result.push_back(Value::int_v(i));
+                    }
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements = result;
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 73: { // arr_fill
+            if (stack.size() < 2) return true;
+            Value val = stack.back();
+            stack.pop_back();
+            int64_t n = stack.back().as_int();
+            std::vector<Value> result;
+            for (int64_t i = 0; i < n; ++i) {
+                result.push_back(val);
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements = result;
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        
+        // ========== 文件函数 (80-89) ==========
+        case 80: { // file_open - simplified
+            if (stack.size() < 2) return true;
+            stack.pop_back();
+            std::string path = stack.back().as_string();
+            stack.back() = Value::string_v("file:" + path);
+            return true;
+        }
+        case 81: { // file_close
+            stack.push_back(Value::bool_v(true));
+            return true;
+        }
+        case 82: { // file_read_line
+            stack.push_back(Value::string_v(""));
+            return true;
+        }
+        case 83: { // file_read_all
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            std::ifstream file(path);
+            std::string content;
+            if (file.is_open()) {
+                content = std::string((std::istreambuf_iterator<char>(file)),
+                                      std::istreambuf_iterator<char>());
+                file.close();
+            }
+            stack.push_back(Value::string_v(content));
+            return true;
+        }
+        case 84: { // file_write
+            if (stack.size() < 2) return true;
+            std::string content = stack.back().as_string();
+            stack.pop_back();
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            std::ofstream file(path);
+            bool success = file.is_open();
+            if (success) {
+                file << content;
+                file.close();
+            }
+            stack.push_back(Value::bool_v(success));
+            return true;
+        }
+        case 85: { // file_exists
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            std::ifstream file(path);
+            stack.back() = Value::bool_v(file.is_open());
+            return true;
+        }
+        case 86: { // file_remove
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            bool success = std::remove(path.c_str()) == 0;
+            stack.push_back(Value::bool_v(success));
+            return true;
+        }
+        case 87: { // file_rename
+            if (stack.size() < 2) return true;
+            std::string new_path = stack.back().as_string();
+            stack.pop_back();
+            std::string old_path = stack.back().as_string();
+            stack.pop_back();
+            bool success = std::rename(old_path.c_str(), new_path.c_str()) == 0;
+            stack.push_back(Value::bool_v(success));
+            return true;
+        }
+        case 88: { // file_size
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            std::ifstream file(path, std::ios::ate | std::ios::binary);
+            int64_t size = 0;
+            if (file.is_open()) {
+                size = file.tellg();
+                file.close();
+            }
+            stack.back() = Value::int_v(size);
+            return true;
+        }
+        case 89: { // mkdir
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            bool success = std::filesystem::create_directory(path);
+            stack.back() = Value::bool_v(success);
+            return true;
+        }
+        
+        // ========== 张量函数 (100-108) ==========
+        case 100: { // tensor_create
+            if (stack.size() < 2) return true;
+            stack.pop_back(); // dtype (ignored for now)
+            Value shape_val = stack.back();
+            int64_t total = 1;
+            if (shape_val.tag == ValueTag::ARRAY) {
+                auto shape_arr = std::get<std::shared_ptr<ArrayValue>>(shape_val.data);
+                if (shape_arr) {
+                    for (const auto& d : shape_arr->elements) {
+                        total *= d.as_int();
+                    }
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements.resize(total, Value::float_v(0.0));
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 101: { // tensor_zeros
+            if (stack.empty()) return true;
+            Value shape_val = stack.back();
+            int64_t total = 1;
+            if (shape_val.tag == ValueTag::ARRAY) {
+                auto shape_arr = std::get<std::shared_ptr<ArrayValue>>(shape_val.data);
+                if (shape_arr) {
+                    for (const auto& d : shape_arr->elements) {
+                        total *= d.as_int();
+                    }
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements.resize(total, Value::float_v(0.0));
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 102: { // tensor_ones
+            if (stack.empty()) return true;
+            Value shape_val = stack.back();
+            int64_t total = 1;
+            if (shape_val.tag == ValueTag::ARRAY) {
+                auto shape_arr = std::get<std::shared_ptr<ArrayValue>>(shape_val.data);
+                if (shape_arr) {
+                    for (const auto& d : shape_arr->elements) {
+                        total *= d.as_int();
+                    }
+                }
+            }
+            auto new_arr = std::make_shared<ArrayValue>();
+            new_arr->elements.resize(total, Value::float_v(1.0));
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 103: { // tensor_randn
+            if (stack.empty()) return true;
+            Value shape_val = stack.back();
+            int64_t total = 1;
+            if (shape_val.tag == ValueTag::ARRAY) {
+                auto shape_arr = std::get<std::shared_ptr<ArrayValue>>(shape_val.data);
+                if (shape_arr) {
+                    for (const auto& d : shape_arr->elements) {
+                        total *= d.as_int();
+                    }
+                }
+            }
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            std::normal_distribution<double> dist(0.0, 1.0);
+            auto new_arr = std::make_shared<ArrayValue>();
+            for (int64_t i = 0; i < total; ++i) {
+                new_arr->elements.push_back(Value::float_v(dist(gen)));
+            }
+            stack.back() = Value::array_v(new_arr);
+            return true;
+        }
+        case 104: { // tensor_matmul - simplified as dot product
+            if (stack.size() < 2) return true;
+            Value b_val = stack.back();
+            stack.pop_back();
+            Value a_val = stack.back();
+            double sum = 0;
+            if (a_val.tag == ValueTag::ARRAY && b_val.tag == ValueTag::ARRAY) {
+                auto arr_a = std::get<std::shared_ptr<ArrayValue>>(a_val.data);
+                auto arr_b = std::get<std::shared_ptr<ArrayValue>>(b_val.data);
+                if (arr_a && arr_b) {
+                    size_t min_len = std::min(arr_a->elements.size(), arr_b->elements.size());
+                    for (size_t i = 0; i < min_len; ++i) {
+                        sum += arr_a->elements[i].as_float() * arr_b->elements[i].as_float();
+                    }
+                }
+            }
+            stack.back() = Value::float_v(sum);
+            return true;
+        }
+        case 105: { // tensor_reshape - just return as-is for now
+            return true;
+        }
+        case 106: { // tensor_transpose - just return as-is for now
+            return true;
+        }
+        case 107: { // tensor_sum
+            if (stack.size() < 2) return true;
+            stack.pop_back(); // axis (ignored)
+            Value tensor_val = stack.back();
+            double sum = 0;
+            if (tensor_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(tensor_val.data);
+                if (arr) {
+                    for (const auto& v : arr->elements) {
+                        sum += v.as_float();
+                    }
+                }
+            }
+            stack.back() = Value::float_v(sum);
+            return true;
+        }
+        case 108: { // tensor_mean
+            if (stack.size() < 2) return true;
+            stack.pop_back(); // axis (ignored)
+            Value tensor_val = stack.back();
+            double sum = 0;
+            size_t count = 0;
+            if (tensor_val.tag == ValueTag::ARRAY) {
+                auto arr = std::get<std::shared_ptr<ArrayValue>>(tensor_val.data);
+                if (arr) {
+                    for (const auto& v : arr->elements) {
+                        sum += v.as_float();
+                        count++;
+                    }
+                }
+            }
+            stack.back() = Value::float_v(count > 0 ? sum / count : 0.0);
+            return true;
+        }
+        
+        default:
+            std::cerr << "Unknown EXT opcode: " << opcode << "\n";
+            return false;
+    }
 }
 
 } // namespace vm

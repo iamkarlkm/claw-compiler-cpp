@@ -50,7 +50,8 @@ enum class ValueTag {
     TENSOR,
     FUNCTION,
     CLOSURE,
-    USERDATA
+    USERDATA,
+    ITERATOR  // NEW - Iterator type
 };
 
 struct Value;
@@ -60,6 +61,62 @@ struct TensorValue;
 struct FunctionValue;
 struct ClosureValue;
 struct UserDataValue;
+
+// Iterator value structure (NEW - 2026-04-26)
+struct IteratorValue {
+    std::string kind;                 // "array", "range", "enumerate", "zip"
+    int64_t index = 0;                // Current position
+    int64_t size = 0;                 // Total size
+    int64_t step = 1;                 // Step for range
+    int64_t start = 0;                // Start for range
+    int64_t end = 0;                  // End for range
+    int64_t outer_index = 0;          // For enumerate: current index
+    std::vector<int64_t> indices;     // Current indices for nested iteration
+    std::vector<int64_t> sizes;       // Sizes of multiple iterables (for zip)
+    std::vector<std::vector<Value>> arrays; // For zip: multiple arrays
+    
+    static std::shared_ptr<IteratorValue> create_array_iterator(const std::vector<Value>& arr) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "array";
+        iter->size = static_cast<int64_t>(arr.size());
+        iter->index = 0;
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_range_iterator(int64_t start, int64_t end, int64_t step = 1) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "range";
+        iter->start = start;
+        iter->end = end;
+        iter->step = step;
+        iter->index = start;
+        iter->size = (end - start + (step > 0 ? step - 1 : step + 1)) / (step > 0 ? step : -step);
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_enumerate_iterator(const std::vector<Value>& arr) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "enumerate";
+        iter->size = static_cast<int64_t>(arr.size());
+        iter->index = 0;
+        iter->outer_index = 0;
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_zip_iterator(const std::vector<std::vector<Value>>& arrays) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "zip";
+        iter->arrays = arrays;
+        iter->size = arrays.empty() ? 0 : static_cast<int64_t>(arrays[0].size());
+        for (const auto& arr : arrays) {
+            if (static_cast<int64_t>(arr.size()) < iter->size) {
+                iter->size = static_cast<int64_t>(arr.size());
+            }
+        }
+        iter->index = 0;
+        return iter;
+    }
+};
 
 using ValueData = std::variant<
     std::monostate,           // NIL
@@ -72,7 +129,8 @@ using ValueData = std::variant<
     std::shared_ptr<TensorValue>,   // TENSOR
     std::shared_ptr<FunctionValue>, // FUNCTION
     std::shared_ptr<ClosureValue>,  // CLOSURE
-    std::shared_ptr<UserDataValue>  // USERDATA
+    std::shared_ptr<UserDataValue>, // USERDATA
+    std::shared_ptr<IteratorValue>  // ITERATOR
 >;
 
 struct Value {
@@ -91,6 +149,10 @@ struct Value {
     static Value int_v(int64_t i) { Value v; v.tag = ValueTag::INT; v.data = i; return v; }
     static Value float_v(double f) { Value v; v.tag = ValueTag::FLOAT; v.data = f; return v; }
     static Value string_v(const std::string& s) { Value v; v.tag = ValueTag::STRING; v.data = s; return v; }
+    static Value array_v(std::shared_ptr<ArrayValue> arr) { Value v; v.tag = ValueTag::ARRAY; v.data = arr; return v; }
+    static Value tuple_v(std::shared_ptr<TupleValue> t) { Value v; v.tag = ValueTag::TUPLE; v.data = t; return v; }
+    static Value tensor_v(std::shared_ptr<TensorValue> t) { Value v; v.tag = ValueTag::TENSOR; v.data = t; return v; }
+    static Value iterator_v(std::shared_ptr<IteratorValue> iter) { Value v; v.tag = ValueTag::ITERATOR; v.data = iter; return v; }
     
     // Type checking
     bool is_nil() const { return tag == ValueTag::NIL; }
@@ -105,6 +167,7 @@ struct Value {
     bool is_function() const { return tag == ValueTag::FUNCTION; }
     bool is_closure() const { return tag == ValueTag::CLOSURE; }
     bool is_callable() const { return is_function() || is_closure(); }
+    bool is_iterator() const { return tag == ValueTag::ITERATOR; }
     
     // Value extraction
     bool as_bool() const { 
@@ -314,6 +377,9 @@ struct VMRuntime {
     void set_global(int32_t idx, const Value& val);
     Value get_global(int32_t idx) const;
     
+    // Get global map for REPL variable inspection
+    const std::map<std::string, int32_t>& get_global_map() const { return global_map; }
+    
     // Upvalue operations
     std::shared_ptr<UpvalueValue> capture_upvalue(Value* slot);
     void close_upvalues(int32_t slot_idx);
@@ -356,6 +422,10 @@ public:
     // Statistics
     uint64_t instructions_executed = 0;
     uint64_t gc_cycles = 0;
+    
+    // Current function context (for instruction dispatch)
+    const bytecode::Function* current_function = nullptr;
+    uint32_t current_function_idx = 0;
     
     ClawVM(size_t stack_size = DEFAULT_STACK_SIZE) : runtime(stack_size) {}
     
@@ -507,6 +577,16 @@ private:
     bool op_input();
     bool op_type_of();
     bool op_ext();
+    
+    // Iterator operations (NEW - 2026-04-26)
+    bool op_iter_create();
+    bool op_iter_next();
+    bool op_iter_has_next();
+    bool op_iter_reset();
+    bool op_iter_get_index();
+    bool op_range_create();
+    bool op_enumerate_create();
+    bool op_zip_create();
     
     // Helper methods
     Value& current_closure();

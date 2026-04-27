@@ -83,6 +83,10 @@ enum class TypeKind {
     ENUM,       // Enum type
     ALIAS,      // Type alias
     
+    // Generic types
+    GENERIC,    // Generic type placeholder (e.g., Array<T>)
+    TYPE_VAR,   // Type variable (e.g., T, U, V)
+    
     // Special
     UNKNOWN,    // Unknown/inferred type
     NEVER       // Never returns (diverges)
@@ -127,6 +131,8 @@ public:
     virtual bool is_optional() const;
     virtual bool is_result() const;
     virtual bool is_reference() const;
+    virtual bool is_generic() const;  // NEW: check if generic/type variable
+    virtual bool is_type_var() const; // NEW: check if type variable
     virtual bool can_be_zero() const;
     virtual bool is_copyable() const;
     
@@ -165,6 +171,8 @@ private:
     std::map<std::pair<TypePtr, TypePtr>, TypePtr> function_types_;
     std::map<TypePtr, TypePtr> optional_types_;
     std::map<std::pair<TypePtr, TypePtr>, TypePtr> result_types_;
+    std::map<std::string, TypePtr> generic_types_;       // NEW: GenericType cache (e.g., Array<T>)
+    std::map<std::string, TypePtr> type_vars_;           // NEW: TypeVar cache
     
     TypeCache();
     
@@ -198,6 +206,12 @@ public:
     TypePtr get_optional(TypePtr inner);
     TypePtr get_result(TypePtr ok, TypePtr err);
     
+    // NEW: Generic type methods
+    TypePtr get_generic(const std::string& base_name, std::vector<TypePtr> params = {});
+    TypePtr get_type_var(const std::string& name, std::optional<TypePtr> bound = std::nullopt);
+    TypePtr make_generic_instance(const std::string& base_name, const std::vector<TypePtr>& args);
+    bool is_generic_type(const std::string& name) const;
+    
     // Parse type from string
     TypePtr parse_type(const std::string& str);
     
@@ -214,6 +228,7 @@ private:
     std::map<std::string, TypePtr> type_aliases_;   // Type aliases
     std::map<std::string, TypePtr> struct_types_;   // Struct definitions
     std::map<std::string, TypePtr> enum_types_;     // Enum definitions
+    std::vector<std::string> type_params_;          // NEW: Current scope type parameters
     
     std::shared_ptr<TypeEnvironment> parent_;
     int depth_;
@@ -226,6 +241,12 @@ public:
     TypePtr resolve_type_var(const std::string& name) const;
     bool has_type_var(const std::string& name) const;
     void clear_type_vars();
+    
+    // NEW: Type parameter management (for generic functions)
+    void add_type_param(const std::string& name);
+    bool is_type_param(const std::string& name) const;
+    std::vector<std::string> get_type_params() const { return type_params_; }
+    void clear_type_params();
     
     // Type aliases
     void add_alias(const std::string& name, TypePtr type);
@@ -592,6 +613,156 @@ public:
 };
 
 // =============================================================================
+// GenericType - Generic type with type parameters (e.g., Array<T>, Result<T, E>)
+// =============================================================================
+class GenericType : public Type {
+public:
+    std::string base_name;           // Base type name (e.g., "Array", "Result")
+    std::vector<TypePtr> params;     // Type parameters (e.g., [T] for Array<T>)
+    std::vector<TypePtr> args;       // Type arguments (e.g., [i32] for Array<i32>)
+    bool is_instantiated;            // True if has concrete type args
+    
+    explicit GenericType(std::string base, std::vector<TypePtr> type_params = {})
+        : Type(TypeKind::GENERIC, ""), 
+          base_name(std::move(base)), 
+          params(std::move(type_params)),
+          is_instantiated(false) {
+        // Rebuild name immediately
+        name = base_name;
+        if (!params.empty()) {
+            name += "<";
+            for (size_t i = 0; i < params.size(); i++) {
+                if (i > 0) name += ", ";
+                name += params[i]->name;
+            }
+            name += ">";
+        }
+    }
+    
+    // Instantiate generic with concrete types
+    static TypePtr instantiate(TypePtr generic, const std::vector<TypePtr>& type_args);
+    
+    // Get the i-th type parameter
+    TypePtr param(size_t i) const { 
+        return i < params.size() ? params[i] : nullptr; 
+    }
+    
+    // Get the i-th type argument (after instantiation)
+    TypePtr arg(size_t i) const { 
+        return i < args.size() ? args[i] : nullptr; 
+    }
+    
+    // Rebuild name (public for external use)
+    void rebuild() {
+        name = base_name;
+        if (!args.empty()) {
+            name += "<";
+            for (size_t i = 0; i < args.size(); i++) {
+                if (i > 0) name += ", ";
+                name += args[i]->name;
+            }
+            name += ">";
+        } else if (!params.empty()) {
+            name += "<";
+            for (size_t i = 0; i < params.size(); i++) {
+                if (i > 0) name += ", ";
+                name += params[i]->name;
+            }
+            name += ">";
+        }
+    }
+    
+    bool is_generic() const override { return true; }
+    bool can_be_zero() const override { return false; }
+    bool is_copyable() const override { return true; }
+    
+    bool equals(const TypePtr& other) const override;
+    std::string to_string() const override;
+    TypePtr clone() const override;
+};
+
+// =============================================================================
+// TypeVar - Type variable (e.g., T, U in generic functions)
+// =============================================================================
+class TypeVar : public Type {
+public:
+    std::string var_name;            // Variable name (e.g., "T", "U")
+    std::optional<TypePtr> bound;    // Optional type bound (e.g., T: Display)
+    int64_t level;                   // Quantification level (for polymorphic inference)
+    
+    explicit TypeVar(std::string name, std::optional<TypePtr> b = std::nullopt, int64_t lvl = 0)
+        : Type(TypeKind::TYPE_VAR, ""), 
+          var_name(std::move(name)), 
+          bound(std::move(b)),
+          level(lvl) {
+        name = var_name;
+    }
+    
+    // Check if this is a "free" type variable (unbound)
+    bool is_free() const { return !bound.has_value(); }
+    
+    // Check if this type var is bound to another type
+    bool has_bound() const { return bound.has_value(); }
+    
+    // Get the bound type if any
+    TypePtr get_bound() const { 
+        return bound.has_value() ? *bound : nullptr; 
+    }
+    
+    bool is_generic() const override { return true; }
+    bool can_be_zero() const override { return false; }
+    bool is_copyable() const override { return true; }
+    
+    bool equals(const TypePtr& other) const override;
+    std::string to_string() const override;
+    TypePtr clone() const override;
+};
+
+// =============================================================================
+// GenericFunctionType - Generic function type with type parameters
+// =============================================================================
+class GenericFunctionType : public Type {
+public:
+    std::vector<TypePtr> type_params;    // Generic type parameters (e.g., T, U)
+    TypePtr inner_function;              // The underlying function type
+    
+    explicit GenericFunctionType(std::vector<TypePtr> params, TypePtr func)
+        : Type(TypeKind::FUNCTION, ""), 
+          type_params(std::move(params)),
+          inner_function(std::move(func)) {
+        rebuild();
+    }
+    
+    // Rebuild name (public)
+    void rebuild() {
+        std::string s = "Fn";
+        if (!type_params.empty()) {
+            s += "<";
+            for (size_t i = 0; i < type_params.size(); i++) {
+                if (i > 0) s += ", ";
+                s += type_params[i]->name;
+            }
+            s += ">";
+        }
+        if (inner_function) {
+            s += " -> " + inner_function->to_string();
+        }
+        name = s;
+    }
+    
+    bool is_function() const override { return true; }
+    bool is_generic() const override { return true; }
+    bool can_be_zero() const override { return false; }
+    
+    bool equals(const TypePtr& other) const override;
+    std::string to_string() const override;
+    TypePtr clone() const override;
+    
+    // Instantiate with concrete types
+    TypePtr instantiate(const std::vector<TypePtr>& args) const;
+};
+
+// =============================================================================
 // Utility Functions
 // =============================================================================
 
@@ -644,6 +815,8 @@ inline bool Type::is_result() const { return kind == TypeKind::RESULT; }
 inline bool Type::is_string() const { return kind == TypeKind::STRING; }
 inline bool Type::is_bool() const { return kind == TypeKind::BOOL; }
 inline bool Type::is_copyable() const { return true; }
+inline bool Type::is_generic() const { return kind == TypeKind::GENERIC || kind == TypeKind::TYPE_VAR; }
+inline bool Type::is_type_var() const { return kind == TypeKind::TYPE_VAR; }
 
 inline bool Type::can_be_zero() const {
     return is_numeric() || is_string() || is_optional();

@@ -48,6 +48,7 @@ struct PointerType : public Type {
 struct ArrayType : public Type {
     std::shared_ptr<Type> element_type;
     int64_t size;
+
     ArrayType(std::shared_ptr<Type> elem, int64_t sz) 
         : element_type(std::move(elem)), size(sz) {}
     std::string to_string() const override;
@@ -61,6 +62,16 @@ struct FunctionType : public Type {
         : return_type(std::move(ret)), param_types(std::move(params)) {}
     std::string to_string() const override;
     bool equals(const Type& other) const override;
+};
+
+// 新增张量类型
+struct TensorType : public Type {
+    std::shared_ptr<Type> element_type;
+    std::vector<int64_t> shape;
+    TensorType(std::shared_ptr<Type> elem, std::vector<int64_t> shape);
+    std::string to_string() const override;
+    bool equals(const Type& other) const override;
+    int64_t num_elements() const;
 };
 
 // ============================================================================
@@ -109,7 +120,11 @@ enum class OpCode {
     // 控制流
     Br, CondBr, Switch, Call, Ret, Phi,
     // 张量操作
-    TensorCreate, TensorLoad, TensorStore, TensorMatmul,
+    TensorCreate, TensorLoad, TensorStore, TensorMatmul, TensorReshape,
+    // 选择/聚合操作
+    Select, ExtractValue, InsertValue,
+    // 内存批量操作
+    Memcpy, Memset,
     // 特殊操作
     Print, Panic, Unreachable
 };
@@ -178,10 +193,13 @@ struct StoreInst : public Instruction {
 struct AllocaInst : public Instruction {
     int64_t count;  // 数组元素数量，1 表示标量
     AllocaInst(std::shared_ptr<Type> elem_ty, int64_t cnt, std::shared_ptr<Type> ptr_ty)
-        : Instruction(OpCode::Alloca, std::move(ptr_ty)), count(cnt) {
-        // 元素类型作为元数据存储
+        : Instruction(OpCode::Alloca, std::move(ptr_ty)), count(cnt) {}
+    std::shared_ptr<Type> get_allocated_type() const { 
+        if (auto* ptr = dynamic_cast<PointerType*>(type.get())) {
+            return ptr->pointee;
+        }
+        return nullptr;
     }
-    std::shared_ptr<Type> get_allocated_type() const { return type->pointee; }
 };
 
 struct ReturnInst : public Instruction {
@@ -194,9 +212,7 @@ struct ReturnInst : public Instruction {
 struct BranchInst : public Instruction {
     std::shared_ptr<BasicBlock> target;
     BranchInst(std::shared_ptr<BasicBlock> bb)
-        : Instruction(OpCode::Br, nullptr), target(std::move(bb)) {
-        operands.push_back(nullptr);  // placeholder
-    }
+        : Instruction(OpCode::Br, nullptr), target(std::move(bb)) {}
 };
 
 struct CondBranchInst : public Instruction {
@@ -218,6 +234,127 @@ struct PhiInst : public Instruction {
     void add_incoming(std::shared_ptr<BasicBlock> bb, std::shared_ptr<Value> val) {
         incoming.emplace_back(std::move(bb), std::move(val));
     }
+};
+
+// ============================================================================
+// 新增指令类型
+// ============================================================================
+
+// GEP 指令
+struct GetElementPtrInst : public Instruction {
+    std::shared_ptr<Value> base;
+    std::vector<std::shared_ptr<Value>> indices;
+    GetElementPtrInst(std::shared_ptr<Value> base,
+                      std::vector<std::shared_ptr<Value>> indices,
+                      std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// 张量创建指令
+struct TensorCreateInst : public Instruction {
+    std::vector<int64_t> shape;
+    std::shared_ptr<Type> element_type;
+    TensorCreateInst(std::vector<int64_t> shape,
+                     std::shared_ptr<Type> elem_type,
+                     std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// 张量加载指令
+struct TensorLoadInst : public Instruction {
+    std::shared_ptr<Value> tensor;
+    std::vector<std::shared_ptr<Value>> indices;
+    TensorLoadInst(std::shared_ptr<Value> tensor,
+                   std::vector<std::shared_ptr<Value>> indices,
+                   std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// 张量存储指令
+struct TensorStoreInst : public Instruction {
+    std::shared_ptr<Value> tensor;
+    std::vector<std::shared_ptr<Value>> indices;
+    std::shared_ptr<Value> stored_value;
+    TensorStoreInst(std::shared_ptr<Value> tensor,
+                    std::vector<std::shared_ptr<Value>> indices,
+                    std::shared_ptr<Value> value);
+    std::string to_string() const override;
+};
+
+// 张量矩阵乘法指令
+struct TensorMatmulInst : public Instruction {
+    std::shared_ptr<Value> lhs;
+    std::shared_ptr<Value> rhs;
+    TensorMatmulInst(std::shared_ptr<Value> lhs,
+                     std::shared_ptr<Value> rhs,
+                     std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// 张量 reshape 指令
+struct TensorReshapeInst : public Instruction {
+    std::shared_ptr<Value> tensor;
+    std::vector<int64_t> new_shape;
+    TensorReshapeInst(std::shared_ptr<Value> tensor,
+                      std::vector<int64_t> new_shape,
+                      std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// Select 指令
+struct SelectInst : public Instruction {
+    std::shared_ptr<Value> condition;
+    std::shared_ptr<Value> true_value;
+    std::shared_ptr<Value> false_value;
+    SelectInst(std::shared_ptr<Value> cond,
+               std::shared_ptr<Value> true_val,
+               std::shared_ptr<Value> false_val,
+               std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// ExtractValue 指令
+struct ExtractValueInst : public Instruction {
+    std::shared_ptr<Value> aggregate;
+    std::vector<int64_t> indices;
+    ExtractValueInst(std::shared_ptr<Value> aggregate,
+                     std::vector<int64_t> indices,
+                     std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// InsertValue 指令
+struct InsertValueInst : public Instruction {
+    std::shared_ptr<Value> aggregate;
+    std::shared_ptr<Value> element;
+    std::vector<int64_t> indices;
+    InsertValueInst(std::shared_ptr<Value> aggregate,
+                    std::shared_ptr<Value> elem,
+                    std::vector<int64_t> indices,
+                    std::shared_ptr<Type> result_type);
+    std::string to_string() const override;
+};
+
+// Memcpy 指令
+struct MemcpyInst : public Instruction {
+    std::shared_ptr<Value> dst;
+    std::shared_ptr<Value> src;
+    std::shared_ptr<Value> size;
+    MemcpyInst(std::shared_ptr<Value> dst,
+               std::shared_ptr<Value> src,
+               std::shared_ptr<Value> size);
+    std::string to_string() const override;
+};
+
+// Memset 指令
+struct MemsetInst : public Instruction {
+    std::shared_ptr<Value> ptr;
+    std::shared_ptr<Value> val;
+    std::shared_ptr<Value> size;
+    MemsetInst(std::shared_ptr<Value> ptr,
+               std::shared_ptr<Value> val,
+               std::shared_ptr<Value> size);
+    std::string to_string() const override;
 };
 
 // ============================================================================
@@ -375,14 +512,68 @@ public:
                                          std::shared_ptr<Type> target_type,
                                          std::string name = "");
     
-    // 张量操作
+    // 张量操作（增强）
     std::shared_ptr<Value> create_tensor_create(std::vector<int64_t> shape,
-                                                   std::shared_ptr<Type> elem_type);
+                                                   std::shared_ptr<Type> elem_type,
+                                                   std::string name = "");
     std::shared_ptr<Value> create_tensor_load(std::shared_ptr<Value> tensor,
-                                                 std::vector<std::shared_ptr<Value>> indices);
+                                                 std::vector<std::shared_ptr<Value>> indices,
+                                                 std::string name = "");
     void create_tensor_store(std::shared_ptr<Value> tensor,
                               std::vector<std::shared_ptr<Value>> indices,
                               std::shared_ptr<Value> value);
+    std::shared_ptr<Value> create_tensor_matmul(std::shared_ptr<Value> lhs,
+                                                  std::shared_ptr<Value> rhs,
+                                                  std::string name = "");
+    std::shared_ptr<Value> create_tensor_reshape(std::shared_ptr<Value> tensor,
+                                                   std::vector<int64_t> new_shape,
+                                                   std::string name = "");
+    
+    // GEP 指令
+    std::shared_ptr<Value> create_gep(std::shared_ptr<Value> base,
+                                       std::vector<std::shared_ptr<Value>> indices,
+                                       std::shared_ptr<Type> elem_type,
+                                       std::string name = "");
+    
+    // 算术运算便捷方法
+    std::shared_ptr<Value> create_add(std::shared_ptr<Value> lhs,
+                                       std::shared_ptr<Value> rhs,
+                                       std::string name = "");
+    std::shared_ptr<Value> create_sub(std::shared_ptr<Value> lhs,
+                                       std::shared_ptr<Value> rhs,
+                                       std::string name = "");
+    std::shared_ptr<Value> create_mul(std::shared_ptr<Value> lhs,
+                                       std::shared_ptr<Value> rhs,
+                                       std::string name = "");
+    std::shared_ptr<Value> create_div(std::shared_ptr<Value> lhs,
+                                       std::shared_ptr<Value> rhs,
+                                       std::string name = "");
+    std::shared_ptr<Value> create_rem(std::shared_ptr<Value> lhs,
+                                       std::shared_ptr<Value> rhs,
+                                       std::string name = "");
+    
+    // Select 指令
+    std::shared_ptr<Value> create_select(std::shared_ptr<Value> cond,
+                                           std::shared_ptr<Value> true_val,
+                                           std::shared_ptr<Value> false_val,
+                                           std::string name = "");
+    
+    // ExtractValue/InsertValue
+    std::shared_ptr<Value> create_extract_value(std::shared_ptr<Value> aggregate,
+                                                  std::vector<int64_t> indices,
+                                                  std::string name = "");
+    std::shared_ptr<Value> create_insert_value(std::shared_ptr<Value> aggregate,
+                                                 std::shared_ptr<Value> elem,
+                                                 std::vector<int64_t> indices,
+                                                 std::string name = "");
+    
+    // 内存操作
+    void create_memcpy(std::shared_ptr<Value> dst,
+                        std::shared_ptr<Value> src,
+                        std::shared_ptr<Value> size);
+    void create_memset(std::shared_ptr<Value> ptr,
+                        std::shared_ptr<Value> val,
+                        std::shared_ptr<Value> size);
     
     // 特殊操作
     void create_panic(std::string message);

@@ -2,12 +2,15 @@
 #ifndef CLAW_TENSOR_IR_GENERATOR_H
 #define CLAW_TENSOR_IR_GENERATOR_H
 
+#include "tensor_ir.h"
+
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <string>
 
+// Forward declarations from AST
 namespace claw {
 namespace ast {
     class ASTNode;
@@ -17,12 +20,15 @@ namespace ast {
     class TensorLiteral;
     class BinaryOp;
     class CallExpr;
+    class ConstExpr;
+    struct TypeInfo;
 }
 
 namespace ir {
     class IRModule;
     class BasicBlock;
     class Instruction;
+    class Function;
 }
 
 namespace tensorir {
@@ -122,6 +128,9 @@ private:
                                  const std::string& elem_type,
                                  const DimList& shape,
                                  StorageScope scope = StorageScope::Local);
+    
+    // IR 指令转换
+    void convert_ir_instruction(const ir::Instruction& instr);
     
     // 代码生成
     std::string generate_loop_nest(TensorOp* op) const;

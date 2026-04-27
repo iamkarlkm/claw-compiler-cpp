@@ -228,6 +228,41 @@ public:
             return {std::pow(base, exp)};
         };
         
+        // range(start, end, step) - generate range of integers
+        builtins["range"] = [](std::vector<Value> args) -> std::vector<Value> {
+            int64_t start = 0;
+            int64_t end = 0;
+            int64_t step = 1;
+            
+            if (args.empty()) {
+                return {};
+            } else if (args.size() == 1) {
+                // range(end) - from 0 to end
+                end = std::get<int64_t>(args[0]);
+            } else if (args.size() == 2) {
+                // range(start, end)
+                start = std::get<int64_t>(args[0]);
+                end = std::get<int64_t>(args[1]);
+            } else if (args.size() >= 3) {
+                // range(start, end, step)
+                start = std::get<int64_t>(args[0]);
+                end = std::get<int64_t>(args[1]);
+                step = std::get<int64_t>(args[2]);
+            }
+            
+            std::vector<Value> result;
+            if (step > 0) {
+                for (int64_t i = start; i < end; i += step) {
+                    result.push_back(i);
+                }
+            } else if (step < 0) {
+                for (int64_t i = start; i > end; i += step) {
+                    result.push_back(i);
+                }
+            }
+            return result;
+        };
+        
         // ========================================
         // Tensor built-in functions
         // ========================================

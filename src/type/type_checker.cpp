@@ -165,6 +165,25 @@ void TypeEnvironment::clear_type_vars() {
     type_vars_.clear();
 }
 
+// =============================================================================
+// TypeParameter Management (for generic functions)
+// =============================================================================
+void TypeEnvironment::add_type_param(const std::string& name) {
+    type_params_.push_back(name);
+}
+
+bool TypeEnvironment::is_type_param(const std::string& name) const {
+    for (const auto& param : type_params_) {
+        if (param == name) return true;
+    }
+    if (parent_) return parent_->is_type_param(name);
+    return false;
+}
+
+void TypeEnvironment::clear_type_params() {
+    type_params_.clear();
+}
+
 void TypeEnvironment::add_alias(const std::string& name, TypePtr type) {
     type_aliases_[name] = type;
 }
@@ -208,6 +227,7 @@ std::shared_ptr<TypeEnvironment> TypeEnvironment::pop_scope() {
 
 std::string TypeEnvironment::to_string() const {
     std::string result = "TypeEnvironment(depth=" + std::to_string(depth_) + ")\n";
+    result += "  Type params: " + std::to_string(type_params_.size()) + "\n";
     result += "  Type vars: " + std::to_string(type_vars_.size()) + "\n";
     result += "  Aliases: " + std::to_string(type_aliases_.size()) + "\n";
     result += "  Structs: " + std::to_string(struct_types_.size()) + "\n";
@@ -768,10 +788,183 @@ std::string type_kind_name(TypeKind kind) {
         case TypeKind::STRUCT: return "struct";
         case TypeKind::ENUM: return "enum";
         case TypeKind::ALIAS: return "alias";
+        case TypeKind::GENERIC: return "generic";  // NEW
+        case TypeKind::TYPE_VAR: return "type_var";  // NEW
         case TypeKind::UNKNOWN: return "unknown";
         case TypeKind::NEVER: return "never";
         default: return "<?>";
     }
+}
+
+// =============================================================================
+// GenericType Implementation
+// =============================================================================
+
+TypePtr GenericType::instantiate(TypePtr generic, const std::vector<TypePtr>& type_args) {
+    if (!generic || generic->kind != TypeKind::GENERIC) return nullptr;
+    auto gen = std::dynamic_pointer_cast<GenericType>(generic);
+    if (!gen) return nullptr;
+    
+    auto result = std::make_shared<GenericType>(gen->base_name, gen->params);
+    result->args = type_args;
+    result->is_instantiated = true;
+    result->rebuild();
+    return result;
+}
+
+bool GenericType::equals(const TypePtr& other) const {
+    if (!other || other->kind != TypeKind::GENERIC) return false;
+    auto o = std::dynamic_pointer_cast<GenericType>(other);
+    if (!o) return false;
+    if (base_name != o->base_name) return false;
+    if (args.size() != o->args.size()) return false;
+    for (size_t i = 0; i < args.size(); i++) {
+        if (!args[i]->equals(o->args[i])) return false;
+    }
+    return true;
+}
+
+std::string GenericType::to_string() const {
+    std::string s = base_name;
+    if (!args.empty()) {
+        s += "<";
+        for (size_t i = 0; i < args.size(); i++) {
+            if (i > 0) s += ", ";
+            s += args[i]->to_string();
+        }
+        s += ">";
+    } else if (!params.empty()) {
+        s += "<";
+        for (size_t i = 0; i < params.size(); i++) {
+            if (i > 0) s += ", ";
+            s += params[i]->to_string();
+        }
+        s += ">";
+    }
+    return s;
+}
+
+TypePtr GenericType::clone() const {
+    auto clone = std::make_shared<GenericType>(base_name, params);
+    clone->args = args;
+    clone->is_instantiated = is_instantiated;
+    return clone;
+}
+
+// =============================================================================
+// TypeVar Implementation
+// =============================================================================
+bool TypeVar::equals(const TypePtr& other) const {
+    if (!other) return false;
+    if (other->kind == TypeKind::TYPE_VAR) {
+        auto o = std::dynamic_pointer_cast<TypeVar>(other);
+        return o && var_name == o->var_name && level == o->level;
+    }
+    // If bound, compare with bound type
+    if (bound.has_value()) {
+        return (*bound)->equals(other);
+    }
+    return false;
+}
+
+std::string TypeVar::to_string() const {
+    std::string s = var_name;
+    if (bound.has_value()) {
+        s += ": " + (*bound)->to_string();
+    }
+    return s;
+}
+
+TypePtr TypeVar::clone() const {
+    return std::make_shared<TypeVar>(var_name, bound, level);
+}
+
+// =============================================================================
+// GenericFunctionType Implementation
+// =============================================================================
+// Note: rebuild() is now inline in the header
+
+bool GenericFunctionType::equals(const TypePtr& other) const {
+    if (!other || other->kind != TypeKind::FUNCTION) return false;
+    auto o = std::dynamic_pointer_cast<GenericFunctionType>(other);
+    if (!o) return false;
+    if (type_params.size() != o->type_params.size()) return false;
+    return inner_function && inner_function->equals(o->inner_function);
+}
+
+std::string GenericFunctionType::to_string() const {
+    return name;
+}
+
+TypePtr GenericFunctionType::clone() const {
+    return std::make_shared<GenericFunctionType>(type_params, inner_function);
+}
+
+TypePtr GenericFunctionType::instantiate(const std::vector<TypePtr>& args) const {
+    // Instantiate: replace type params with concrete args
+    if (args.size() != type_params.size()) return nullptr;
+    // Simplified: just return the inner function for now
+    return inner_function;
+}
+
+// =============================================================================
+// TypeCache Generic Methods Implementation
+// =============================================================================
+TypePtr TypeCache::get_generic(const std::string& base_name, std::vector<TypePtr> params) {
+    // Check cache first
+    std::string key = base_name;
+    if (!params.empty()) {
+        key += "<";
+        for (size_t i = 0; i < params.size(); i++) {
+            if (i > 0) key += ", ";
+            key += params[i]->name;
+        }
+        key += ">";
+    }
+    
+    auto it = generic_types_.find(key);
+    if (it != generic_types_.end()) {
+        return it->second;
+    }
+    
+    // Create new generic type
+    auto gen = std::make_shared<GenericType>(base_name, std::move(params));
+    generic_types_[key] = gen;
+    return gen;
+}
+
+TypePtr TypeCache::get_type_var(const std::string& name, std::optional<TypePtr> bound) {
+    auto it = type_vars_.find(name);
+    if (it != type_vars_.end()) {
+        return it->second;
+    }
+    
+    auto tv = std::make_shared<TypeVar>(name, bound);
+    type_vars_[name] = tv;
+    return tv;
+}
+
+TypePtr TypeCache::make_generic_instance(const std::string& base_name, const std::vector<TypePtr>& args) {
+    // Create a generic type and mark it as instantiated
+    std::vector<TypePtr> params;
+    char param_name = 'T';
+    for (size_t i = 0; i < args.size(); i++) {
+        params.push_back(get_type_var(std::string(1, param_name + i)));
+    }
+    
+    auto gen = std::make_shared<GenericType>(base_name, params);
+    gen->args = args;
+    gen->is_instantiated = true;
+    gen->rebuild();
+    return gen;
+}
+
+bool TypeCache::is_generic_type(const std::string& name) const {
+    // Check if name is a known generic type (Array, Result, Option, etc.)
+    static const std::set<std::string> known_generics = {
+        "Array", "Vec", "Option", "Result", "Box", "Rc", "Arc"
+    };
+    return known_generics.count(name) > 0;
 }
 
 } // namespace type

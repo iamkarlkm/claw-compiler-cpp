@@ -393,6 +393,8 @@ public:
         Impl,
         TypeAlias,
         Module,
+        Import,
+        Export,
         Use,
         Publish,
         Subscribe,
@@ -882,6 +884,305 @@ private:
     std::string name_;
     std::vector<std::pair<std::string, std::string>> params_;
     std::unique_ptr<ASTNode> body_;
+};
+
+// Import statement - "use path::to::symbol [as alias]"
+class ImportStmt : public Statement {
+public:
+    ImportStmt(const SourceSpan& span) 
+        : Statement(Kind::Import, span), is_pub_(false), is_reexport_(false) {}
+    
+    void add_import_path(const std::string& path) { import_paths_.push_back(path); }
+    void set_alias(const std::string& alias) { alias_ = alias; }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    void set_reexport(bool reexport) { is_reexport_ = reexport; }
+    
+    const auto& get_import_paths() const { return import_paths_; }
+    const std::string& get_alias() const { return alias_; }
+    bool is_pub() const { return is_pub_; }
+    bool is_reexport() const { return is_reexport_; }
+    
+    std::string to_string() const override {
+        std::string result = "use ";
+        for (size_t i = 0; i < import_paths_.size(); i++) {
+            result += import_paths_[i];
+            if (i < import_paths_.size() - 1) result += "::";
+        }
+        if (!alias_.empty()) {
+            result += " as " + alias_;
+        }
+        result += ";";
+        return result;
+    }
+    
+private:
+    std::vector<std::string> import_paths_;
+    std::string alias_;
+    bool is_pub_;
+    bool is_reexport_;
+};
+
+// Export statement - "export name1, name2, ..."
+class ExportStmt : public Statement {
+public:
+    ExportStmt(const SourceSpan& span) 
+        : Statement(Kind::Export, span), is_pub_(true) {}
+    
+    void add_export_name(const std::string& name) { export_names_.push_back(name); }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    
+    const auto& get_export_names() const { return export_names_; }
+    bool is_pub() const { return is_pub_; }
+    
+    std::string to_string() const override {
+        std::string result = "export ";
+        for (size_t i = 0; i < export_names_.size(); i++) {
+            result += export_names_[i];
+            if (i < export_names_.size() - 1) result += ", ";
+        }
+        result += ";";
+        return result;
+    }
+    
+private:
+    std::vector<std::string> export_names_;
+    bool is_pub_;
+};
+
+// Module declaration - "mod name { ... }"
+class ModuleStmt : public Statement {
+public:
+    ModuleStmt(const std::string& name, const SourceSpan& span)
+        : Statement(Kind::Module, span), name_(name), is_pub_(false) {}
+    
+    void set_name(const std::string& name) { name_ = name; }
+    void set_body(std::vector<std::unique_ptr<Statement>> body) { body_ = std::move(body); }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    
+    const std::string& get_name() const { return name_; }
+    const auto& get_body() const { return body_; }
+    bool is_pub() const { return is_pub_; }
+    
+    std::string to_string() const override {
+        std::string result = "mod " + name_ + " { ... }";
+        return result;
+    }
+    
+private:
+    std::string name_;
+    std::vector<std::unique_ptr<Statement>> body_;
+    bool is_pub_;
+};
+
+// ============================================================
+// Struct declaration - "struct Name { field: Type, ... }"
+// ============================================================
+struct StructField {
+    std::string name;
+    std::string type;
+    bool is_pub = false;
+    SourceSpan span;
+};
+
+class StructStmt : public Statement {
+public:
+    StructStmt(const std::string& name, const SourceSpan& span)
+        : Statement(Kind::Struct, span), name_(name), is_pub_(false) {}
+    
+    void set_name(const std::string& name) { name_ = name; }
+    void add_field(const StructField& field) { fields_.push_back(field); }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    void set_type_params(const std::vector<std::string>& params) { type_params_ = params; }
+    
+    const std::string& get_name() const { return name_; }
+    const auto& get_fields() const { return fields_; }
+    bool is_pub() const { return is_pub_; }
+    const auto& get_type_params() const { return type_params_; }
+    
+    std::string to_string() const override {
+        std::string result = (is_pub_ ? "pub " : "") + std::string("struct ") + name_;
+        if (!type_params_.empty()) {
+            result += "<" + type_params_[0];
+            for (size_t i = 1; i < type_params_.size(); i++) result += ", " + type_params_[i];
+            result += ">";
+        }
+        result += " { ";
+        for (size_t i = 0; i < fields_.size(); i++) {
+            result += fields_[i].name + ": " + fields_[i].type;
+            if (i < fields_.size() - 1) result += ", ";
+        }
+        result += " }";
+        return result;
+    }
+    
+private:
+    std::string name_;
+    std::vector<StructField> fields_;
+    bool is_pub_;
+    std::vector<std::string> type_params_;
+};
+
+// ============================================================
+// Enum declaration - "enum Name { Variant1, Variant2(Type), ... }"
+// ============================================================
+struct EnumVariant {
+    std::string name;
+    std::vector<std::string> associated_types;  // empty = unit variant
+    SourceSpan span;
+};
+
+class EnumStmt : public Statement {
+public:
+    EnumStmt(const std::string& name, const SourceSpan& span)
+        : Statement(Kind::Enum, span), name_(name), is_pub_(false) {}
+    
+    void set_name(const std::string& name) { name_ = name; }
+    void add_variant(const EnumVariant& variant) { variants_.push_back(variant); }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    void set_type_params(const std::vector<std::string>& params) { type_params_ = params; }
+    
+    const std::string& get_name() const { return name_; }
+    const auto& get_variants() const { return variants_; }
+    bool is_pub() const { return is_pub_; }
+    const auto& get_type_params() const { return type_params_; }
+    
+    std::string to_string() const override {
+        std::string result = (is_pub_ ? "pub " : "") + std::string("enum ") + name_;
+        if (!type_params_.empty()) {
+            result += "<" + type_params_[0];
+            for (size_t i = 1; i < type_params_.size(); i++) result += ", " + type_params_[i];
+            result += ">";
+        }
+        result += " { ";
+        for (size_t i = 0; i < variants_.size(); i++) {
+            result += variants_[i].name;
+            if (!variants_[i].associated_types.empty()) {
+                result += "(" + variants_[i].associated_types[0];
+                for (size_t j = 1; j < variants_[i].associated_types.size(); j++)
+                    result += ", " + variants_[i].associated_types[j];
+                result += ")";
+            }
+            if (i < variants_.size() - 1) result += ", ";
+        }
+        result += " }";
+        return result;
+    }
+    
+private:
+    std::string name_;
+    std::vector<EnumVariant> variants_;
+    bool is_pub_;
+    std::vector<std::string> type_params_;
+};
+
+// ============================================================
+// Trait declaration - "trait Name { fn method(&self) -> RetType; ... }"
+// ============================================================
+struct TraitMethod {
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> params;
+    std::string return_type;
+    SourceSpan span;
+    bool has_default_impl = false;
+    std::unique_ptr<BlockStmt> default_body;
+};
+
+class TraitStmt : public Statement {
+public:
+    TraitStmt(const std::string& name, const SourceSpan& span)
+        : Statement(Kind::Trait, span), name_(name), is_pub_(false) {}
+    
+    void set_name(const std::string& name) { name_ = name; }
+    void add_method(const TraitMethod& method) { methods_.push_back(method); }
+    void set_pub(bool pub) { is_pub_ = pub; }
+    void set_type_params(const std::vector<std::string>& params) { type_params_ = params; }
+    
+    const std::string& get_name() const { return name_; }
+    const auto& get_methods() const { return methods_; }
+    bool is_pub() const { return is_pub_; }
+    const auto& get_type_params() const { return type_params_; }
+    
+    std::string to_string() const override {
+        std::string result = (is_pub_ ? "pub " : "") + std::string("trait ") + name_;
+        if (!type_params_.empty()) {
+            result += "<" + type_params_[0];
+            for (size_t i = 1; i < type_params_.size(); i++) result += ", " + type_params_[i];
+            result += ">";
+        }
+        result += " { ";
+        for (size_t i = 0; i < methods_.size(); i++) {
+            result += "fn " + methods_[i].name + "(";
+            for (size_t j = 0; j < methods_[i].params.size(); j++) {
+                result += methods_[i].params[j].first + ": " + methods_[i].params[j].second;
+                if (j < methods_[i].params.size() - 1) result += ", ";
+            }
+            result += ") -> " + methods_[i].return_type + ";";
+            if (i < methods_.size() - 1) result += " ";
+        }
+        result += " }";
+        return result;
+    }
+    
+private:
+    std::string name_;
+    std::vector<TraitMethod> methods_;
+    bool is_pub_;
+    std::vector<std::string> type_params_;
+};
+
+// ============================================================
+// Impl block - "impl TypeName { fn method(&self) -> RetType { ... } ... }"
+// Also: "impl TraitName for TypeName { ... }"
+// ============================================================
+struct ImplMethod {
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> params;
+    std::string return_type;
+    std::unique_ptr<BlockStmt> body;
+    SourceSpan span;
+    bool is_pub = false;
+};
+
+class ImplStmt : public Statement {
+public:
+    ImplStmt(const std::string& target_type, const SourceSpan& span)
+        : Statement(Kind::Impl, span), target_type_(target_type), trait_name_(""), is_trait_impl_(false) {}
+    
+    void set_target_type(const std::string& type) { target_type_ = type; }
+    void set_trait_name(const std::string& name) { trait_name_ = name; is_trait_impl_ = true; }
+    void add_method(const ImplMethod& method) { methods_.push_back(method); }
+    
+    const std::string& get_target_type() const { return target_type_; }
+    const std::string& get_trait_name() const { return trait_name_; }
+    bool is_trait_impl() const { return is_trait_impl_; }
+    const auto& get_methods() const { return methods_; }
+    
+    std::string to_string() const override {
+        std::string result = "impl ";
+        if (is_trait_impl_) {
+            result += trait_name_ + " for " + target_type_;
+        } else {
+            result += target_type_;
+        }
+        result += " { ";
+        for (size_t i = 0; i < methods_.size(); i++) {
+            result += (methods_[i].is_pub ? "pub " : "") + "fn " + methods_[i].name + "(";
+            for (size_t j = 0; j < methods_[i].params.size(); j++) {
+                result += methods_[i].params[j].first + ": " + methods_[i].params[j].second;
+                if (j < methods_[i].params.size() - 1) result += ", ";
+            }
+            result += ") -> " + methods_[i].return_type + " { ... }";
+            if (i < methods_.size() - 1) result += " ";
+        }
+        result += " }";
+        return result;
+    }
+    
+private:
+    std::string target_type_;
+    std::string trait_name_;
+    bool is_trait_impl_;
+    std::vector<ImplMethod> methods_;
 };
 
 // Program AST (root node)

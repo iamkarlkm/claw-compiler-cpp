@@ -115,6 +115,7 @@ enum class OpCode : uint8_t {
     CLOSURE,            // Create closure
     CLOSE_UPVALUE,      // Close upvalue
     GET_UPVALUE,        // Get upvalue value
+    SET_UPVALUE,        // Set upvalue value
 
     // Arrays (5)
     ALLOC_ARRAY = 0xC0, // Allocate array
@@ -186,6 +187,16 @@ enum class ExtOpCode : uint8_t {
     // Memory
     MEM_COPY = 60,      // Memory copy
     MEM_SET,            // Memory set
+
+    // Iterators (NEW - 2026-04-26)
+    ITER_CREATE = 70,   // Create iterator from iterable
+    ITER_NEXT,          // Get next element, returns (value, done)
+    ITER_HAS_NEXT,      // Check if iterator has more elements
+    ITER_RESET,         // Reset iterator to beginning
+    ITER_GET_INDEX,     // Get current index
+    RANGE_CREATE,       // Create range iterator (start, end, step)
+    ENUMERATE_CREATE,   // Create enumerate iterator (index, value)
+    ZIP_CREATE,         // Create zip iterator (multiple iterables)
 };
 
 // ============================================================================
@@ -205,10 +216,70 @@ enum class ValueType : uint8_t {
     FUNCTION,
     TENSOR,
     POINTER,
-    EXTERN
+    EXTERN,
+    ITERATOR  // NEW - Iterator type
 };
 
 // Value representation (tagged union)
+// Iterator data structure (NEW - 2026-04-26)
+struct IteratorValue {
+    std::string kind;           // "array", "range", "enumerate", "zip"
+    int64_t index;              // Current position
+    int64_t size;               // Total size (for arrays)
+    int64_t step;               // Step for range (default 1)
+    int64_t start;              // Start for range
+    int64_t end;                // End for range
+    std::vector<int64_t> indices; // Current indices for nested iteration
+    std::vector<int64_t> sizes;   // Sizes of multiple iterables (for zip)
+    int64_t outer_index;        // For enumerate: current index
+    std::vector<std::vector<struct Value>> arrays; // For zip: multiple arrays
+
+    IteratorValue() : index(0), size(0), step(1), start(0), end(0), outer_index(0) {}
+    
+    static std::shared_ptr<IteratorValue> create_array_iterator(const std::vector<struct Value>& arr) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "array";
+        iter->size = static_cast<int64_t>(arr.size());
+        iter->index = 0;
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_range_iterator(int64_t start, int64_t end, int64_t step = 1) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "range";
+        iter->start = start;
+        iter->end = end;
+        iter->step = step;
+        iter->index = start;
+        iter->size = (end - start + (step > 0 ? step - 1 : step + 1)) / (step > 0 ? step : -step);
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_enumerate_iterator(const std::vector<struct Value>& arr) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "enumerate";
+        iter->size = static_cast<int64_t>(arr.size());
+        iter->index = 0;
+        iter->outer_index = 0;
+        return iter;
+    }
+    
+    static std::shared_ptr<IteratorValue> create_zip_iterator(const std::vector<std::vector<struct Value>>& arrays) {
+        auto iter = std::make_shared<IteratorValue>();
+        iter->kind = "zip";
+        iter->arrays = arrays;
+        iter->size = arrays.empty() ? 0 : static_cast<int64_t>(arrays[0].size());
+        // Calculate minimum size
+        for (const auto& arr : arrays) {
+            if (static_cast<int64_t>(arr.size()) < iter->size) {
+                iter->size = static_cast<int64_t>(arr.size());
+            }
+        }
+        iter->index = 0;
+        return iter;
+    }
+};
+
 struct Value {
     ValueType type;
     union {
@@ -217,13 +288,17 @@ struct Value {
         bool b;
     } data;
     std::string str;    // For string types
+    std::shared_ptr<IteratorValue> iter_value;  // For iterator type (NEW)
 
-    Value() : type(ValueType::NIL), data{0} {}
+    Value() : type(ValueType::NIL), data{0}, iter_value(nullptr) {}
     static Value nil() { return Value(); }
     static Value boolean(bool b) { Value v; v.type = ValueType::BOOL; v.data.b = b; return v; }
     static Value integer(int64_t i) { Value v; v.type = ValueType::I64; v.data.i64 = i; return v; }
     static Value floating(double f) { Value v; v.type = ValueType::F64; v.data.f64 = f; return v; }
     static Value string(const std::string& s) { Value v; v.type = ValueType::STRING; v.str = s; return v; }
+    static Value make_iterator(std::shared_ptr<IteratorValue> iter) { 
+        Value v; v.type = ValueType::ITERATOR; v.iter_value = iter; return v; 
+    }
 
     std::string to_string() const;
     bool is_truthy() const;
@@ -260,6 +335,51 @@ struct ConstantPool {
         floats.clear();
         strings.clear();
         values.clear();
+    }
+
+    // Compatibility methods for VM access
+    size_t size() const { return integers.size() + floats.size() + strings.size(); }
+    
+    double get_double(uint32_t idx) const {
+        if (idx < floats.size()) return floats[idx];
+        return 0.0;
+    }
+    
+    std::string get_string(uint32_t idx) const {
+        if (idx < strings.size()) return strings[idx];
+        return "";
+    }
+    
+    int64_t get_integer(uint32_t idx) const {
+        if (idx < integers.size()) return integers[idx];
+        return 0;
+    }
+    
+    // For iteration compatibility (combines all constant types)
+    // This is a simplified version - returns a Value based on index
+    Value get(uint32_t idx) const {
+        if (idx < integers.size()) {
+            return Value::integer(integers[idx]);
+        }
+        uint32_t float_idx = idx - static_cast<uint32_t>(integers.size());
+        if (float_idx < floats.size()) {
+            return Value::floating(floats[float_idx]);
+        }
+        uint32_t str_idx = idx - static_cast<uint32_t>(integers.size()) - static_cast<uint32_t>(floats.size());
+        if (str_idx < strings.size()) {
+            return Value::string(strings[str_idx]);
+        }
+        return Value::nil();
+    }
+    
+    // Legacy accessor for FunctionInfo stored in values
+    Value get_function_info() const {
+        return Value::nil();
+    }
+    
+    // Operator[] for legacy code
+    Value operator[](size_t idx) const {
+        return get(static_cast<uint32_t>(idx));
     }
 };
 
@@ -336,6 +456,25 @@ struct Module {
         global_names.push_back(name);
         global_values.push_back(value);
         return static_cast<uint32_t>(global_names.size() - 1);
+    }
+
+    // Compatibility methods for VM access
+    // Get instructions from the main function (first function)
+    const std::vector<Instruction>& instructions() const {
+        static const std::vector<Instruction> empty;
+        if (!functions.empty()) {
+            return functions[0].code;
+        }
+        return empty;
+    }
+    
+    // Get instructions with function index
+    const std::vector<Instruction>& instructions(uint32_t func_idx) const {
+        static const std::vector<Instruction> empty;
+        if (func_idx < functions.size()) {
+            return functions[func_idx].code;
+        }
+        return empty;
     }
 };
 

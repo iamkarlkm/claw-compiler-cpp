@@ -49,7 +49,7 @@ std::string Buffer::to_string() const {
     std::ostringstream oss;
     oss << "buffer(" << name << ": " << elem_type 
         << "[" << dim_list_to_string(shape) << "], scope=" 
-        << to_string(scope) << ")";
+        << ")";
     return oss.str();
 }
 

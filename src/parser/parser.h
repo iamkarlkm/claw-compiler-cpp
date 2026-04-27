@@ -253,6 +253,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
         return parse_name_statement();
     }
     
+    // Check for let statement
+    if (check(TokenType::Kw_let) || check(TokenType::Kw_const)) {
+        return parse_statement();
+    }
+    
     // Otherwise parse as statement
     return parse_statement();
 }

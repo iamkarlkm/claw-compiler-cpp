@@ -119,8 +119,29 @@ private:
         std::shared_ptr<ast::FunctionStmt> handler, 
         const std::string& event_name);
     
-    // 类型映射
-    std::shared_ptr<ir::Type> map_ast_type(const std::shared_ptr<ast::Type>& ast_type);
+    // 增强版表达式分发
+    std::shared_ptr<ir::Value> generate_expression_enhanced(std::shared_ptr<ast::Expression> expr);
+    std::shared_ptr<ir::Value> generate_literal_enhanced(std::shared_ptr<ast::LiteralExpr> lit);
+    std::shared_ptr<ir::Value> generate_bytes_literal(std::shared_ptr<ast::LiteralExpr> lit);
+    std::shared_ptr<ir::Value> generate_index_enhanced(std::shared_ptr<ast::IndexExpr> idx);
+    std::shared_ptr<ir::Value> generate_array_literal(std::shared_ptr<ast::ArrayExpr> arr);
+    std::shared_ptr<ir::Value> generate_tuple_literal(std::shared_ptr<ast::TupleExpr> tup);
+    std::shared_ptr<ir::Value> generate_lambda(std::shared_ptr<ast::LambdaExpr> lambda);
+    std::shared_ptr<ir::Value> generate_field_access(std::shared_ptr<ast::FieldExpr> field);
+    std::shared_ptr<ir::Value> generate_tensor_create(std::shared_ptr<ast::TensorExpr> tensor);
+    std::shared_ptr<ir::Value> generate_tensor_op(std::shared_ptr<ast::TensorOpExpr> tensor_op);
+    
+    // 增强版语句分发
+    void generate_statement_enhanced(std::shared_ptr<ast::Statement> stmt);
+    void generate_for_enhanced(std::shared_ptr<ast::ForStmt> for_loop);
+    void generate_for_array(const std::string& loop_var,
+                             std::shared_ptr<ir::Value> array_ptr,
+                             ir::ArrayType* arr_type,
+                             std::shared_ptr<ast::Statement> body);
+    void generate_for_tensor(const std::string& loop_var,
+                              std::shared_ptr<ir::Value> tensor_ptr,
+                              ir::TensorType* tensor_type,
+                              std::shared_ptr<ast::Statement> body);
     
     // 操作码映射
     ir::OpCode map_binary_op(ast::BinaryOp op);
