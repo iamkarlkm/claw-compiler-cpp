@@ -428,6 +428,8 @@ struct Function {
     std::vector<Instruction> code;
     std::vector<Upvalue> upvalues;
     std::vector<std::string> local_names;  // For debugging
+    std::vector<ValueType> param_types;    // Type of each parameter (for JIT)
+    ValueType return_type = ValueType::I64; // Return type (for JIT)
 
     Function() : id(0), name(""), arity(0), local_count(0) {}
     Function(uint32_t i, const std::string& n, uint32_t a)

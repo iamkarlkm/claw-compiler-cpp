@@ -260,7 +260,7 @@ void X86_64CodeGenerator::emitModRMDisp32(uint8_t mod, uint8_t reg,
 
 // ========== 内存操作数编码 ==========
 
-void X86_64CodeGenerator::encodeMemory(const Operand& mem, uint8_t reg, bool is8bit) {
+void X86_64CodeGenerator::encodeMemory(const Operand& mem, uint8_t reg, [[maybe_unused]] bool is8bit) {
     // 编码 ModRM
     X86Reg base = mem.mem_val.base;
     X86Reg index = mem.mem_val.index;

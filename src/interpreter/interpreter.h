@@ -78,6 +78,7 @@ struct TensorValue {
         int64_t idx = shape.index(indices);
         if (idx >= 0 && idx < static_cast<int64_t>(data.size())) {
             data[idx] = val;
+            (void)val;
         }
     }
     
@@ -127,8 +128,12 @@ struct RuntimeValue {
     // For tensors (multi-dimensional)
     Tensor tensor;
 
+    // For structs
+    std::map<std::string, RuntimeValue> struct_fields;
+
     bool is_array() const { return size > 1 || !array.empty(); }
     bool is_tensor() const { return tensor != nullptr; }
+    bool is_struct() const { return !struct_fields.empty(); }
 
     // Get value at index (1-based in Claw)
     Value& at(int64_t idx) {
@@ -773,6 +778,16 @@ public:
     Value exception_value;
     claw::ast::Program* current_program = nullptr;
 
+    // Struct registry: name -> list of (field_name, field_type)
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> struct_registry;
+
+    // Lambda registry: name -> LambdaExpr*
+    std::map<std::string, claw::ast::LambdaExpr*> lambda_table;
+    int lambda_counter = 0;
+
+    // Import alias registry: alias -> full path string
+    std::map<std::string, std::string> import_aliases;
+
     // Variable stack — every {block} pushes a frame, } pops it.
     // Function calls also push a frame for params + locals.
     // Only top-level const/global declarations live outside the stack.
@@ -817,19 +832,22 @@ public:
     void execute(claw::ast::Program* program) {
         current_program = program;  // Store program reference
 
-        // First pass: find serial processes and register them
+        // First pass: execute non-function top-level declarations (struct, import, etc.)
         for (const auto& decl : program->get_declarations()) {
-            if (decl->get_kind() == claw::ast::Statement::Kind::SerialProcess) {
+            auto kind = decl->get_kind();
+            if (kind == claw::ast::Statement::Kind::SerialProcess) {
                 auto* proc = static_cast<claw::ast::SerialProcessStmt*>(decl.get());
                 std::string proc_name = proc->get_name();
                 claw::ast::ASTNode* proc_body = proc->get_body();
                 if (proc_body) {
                     event_system.register_process(proc_name, proc_body);
                 }
+            } else if (kind != claw::ast::Statement::Kind::Function) {
+                execute_statement(decl.get());
             }
         }
-        
-        // First pass: find main function
+
+        // Find main function
         claw::ast::FunctionStmt* main_fn = nullptr;
 
         for (const auto& decl : program->get_declarations()) {
@@ -984,6 +1002,10 @@ public:
                 execute_while(static_cast<claw::ast::WhileStmt*>(stmt));
                 break;
             }
+            case claw::ast::Statement::Kind::Match: {
+                execute_match(static_cast<claw::ast::MatchStmt*>(stmt));
+                break;
+            }
             case claw::ast::Statement::Kind::Return: {
                 auto* ret = static_cast<claw::ast::ReturnStmt*>(stmt);
                 if (ret->get_value()) {
@@ -1045,6 +1067,18 @@ public:
                 throw_flag = true;
                 break;
             }
+            case claw::ast::Statement::Kind::Struct: {
+                execute_struct(static_cast<claw::ast::StructStmt*>(stmt));
+                break;
+            }
+            case claw::ast::Statement::Kind::Import: {
+                execute_import(static_cast<claw::ast::ImportStmt*>(stmt));
+                break;
+            }
+            case claw::ast::Statement::Kind::Module: {
+                execute_module(static_cast<claw::ast::ModuleStmt*>(stmt));
+                break;
+            }
             default:
                 break;
         }
@@ -1054,6 +1088,27 @@ public:
     void execute_let(claw::ast::LetStmt* let) {
         std::string name = let->get_name();
         std::string type_str = let->get_type();
+
+        // Tuple destructuring: let (a, b) = expr
+        if (let->is_tuple_destructuring()) {
+            Value init_val;
+            if (let->get_initializer()) {
+                init_val = evaluate(let->get_initializer());
+            }
+            const auto& names = let->get_tuple_names();
+            for (size_t i = 0; i < names.size(); i++) {
+                if (names[i] == "_") continue; // skip discard placeholder
+                RuntimeValue elem;
+                elem.type_name = type_str;
+                elem.size = 1;
+                // Best-effort: if init_val is an array-like RuntimeValue stored
+                // in a variable, we can't easily index it here. Just assign the
+                // whole value to each element (interpreter tuple support is limited).
+                elem.scalar = init_val;
+                scoped_set(names[i], elem);
+            }
+            return;
+        }
 
         RuntimeValue val;
         val.type_name = type_str;
@@ -1079,7 +1134,29 @@ public:
 
         // Evaluate initializer if present
         if (let->get_initializer()) {
-            Value init_val = evaluate(let->get_initializer());
+            auto* init_expr = let->get_initializer();
+            // Check for struct constructor: Point(10, 20)
+            if (init_expr->get_kind() == claw::ast::Expression::Kind::Call) {
+                auto* call = static_cast<claw::ast::CallExpr*>(init_expr);
+                if (call->get_callee()->get_kind() == claw::ast::Expression::Kind::Identifier) {
+                    auto* ident = static_cast<claw::ast::IdentifierExpr*>(call->get_callee());
+                    auto sit = struct_registry.find(ident->get_name());
+                    if (sit != struct_registry.end()) {
+                        val.type_name = ident->get_name();
+                        const auto& fields = sit->second;
+                        const auto& args = call->get_arguments();
+                        for (size_t i = 0; i < fields.size() && i < args.size(); i++) {
+                            RuntimeValue field_val;
+                            field_val.type_name = fields[i].second;
+                            field_val.scalar = evaluate(args[i].get());
+                            val.struct_fields[fields[i].first] = std::move(field_val);
+                        }
+                        scoped_set(name, val);
+                        return;
+                    }
+                }
+            }
+            Value init_val = evaluate(init_expr);
             if (val.size == 1) {
                 val.scalar = init_val;
             } else if (!val.array.empty()) {
@@ -1214,7 +1291,7 @@ public:
         // Check if iterable is a range expression (1..10)
         if (iterable->get_kind() == claw::ast::Expression::Kind::Binary) {
             auto* bin = static_cast<claw::ast::BinaryExpr*>(iterable);
-            if (bin->get_operator() == TokenType::Dot) {
+            if (bin->get_operator() == TokenType::Op_range) {
                 // It's a range: start..end
                 Value start_val = evaluate(bin->get_left());
                 Value end_val = evaluate(bin->get_right());
@@ -1339,6 +1416,94 @@ public:
         }
     }
 
+    // Execute match statement
+    void execute_match(claw::ast::MatchStmt* match_stmt) {
+        Value match_val = evaluate(match_stmt->get_expr());
+        const auto& patterns = match_stmt->get_patterns();
+        const auto& bodies = match_stmt->get_bodies();
+
+        for (size_t i = 0; i < patterns.size() && i < bodies.size(); i++) {
+            auto* pattern = patterns[i].get();
+            auto* body = bodies[i].get();
+
+            bool matched = false;
+
+            // Wildcard: identifier '_' matches anything
+            if (pattern->get_kind() == claw::ast::Expression::Kind::Identifier) {
+                auto* ident = static_cast<claw::ast::IdentifierExpr*>(pattern);
+                if (ident->get_name() == "_") {
+                    matched = true;
+                } else {
+                    // Bind pattern: create variable with pattern name bound to match value
+                    RuntimeValue rv;
+                    rv.type_name = "i64";
+                    rv.scalar = match_val;
+                    scoped_set(ident->get_name(), rv);
+                    matched = true;
+                }
+            } else {
+                // Literal pattern: compare values
+                Value pattern_val = evaluate(pattern);
+                matched = (match_val == pattern_val);
+            }
+
+            if (matched) {
+                if (auto* stmt = dynamic_cast<claw::ast::Statement*>(body)) {
+                    if (stmt->get_kind() == claw::ast::Statement::Kind::Block) {
+                        execute_block(body);
+                    } else {
+                        execute_statement(stmt);
+                    }
+                } else if (auto* expr = dynamic_cast<claw::ast::Expression*>(body)) {
+                    evaluate(expr);
+                }
+                return;
+            }
+        }
+    }
+
+    // Execute struct declaration
+    void execute_struct(claw::ast::StructStmt* struct_stmt) {
+        std::vector<std::pair<std::string, std::string>> fields;
+        for (const auto& f : struct_stmt->get_fields()) {
+            fields.emplace_back(f.name, f.type);
+        }
+        struct_registry[struct_stmt->get_name()] = std::move(fields);
+    }
+
+    // Execute import/use statement
+    void execute_import(claw::ast::ImportStmt* import_stmt) {
+        if (!import_stmt) return;
+        const auto& paths = import_stmt->get_import_paths();
+        if (paths.empty()) return;
+
+        // Build full path string
+        std::string full_path;
+        for (size_t i = 0; i < paths.size(); i++) {
+            if (i > 0) full_path += "::";
+            full_path += paths[i];
+        }
+
+        // Record alias if present
+        if (!import_stmt->get_alias().empty()) {
+            import_aliases[import_stmt->get_alias()] = full_path;
+        }
+
+        // For now, stdlib functions are globally available.
+        // Future: load user modules via ModuleLoader here.
+    }
+
+    // Execute module declaration
+    void execute_module(claw::ast::ModuleStmt* mod_stmt) {
+        if (!mod_stmt) return;
+        // Execute module body in a new scope
+        push_scope();
+        for (const auto& stmt : mod_stmt->get_body()) {
+            execute_statement(stmt.get());
+        }
+        pop_scope();
+    }
+
     // Execute try/catch statement
     void execute_try(claw::ast::TryStmt* try_stmt) {
         if (!try_stmt) return;
@@ -1448,6 +1613,26 @@ public:
             }
             case claw::ast::Expression::Kind::Call: {
                 return evaluate_call(static_cast<claw::ast::CallExpr*>(expr));
+            }
+            case claw::ast::Expression::Kind::Member: {
+                auto* member = static_cast<claw::ast::MemberExpr*>(expr);
+                auto* obj_ident = dynamic_cast<claw::ast::IdentifierExpr*>(member->get_object());
+                if (obj_ident) {
+                    RuntimeValue* var = scoped_get(obj_ident->get_name());
+                    if (var && var->is_struct()) {
+                        auto it = var->struct_fields.find(member->get_member());
+                        if (it != var->struct_fields.end()) {
+                            return it->second.scalar;
+                        }
+                    }
+                }
+                return Value();
+            }
+            case claw::ast::Expression::Kind::Lambda: {
+                auto* lambda = static_cast<claw::ast::LambdaExpr*>(expr);
+                std::string lambda_name = "__lambda_" + std::to_string(lambda_counter++);
+                lambda_table[lambda_name] = lambda;
+                return lambda_name;
             }
             default:
                 return Value();
@@ -1596,9 +1781,85 @@ public:
                     }
                 }
             }
+
+            // Check lambda table: variable holds lambda name string
+            RuntimeValue* var = scoped_get(func_name);
+            if (var && std::holds_alternative<std::string>(var->scalar)) {
+                std::string lambda_name = std::get<std::string>(var->scalar);
+                auto lit = lambda_table.find(lambda_name);
+                if (lit != lambda_table.end()) {
+                    return execute_lambda(lit->second, call->get_arguments());
+                }
+            }
+        }
+
+        // Direct lambda call: fn() { 42 }()
+        if (callee->get_kind() == claw::ast::Expression::Kind::Lambda) {
+            auto* lambda = static_cast<claw::ast::LambdaExpr*>(callee);
+            return execute_lambda(lambda, call->get_arguments());
         }
 
         return Value();
+    }
+
+    // Execute lambda expression
+    Value execute_lambda(claw::ast::LambdaExpr* lambda, const std::vector<std::unique_ptr<claw::ast::Expression>>& arg_exprs) {
+        if (!lambda || !lambda->get_body()) return Value();
+
+        // Push new scope for lambda
+        variable_stack.push_back(std::map<std::string, RuntimeValue>());
+
+        // Bind parameters
+        const auto& params = lambda->get_params();
+        for (size_t i = 0; i < params.size() && i < arg_exprs.size(); i++) {
+            RuntimeValue param_val;
+            param_val.type_name = params[i].second;
+            param_val.scalar = evaluate(arg_exprs[i].get());
+            variable_stack.back()[params[i].first] = param_val;
+        }
+
+        // Save return state
+        Value saved_return_value = return_value;
+        bool saved_return_flag = return_flag;
+        return_value = Value();
+        return_flag = false;
+
+        // Execute body
+        auto* body = lambda->get_body();
+        if (auto* stmt = dynamic_cast<claw::ast::Statement*>(body)) {
+            if (stmt->get_kind() == claw::ast::Statement::Kind::Block) {
+                auto* block = static_cast<claw::ast::BlockStmt*>(body);
+                push_scope();
+                for (size_t i = 0; i < block->get_statements().size(); i++) {
+                    auto& s = block->get_statements()[i];
+                    execute_statement(s.get());
+                    // Capture last expression statement value as implicit return
+                    if (i == block->get_statements().size() - 1 &&
+                        s->get_kind() == claw::ast::Statement::Kind::Expression &&
+                        !return_flag) {
+                        auto* expr_stmt = static_cast<claw::ast::ExprStmt*>(s.get());
+                        return_value = evaluate(expr_stmt->get_expr());
+                    }
+                    if (break_flag || continue_flag || return_flag || throw_flag) break;
+                }
+                pop_scope();
+            } else {
+                execute_statement(stmt);
+            }
+        } else if (auto* expr = dynamic_cast<claw::ast::Expression*>(body)) {
+            return_value = evaluate(expr);
+        }
+
+        Value result = return_value;
+
+        // Pop scope
+        variable_stack.pop_back();
+
+        // Restore return state
+        return_value = saved_return_value;
+        return_flag = saved_return_flag;
+
+        return result;
     }
 
     // Helper: convert value to double

@@ -228,14 +228,12 @@ private:
     
     bool execute_code(const std::string& code) {
         if (debug_mode_) {
-            std::cout << "[DEBUG] Parsing: " << code << "\n";
         }
         
         // 模拟词法分析和语法分析
         auto tokens = tokenize(code);
         
         if (debug_mode_) {
-            std::cout << "[DEBUG] Tokens: ";
             for (const auto& tok : tokens) {
                 std::cout << "[" << tok << "] ";
             }

@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include "../ast/ast.h"
 #include "../bytecode/bytecode.h"

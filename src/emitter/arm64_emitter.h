@@ -160,11 +160,9 @@ public:
     
     // ADD (immediate) - Rd = Rn + imm
     void add(Register64 rd, Register64 rn, uint64_t imm);
-    void add(Register64 rd, Register64 rn, Register64 rm);
     
     // SUB (immediate) - Rd = Rn - imm
     void sub(Register64 rd, Register64 rn, uint64_t imm);
-    void sub(Register64 rd, Register64 rn, Register64 rm);
     
     // CMP - Flags = Rn - Rm/imm
     void cmp(Register64 rn, Register64 rm);

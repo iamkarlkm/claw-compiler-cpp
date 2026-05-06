@@ -178,12 +178,12 @@ std::vector<double> MLCostModelAdapter::config_to_features(
 
 MLCostModelAdapter::MLCostModelAdapter(std::unique_ptr<CostModel> model,
                                        bool enable_adaptation)
-    : model_(nullptr),  // 使用内部启发式模型
+    : internal_model_(std::make_unique<InternalHeuristicCostModel>()),
+      model_(nullptr),  // 使用内部启发式模型
       enable_adaptation_(enable_adaptation),
       target_hw_(HardwareTarget::CPU),
       hybrid_mode_(false),
-      ml_weight_(0.7),
-      internal_model_(std::make_unique<InternalHeuristicCostModel>()) {
+      ml_weight_(0.7) {
 }
 
 double MLCostModelAdapter::predict(

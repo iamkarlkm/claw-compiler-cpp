@@ -660,11 +660,11 @@ void TracingJIT::print_stats() const {
     auto stats = get_stats();
     
     printf("=== Tracing JIT Stats ===\n");
-    printf("Total executions: %lu\n", stats.total_executions);
-    printf("Trace attempts: %lu\n", stats.trace_attempts);
-    printf("Trace completed: %lu\n", stats.trace_completed);
-    printf("Trace compiled: %lu\n", stats.trace_compiled);
-    printf("Trace invalidated: %lu\n", stats.trace_invalidated);
+    printf("Total executions: %llu\n", (unsigned long long)stats.total_executions);
+    printf("Trace attempts: %llu\n", (unsigned long long)stats.trace_attempts);
+    printf("Trace completed: %llu\n", (unsigned long long)stats.trace_completed);
+    printf("Trace compiled: %llu\n", (unsigned long long)stats.trace_compiled);
+    printf("Trace invalidated: %llu\n", (unsigned long long)stats.trace_invalidated);
     printf("Total code generated: %zu bytes\n", stats.total_code_generated);
     printf("Avg trace length: %.1f\n", stats.avg_trace_length);
     printf("=========================\n");

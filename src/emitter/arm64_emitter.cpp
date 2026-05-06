@@ -863,7 +863,7 @@ void ARM64Emitter::sbc(Register64 rd, Register64 rn, Register64 rm) {
 
 void ARM64Emitter::neg(Register64 rd, Register64 rm) {
     // NEG rd, rm = SUB rd, XZR, rm
-    sub(rd, Register64::XZR, rm);
+    sub(rd, Register64::XZR, static_cast<Register64>(rm));
 }
 
 void ARM64Emitter::negs(Register64 rd, Register64 rm) {

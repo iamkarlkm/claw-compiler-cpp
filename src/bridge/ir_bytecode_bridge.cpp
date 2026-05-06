@@ -310,7 +310,7 @@ std::vector<BCInstruction> IRBytecodeBridge::ir_block_to_bytecode(
         }
         
         // 添加调试信息 (如果需要)
-        bc_inst.line_number = 0;
+        // bc_inst.line_number = 0; // Instruction has no line_number field
         
         instructions.push_back(bc_inst);
     }
@@ -642,7 +642,7 @@ void IRBytecodeBridge::reconstruct_ssa(
 // ============================================================================
 
 IRBytecodeBridge::CompilationStrategy IRBytecodeBridge::analyze_compilation_strategy(
-    const std::string& function_name,
+    [[maybe_unused]] const std::string& function_name,
     size_t call_count,
     size_t total_execution_time_us
 ) {
@@ -670,8 +670,8 @@ BCValueType IRBytecodeBridge::ir_type_to_bytecode_type(int type_kind) {
     switch (type_kind) {
         case 0: return BCValueType::NIL;      // Void
         case 1: return BCValueType::BOOL;     // Bool
-        case 2: return BCValueType::INT;      // Int
-        case 3: return BCValueType::FLOAT;    // Float
+        case 2: return BCValueType::I64;      // Int
+        case 3: return BCValueType::F64;    // Float
         case 4: return BCValueType::STRING;   // String
         case 5: return BCValueType::ARRAY;    // Array
         case 6: return BCValueType::TUPLE;    // Tuple
@@ -791,7 +791,7 @@ struct CompilationDecision {
 };
 
 CompilationDecision make_compilation_decision(
-    const std::string& function_name,
+    [[maybe_unused]] const std::string& function_name,
     size_t call_count,
     size_t total_execution_time_us,
     size_t bytecode_size

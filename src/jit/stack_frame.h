@@ -344,7 +344,7 @@ public:
     }
     
     // Check if accessing address would overflow stack
-    bool would_overflow(void* addr, size_t access_size = 1) const {
+    bool would_overflow(void* addr, [[maybe_unused]] size_t access_size = 1) const {
         if (!enabled_) return false;
         
         // Check if address is below stack boundary
@@ -512,7 +512,7 @@ public:
     }
     
     // Generate epilogue instructions
-    std::vector<uint8_t> generate_epilogue(bool has_return_value) {
+    std::vector<uint8_t> generate_epilogue([[maybe_unused]] bool has_return_value) {
         std::vector<uint8_t> code;
         
         // ADD RSP, frame_size (we'll fill this in later)

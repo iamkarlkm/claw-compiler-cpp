@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include <algorithm>
 #include <iostream>
+#include <unordered_set>
 
 namespace claw {
 
@@ -33,23 +34,33 @@ std::shared_ptr<BytecodeModule> BytecodeCompiler::compile(const ast::Program& mo
 
 void BytecodeCompiler::compileModule(const ast::Program& module) {
     const auto& decls = module.get_declarations();
-    
+
     // 第一遍: 编译所有函数定义
     for (const auto& stmt : decls) {
         if (stmt->get_kind() == ast::Statement::Kind::Function) {
             compileFunction(static_cast<const ast::FunctionStmt&>(*stmt));
         }
     }
-    
-    // 第二遍: 编译非函数语句
+
+    // 第二遍: 编译非函数语句到隐式顶层函数
+    bool hasTopLevel = false;
     for (const auto& stmt : decls) {
         if (stmt->get_kind() != ast::Statement::Kind::Function) {
+            if (!hasTopLevel) {
+                hasTopLevel = true;
+                ctx_->currentFunction = std::make_shared<bytecode::Function>();
+                ctx_->currentFunction->name = "__top_level";
+            }
             compileStatement(*stmt);
         }
     }
-    
-    // 添加 HALT 指令
-    emitOp(bytecode::OpCode::HALT);
+
+    if (hasTopLevel) {
+        emitOp(bytecode::OpCode::RET_NULL);
+        ctx_->currentFunction->local_count = static_cast<uint32_t>(ctx_->nextSlot);
+        module_->functions.push_back(*ctx_->currentFunction);
+        ctx_->currentFunction.reset();
+    }
 }
 
 void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
@@ -57,20 +68,48 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
     byteFunc.name = func.get_name();
     byteFunc.arity = static_cast<uint32_t>(func.get_params().size());
     byteFunc.local_count = byteFunc.arity;
-    
+
+    // Record parameter types for JIT
+    for (const auto& param : func.get_params()) {
+        const std::string& type_name = param.second;
+        if (type_name == "f64" || type_name == "f32" || type_name == "float") {
+            byteFunc.param_types.push_back(bytecode::ValueType::F64);
+        } else if (type_name == "string" || type_name == "str") {
+            byteFunc.param_types.push_back(bytecode::ValueType::STRING);
+        } else if (type_name == "bool") {
+            byteFunc.param_types.push_back(bytecode::ValueType::BOOL);
+        } else {
+            byteFunc.param_types.push_back(bytecode::ValueType::I64);
+        }
+    }
+
+    // Record return type for JIT
+    const std::string& ret_type = func.get_return_type();
+    if (ret_type == "f64" || ret_type == "f32" || ret_type == "float") {
+        byteFunc.return_type = bytecode::ValueType::F64;
+    } else if (ret_type == "string" || ret_type == "str") {
+        byteFunc.return_type = bytecode::ValueType::STRING;
+    } else if (ret_type == "bool") {
+        byteFunc.return_type = bytecode::ValueType::BOOL;
+    } else {
+        byteFunc.return_type = bytecode::ValueType::I64;
+    }
+
     // 保存旧上下文
     auto prevCtx = std::move(ctx_);
     ctx_ = std::make_unique<CompilationContext>();
     ctx_->currentFunction = std::make_shared<bytecode::Function>(byteFunc);
     ctx_->isClosure = false;
     ctx_->scopeStack.emplace_back();
-    
+    ctx_->nextSlot = 0;
+
     // 分配参数槽位
     int slot = 0;
     for (const auto& param : func.get_params()) {
         ctx_->scopeStack.back()[param.first] = slot++;
     }
-    
+    ctx_->nextSlot = slot;
+
     // 编译函数体
     if (func.get_body()) {
         compileBlockStmt(*static_cast<const ast::BlockStmt*>(func.get_body()));
@@ -82,9 +121,15 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
         emitOp(bytecode::OpCode::RET_NULL);
     }
     
+    // Update local_count to reflect all allocated locals
+    ctx_->currentFunction->local_count = std::max(
+        ctx_->currentFunction->local_count,
+        static_cast<uint32_t>(ctx_->nextSlot)
+    );
+
     // 添加到模块
     module_->functions.push_back(*ctx_->currentFunction);
-    
+
     // 恢复旧上下文
     ctx_ = std::move(prevCtx);
 }
@@ -138,6 +183,36 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
 }
 
 void BytecodeCompiler::compileLetStmt(const ast::LetStmt& stmt) {
+    // Tuple destructuring: let (a, b) = expr
+    if (stmt.is_tuple_destructuring()) {
+        auto* init = stmt.get_initializer();
+        if (!init) {
+            error("Tuple destructuring requires an initializer");
+            return;
+        }
+        compileExpression(*init);
+
+        bool isGlobalScope = ctx_->currentFunction && ctx_->currentFunction->name == "__top_level";
+        const auto& names = stmt.get_tuple_names();
+        for (size_t i = 0; i < names.size(); i++) {
+            if (names[i] == "_") continue; // skip discard placeholder
+            emitOp(bytecode::OpCode::DUP);          // duplicate tuple
+            emitConst(static_cast<int>(i));         // push index (via constant pool)
+            emitOp(bytecode::OpCode::LOAD_INDEX);   // load element
+            if (isGlobalScope) {
+                int globalSlot = nextGlobalSlot_++;
+                globalVars_[names[i]] = globalSlot;
+                emitOp1(bytecode::OpCode::DEFINE_GLOBAL, findOrAddString(names[i]));
+            } else {
+                int slot = allocateLocal(names[i]);
+                emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
+            }
+        }
+        // pop the original tuple
+        emitOp(bytecode::OpCode::POP);
+        return;
+    }
+
     auto* init = stmt.get_initializer();
     if (init) {
         compileExpression(*init);
@@ -145,15 +220,15 @@ void BytecodeCompiler::compileLetStmt(const ast::LetStmt& stmt) {
         emitOp(bytecode::OpCode::PUSH);
         emitOp1(bytecode::OpCode::PUSH, 0);
     }
-    
-    int slot = allocateLocal(stmt.get_name());
-    
-    if (ctx_->scopeStack.size() == 1) {
+
+    // Global scope is only the __top_level implicit function
+    bool isGlobalScope = ctx_->currentFunction && ctx_->currentFunction->name == "__top_level";
+    if (isGlobalScope) {
         int globalSlot = nextGlobalSlot_++;
         globalVars_[stmt.get_name()] = globalSlot;
         emitOp1(bytecode::OpCode::DEFINE_GLOBAL, findOrAddString(stmt.get_name()));
-        emitOp(bytecode::OpCode::STORE_GLOBAL);
     } else {
+        int slot = allocateLocal(stmt.get_name());
         emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
     }
 }
@@ -171,10 +246,7 @@ void BytecodeCompiler::compileAssignStmt(const ast::AssignStmt& stmt) {
         if (slot >= 0) {
             emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
         } else {
-            auto it = globalVars_.find(name);
-            if (it != globalVars_.end()) {
-                emitOp1(bytecode::OpCode::STORE_GLOBAL, it->second);
-            }
+            emitStoreGlobal(name);
         }
     }
 }
@@ -282,104 +354,168 @@ void BytecodeCompiler::compileMatchStmt(const ast::MatchStmt& stmt) {
 }
 
 void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
-    // for variable in iterable { body }
-    // NEW IMPLEMENTATION: Proper iterator protocol (2026-04-26)
-    const std::string& varName = stmt.get_variable();
     auto* iterable = stmt.get_iterable();
     auto* body = stmt.get_body();
-    
     if (!iterable) return;
-    
-    // Allocate the loop variable
-    int varSlot = allocateLocal(varName);
-    
+
     // Setup loop context
     LoopContext loopCtx;
     loopCtx.breakJumpIdx = -1;
     loopCtx.continueJumpIdx = -1;
     loopCtx.scopeDepth = ctx_->scopeDepth;
     ctx_->loopStack.push_back(loopCtx);
-    
-    // Compile the iterable expression
-    compileExpression(*iterable);
-    
-    // Create iterator from iterable using EXT opcode
-    emitOp(bytecode::OpCode::EXT);
-    emitOp1(bytecode::OpCode::EXT, static_cast<uint8_t>(bytecode::ExtOpCode::ITER_CREATE));
-    
-    // Store iterator in a local slot (slot 0 reserved for iterator)
-    emitOp(bytecode::OpCode::STORE_LOCAL);
-    emitOp1(bytecode::OpCode::STORE_LOCAL, 0);
-    
-    // Loop start
-    int loopStartIdx = ctx_->currentFunction->code.size();
-    
-    // Check if iterator has next
-    emitOp(bytecode::OpCode::LOAD_LOCAL);
-    emitOp1(bytecode::OpCode::LOAD_LOCAL, 0);  // Load iterator
-    emitOp(bytecode::OpCode::EXT);
-    emitOp1(bytecode::OpCode::EXT, static_cast<uint8_t>(bytecode::ExtOpCode::ITER_HAS_NEXT));
-    
-    // If no more elements, jump to end
-    int condJumpIdx = ctx_->currentFunction->code.size();
-    emitOp(bytecode::OpCode::JMP_IF_NOT);
-    ctx_->pendingJumps.push_back({condJumpIdx, 0, true});
-    
-    // Get next element
-    emitOp(bytecode::OpCode::LOAD_LOCAL);
-    emitOp1(bytecode::OpCode::LOAD_LOCAL, 0);  // Load iterator
-    emitOp(bytecode::OpCode::EXT);
-    emitOp1(bytecode::OpCode::EXT, static_cast<uint8_t>(bytecode::ExtOpCode::ITER_NEXT));
-    
-    // Stack now has: [value, done]
-    // Pop done, keep value
-    emitOp(bytecode::OpCode::POP);
-    
-    // Store value to loop variable
-    emitOp(bytecode::OpCode::STORE_LOCAL);
-    emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
-    
-    // Compile body
-    enterScope();
-    if (body) {
-        if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
-            compileBlockStmt(*block);
-        } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(body)) {
-            compileStatement(*stmtNode);
+
+    // Range expression: for i in start..end { body }
+    if (iterable->get_kind() == ast::Expression::Kind::Binary) {
+        auto* bin = static_cast<const ast::BinaryExpr*>(iterable);
+        if (bin->get_operator() == TokenType::Op_range) {
+            int varSlot = allocateLocal(stmt.get_variable());
+
+            // start_expr
+            compileExpression(*bin->get_left());
+            emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+            // end_expr
+            compileExpression(*bin->get_right());
+            int endSlot = allocateLocal("__end");
+            emitOp1(bytecode::OpCode::STORE_LOCAL, endSlot);
+
+            // loop start
+            int loopStartIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+            // if i > end, break
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, varSlot);
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, endSlot);
+            emitOp(bytecode::OpCode::IGT);
+
+            int exitJumpIdx = static_cast<int>(ctx_->currentFunction->code.size());
+            emitOp(bytecode::OpCode::JMP_IF);
+            ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
+
+            // body
+            enterScope();
+            if (body) {
+                if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
+                    compileBlockStmt(*block);
+                } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(body)) {
+                    compileStatement(*stmtNode);
+                }
+            }
+            exitScope();
+
+            // continue target: increment section
+            int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+            // increment: i = i + 1
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, varSlot);
+            emitConst(1);
+            emitOp(bytecode::OpCode::IADD);
+            emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+            // jump back
+            int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+            emitOp1(bytecode::OpCode::JMP, backOffset);
+
+            // patch loop exit jump to here
+            patchJump(exitJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+
+            // patch any break jumps inside the body
+            if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+                patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+            }
+
+            // patch any continue jumps inside the body to the increment section
+            if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+                patchJump(ctx_->loopStack.back().continueJumpIdx, continueTargetIdx);
+            }
+
+            ctx_->loopStack.pop_back();
+            return;
         }
     }
-    exitScope();
-    
-    // Jump back to loop start
-    emitOp1(bytecode::OpCode::JMP, loopStartIdx);
-    
-    // Patch the condition jump (break out of loop)
-    patchJump(condJumpIdx, ctx_->currentFunction->code.size());
-    
-    // Pop the iterator from stack
-    emitOp(bytecode::OpCode::LOAD_LOCAL);
-    emitOp1(bytecode::OpCode::LOAD_LOCAL, 0);
-    emitOp(bytecode::OpCode::POP);
-    
+
+    // Integer literal: for i in 5  =>  for i in 1..5
+    if (iterable->get_kind() == ast::Expression::Kind::Literal) {
+        auto* lit = static_cast<const ast::LiteralExpr*>(iterable);
+        auto val = lit->get_value();
+        if (std::holds_alternative<int64_t>(val)) {
+            int64_t end = std::get<int64_t>(val);
+            int varSlot = allocateLocal(stmt.get_variable());
+
+            // i = 1
+            emitConst(1);
+            emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+            // end
+            emitConst(static_cast<int>(end));
+            int endSlot = allocateLocal("__end");
+            emitOp1(bytecode::OpCode::STORE_LOCAL, endSlot);
+
+            int loopStartIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, varSlot);
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, endSlot);
+            emitOp(bytecode::OpCode::IGT);
+
+            int exitJumpIdx = static_cast<int>(ctx_->currentFunction->code.size());
+            emitOp(bytecode::OpCode::JMP_IF);
+            ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
+
+            enterScope();
+            if (body) {
+                if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
+                    compileBlockStmt(*block);
+                } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(body)) {
+                    compileStatement(*stmtNode);
+                }
+            }
+            exitScope();
+
+            int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+            emitOp1(bytecode::OpCode::LOAD_LOCAL, varSlot);
+            emitConst(1);
+            emitOp(bytecode::OpCode::IADD);
+            emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+            int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+            emitOp1(bytecode::OpCode::JMP, backOffset);
+
+            patchJump(exitJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+
+            if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+                patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+            }
+
+            if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+                patchJump(ctx_->loopStack.back().continueJumpIdx, continueTargetIdx);
+            }
+
+            ctx_->loopStack.pop_back();
+            return;
+        }
+    }
+
+    // TODO: support array and string iteration
+    error("For-loop iterable type not yet supported in bytecode compiler");
     ctx_->loopStack.pop_back();
 }
 
 void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
     int loopStartIdx = ctx_->currentFunction->code.size();
-    
+
     LoopContext loopCtx;
     loopCtx.breakJumpIdx = -1;
     loopCtx.continueJumpIdx = -1;
     loopCtx.scopeDepth = ctx_->scopeDepth;
     ctx_->loopStack.push_back(loopCtx);
-    
+
     auto* cond = stmt.get_condition();
     if (cond) compileExpression(*cond);
     int condJumpIdx = ctx_->currentFunction->code.size();
     emitOp(bytecode::OpCode::JMP_IF_NOT);
     ctx_->pendingJumps.push_back({condJumpIdx, 0, true});
-    patchJump(condJumpIdx, ctx_->currentFunction->code.size());
-    
+
     enterScope();
     auto* body = stmt.get_body();
     if (body) {
@@ -391,9 +527,24 @@ void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
         }
     }
     exitScope();
-    
-    emitOp1(bytecode::OpCode::JMP, loopStartIdx);
-    
+
+    // Jump back to loop start
+    int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+    emitOp1(bytecode::OpCode::JMP, backOffset);
+
+    // Patch the condition jump to jump past the backward JMP
+    patchJump(condJumpIdx, ctx_->currentFunction->code.size());
+
+    // Patch any break jumps inside the body
+    if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+    }
+
+    // Patch any continue jumps inside the body to the loop start (condition check)
+    if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().continueJumpIdx, loopStartIdx);
+    }
+
     ctx_->loopStack.pop_back();
 }
 
@@ -410,6 +561,7 @@ void BytecodeCompiler::compileReturnStmt(const ast::ReturnStmt& stmt) {
 
 void BytecodeCompiler::compileBreakStmt(const ast::BreakStmt& stmt) {
     if (ctx_->loopStack.empty()) {
+    (void)stmt;
         error("break outside of loop");
         return;
     }
@@ -422,6 +574,7 @@ void BytecodeCompiler::compileBreakStmt(const ast::BreakStmt& stmt) {
 
 void BytecodeCompiler::compileContinueStmt(const ast::ContinueStmt& stmt) {
     if (ctx_->loopStack.empty()) {
+    (void)stmt;
         error("continue outside of loop");
         return;
     }
@@ -439,10 +592,32 @@ void BytecodeCompiler::compileBlockStmt(const ast::BlockStmt& block) {
 
 void BytecodeCompiler::compileExprStmt(const ast::ExprStmt& stmt) {
     auto* expr = stmt.get_expr();
-    if (expr) {
-        compileExpression(*expr);
-        emitOp(bytecode::OpCode::POP);
+    if (!expr) return;
+
+    // Handle assignment expressions: x = 5 (parsed as BinaryExpr with Op_eq_assign)
+    if (expr->get_kind() == ast::Expression::Kind::Binary) {
+        auto* bin = static_cast<const ast::BinaryExpr*>(expr);
+        if (bin->get_operator() == TokenType::Op_eq_assign) {
+            auto* target = bin->get_left();
+            auto* value = bin->get_right();
+            if (target && value) {
+                compileExpression(*value);
+                if (target->get_kind() == ast::Expression::Kind::Identifier) {
+                    const auto& name = static_cast<const ast::IdentifierExpr&>(*target).get_name();
+                    int slot = resolveVariable(name);
+                    if (slot >= 0) {
+                        emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
+                    } else {
+                        emitStoreGlobal(name);
+                    }
+                }
+            }
+            return;
+        }
     }
+
+    compileExpression(*expr);
+    emitOp(bytecode::OpCode::POP);
 }
 
 void BytecodeCompiler::compilePublishStmt(const ast::PublishStmt& stmt) {
@@ -552,6 +727,15 @@ void BytecodeCompiler::compileBinaryExpr(const ast::BinaryExpr& expr) {
         case TokenType::Op_gte:    emitOp(bytecode::OpCode::IGE); break;
         case TokenType::Op_and:  emitOp(bytecode::OpCode::AND); break;
         case TokenType::Op_or: emitOp(bytecode::OpCode::OR); break;
+        case TokenType::Op_range:
+            // Range expressions are not first-class values.
+            // compileForStmt handles them directly in for-loop context.
+            // In other contexts, discard operands and push nil.
+            emitOp(bytecode::OpCode::POP); // pop right (end)
+            emitOp(bytecode::OpCode::POP); // pop left (start)
+            emitOp(bytecode::OpCode::PUSH);
+            emitOp1(bytecode::OpCode::PUSH, 0); // nil
+            break;
         default:
             errorf("Unknown binary operator: %d", (int)expr.get_operator());
     }
@@ -568,7 +752,24 @@ void BytecodeCompiler::compileUnaryExpr(const ast::UnaryExpr& expr) {
 }
 
 void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
-    for (auto it = expr.get_arguments().rbegin(); it != expr.get_arguments().rend(); ++it) {
+    static const std::unordered_set<std::string> builtins = {
+        "print", "println", "len", "type", "int", "float", "string", "bool", "input", "array", "range", "panic"
+    };
+
+    if (expr.get_callee()->get_kind() == ast::Expression::Kind::Identifier) {
+        const auto& name = static_cast<const ast::IdentifierExpr&>(*expr.get_callee()).get_name();
+        if (builtins.find(name) != builtins.end()) {
+            for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
+                compileExpression(**it);
+            }
+            int str_idx = findOrAddString(name);
+            int arg_count = static_cast<int>(expr.get_arguments().size());
+            emitOp2(bytecode::OpCode::CALL_EXT, str_idx, arg_count);
+            return;
+        }
+    }
+
+    for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
         compileExpression(**it);
     }
     compileExpression(*expr.get_callee());
@@ -576,8 +777,8 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
 }
 
 void BytecodeCompiler::compileIndexExpr(const ast::IndexExpr& expr) {
-    compileExpression(*expr.get_index());
     compileExpression(*expr.get_object());
+    compileExpression(*expr.get_index());
     emitOp(bytecode::OpCode::LOAD_INDEX);
 }
 
@@ -596,19 +797,20 @@ void BytecodeCompiler::compileArrayExpr(const ast::ArrayExpr& expr) {
 }
 
 void BytecodeCompiler::compileTupleExpr(const ast::TupleExpr& expr) {
-    for (auto it = expr.get_elements().rbegin(); it != expr.get_elements().rend(); ++it) {
+    for (auto it = expr.get_elements().begin(); it != expr.get_elements().end(); ++it) {
         compileExpression(**it);
     }
     emitOp1(bytecode::OpCode::CREATE_TUPLE, static_cast<int>(expr.get_elements().size()));
 }
 
 void BytecodeCompiler::compileLambdaExpr(const ast::LambdaExpr& expr) {
-    emitOp(bytecode::OpCode::CLOSURE);
-    // 简化: 创建空函数
+    (void)expr;
     bytecode::Function lambdaFunc;
     lambdaFunc.name = "";
     lambdaFunc.arity = 0;
+    int func_idx = static_cast<int>(module_->functions.size());
     module_->functions.push_back(lambdaFunc);
+    emitOp1(bytecode::OpCode::CLOSURE, func_idx);
 }
 
 // ========== 作用域管理 ==========
@@ -639,7 +841,7 @@ int BytecodeCompiler::allocateLocal(const std::string& name) {
     if (ctx_->scopeStack.empty()) {
         ctx_->scopeStack.emplace_back();
     }
-    int slot = static_cast<int>(ctx_->scopeStack.back().size());
+    int slot = ctx_->nextSlot++;
     ctx_->scopeStack.back()[name] = slot;
     return slot;
 }
@@ -691,7 +893,8 @@ void BytecodeCompiler::emitJump(bytecode::OpCode op) {
 
 void BytecodeCompiler::patchJump(int jumpIdx, int targetIdx) {
     if (jumpIdx >= 0 && jumpIdx < (int)ctx_->currentFunction->code.size()) {
-        ctx_->currentFunction->code[jumpIdx].operand = static_cast<uint32_t>(targetIdx);
+        int offset = targetIdx - (jumpIdx + 1);
+        ctx_->currentFunction->code[jumpIdx].operand = static_cast<uint32_t>(offset);
     }
 }
 
@@ -716,21 +919,11 @@ void BytecodeCompiler::emitStoreLocal(int slot) {
 }
 
 void BytecodeCompiler::emitLoadGlobal(const std::string& name) {
-    auto it = globalVars_.find(name);
-    if (it != globalVars_.end()) {
-        emitOp1(bytecode::OpCode::LOAD_GLOBAL, it->second);
-    } else {
-        emitOpS(bytecode::OpCode::LOAD_GLOBAL, name);
-    }
+    emitOpS(bytecode::OpCode::LOAD_GLOBAL, name);
 }
 
 void BytecodeCompiler::emitStoreGlobal(const std::string& name) {
-    auto it = globalVars_.find(name);
-    if (it != globalVars_.end()) {
-        emitOp1(bytecode::OpCode::STORE_GLOBAL, it->second);
-    } else {
-        emitOpS(bytecode::OpCode::STORE_GLOBAL, name);
-    }
+    emitOpS(bytecode::OpCode::STORE_GLOBAL, name);
 }
 
 void BytecodeCompiler::emitConst(int value) {
@@ -751,28 +944,21 @@ void BytecodeCompiler::emitConst(const std::string& value) {
 // ========== 常量池 ==========
 
 int BytecodeCompiler::addConstant(const bytecode::Value& value) {
-    // 根据值类型添加到对应的常量池
-    switch (value.type) {
-        case bytecode::ValueType::I64:
-            return module_->constants.add_integer(value.data.i64);
-        case bytecode::ValueType::F64:
-            return module_->constants.add_float(value.data.f64);
-        case bytecode::ValueType::STRING:
-            return module_->constants.add_string(value.str);
-        default:
-            // 对于其他类型，使用 values 向量
-            module_->constants.values.push_back(value);
-            return static_cast<int>(module_->constants.values.size()) - 1;
-    }
+    // 统一使用 values 向量，简化 VM 查找
+    module_->constants.values.push_back(value);
+    return static_cast<int>(module_->constants.values.size()) - 1;
 }
 
 int BytecodeCompiler::findOrAddString(const std::string& s) {
-    for (size_t i = 0; i < module_->constants.strings.size(); ++i) {
-        if (module_->constants.strings[i] == s) {
+    // 统一使用 values 向量
+    for (size_t i = 0; i < module_->constants.values.size(); ++i) {
+        if (module_->constants.values[i].type == bytecode::ValueType::STRING &&
+            module_->constants.values[i].str == s) {
             return static_cast<int>(i);
         }
     }
-    return module_->constants.add_string(s);
+    module_->constants.values.push_back(bytecode::Value::string(s));
+    return static_cast<int>(module_->constants.values.size()) - 1;
 }
 
 // ========== 错误处理 ==========

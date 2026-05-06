@@ -892,7 +892,7 @@ Value* CodeGenerator::codegen_unary(ast::UnaryExpr* unary) {
         case TokenType::Op_star:  // Dereference
             // For pointer types, load the value
             if (operand->getType()->isPointerTy()) {
-                return builder_->CreateLoad(operand->getType()->getPointerElementType(), operand, "deref");
+                return builder_->CreateLoad(operand->getType(), operand, "deref");  // LLVM opaque pointer
             }
             return nullptr;
             
@@ -916,8 +916,8 @@ Value* CodeGenerator::codegen_publish(ast::PublishStmt* publish) {
     if (!event_dispatch) {
         // void claw_event_dispatch(i8* event_name, i8** args, i32 num_args)
         std::vector<Type*> arg_types;
-        arg_types.push_back(Type::getInt8Ty(context_)->getPointerTy());  // event_name
-        arg_types.push_back(Type::getInt8Ty(context_)->getPointerTy()->getPointerTy());  // args
+        arg_types.push_back(PointerType::get(context_, 0));  // event_name
+        arg_types.push_back(PointerType::get(PointerType::get(context_, 0), 0));  // args
         arg_types.push_back(Type::getInt32Ty(context_));  // num_args
         
         FunctionType* dispatch_type = FunctionType::get(
@@ -962,7 +962,7 @@ Value* CodeGenerator::codegen_publish(ast::PublishStmt* publish) {
         // For arguments, we'll pass null for now (simplified implementation)
         // Full implementation would serialize arguments to a buffer
         Value* null_args = ConstantPointerNull::get(
-            Type::getInt8Ty(context_)->getPointerTy()->getPointerTy()
+            PointerType::get(PointerType::get(context_, 0), 0)
         );
         Value* num_args = ConstantInt::get(Type::getInt32Ty(context_), arg_values.size());
         
@@ -993,8 +993,8 @@ Value* CodeGenerator::codegen_subscribe(ast::SubscribeStmt* subscribe) {
     if (!event_subscribe) {
         // i32 claw_event_subscribe(i8* event_name, void* handler)
         std::vector<Type*> arg_types;
-        arg_types.push_back(Type::getInt8Ty(context_)->getPointerTy());  // event_name
-        arg_types.push_back(Type::getInt8Ty(context_)->getPointerTy());  // handler function pointer
+        arg_types.push_back(PointerType::get(context_, 0));  // event_name
+        arg_types.push_back(PointerType::get(context_, 0));  // handler function pointer
         
         FunctionType* subscribe_type = FunctionType::get(
             Type::getInt32Ty(context_),  // return 0 on success
@@ -1013,7 +1013,7 @@ Value* CodeGenerator::codegen_subscribe(ast::SubscribeStmt* subscribe) {
     // Get the handler function pointer
     Value* handler_ptr = builder_->CreateBitCast(
         handler_func,
-        Type::getInt8Ty(context_)->getPointerTy()
+        PointerType::get(context_, 0)
     );
     
     // Create event name string
@@ -1048,7 +1048,7 @@ Value* CodeGenerator::codegen_serial_process(ast::SerialProcessStmt* process) {
     if (!process_init) {
         // void claw_process_init(i8* name, i32 num_params)
         std::vector<Type*> arg_types;
-        arg_types.push_back(Type::getInt8Ty(context_)->getPointerTy());  // process name
+        arg_types.push_back(PointerType::get(context_, 0));  // process name
         arg_types.push_back(Type::getInt32Ty(context_));  // num params
         
         FunctionType* init_type = FunctionType::get(
@@ -1081,7 +1081,7 @@ Value* CodeGenerator::codegen_serial_process(ast::SerialProcessStmt* process) {
     
     // Check if process body has statements
     if (body) {
-        codegen_block(body.get());
+        codegen_block(dynamic_cast<ast::BlockStmt*>(body));
     }
     
     // Emit debug info
@@ -1096,160 +1096,6 @@ Value* CodeGenerator::codegen_serial_process(ast::SerialProcessStmt* process) {
 }
 
 // Generate code for Match statement - complete implementation with pattern matching
-Value* CodeGenerator::codegen_match(ast::MatchStmt* match) {
-    if (!match || !match->get_expr()) {
-        return nullptr;
-    }
-    
-    // Get the subject value to match on
-    Value* subject_val = codegen_expression(match->get_expr());
-    if (!subject_val) return nullptr;
-    
-    Function* func = builder_->GetInsertBlock()->getParent();
-    
-    const auto& bodies = match->get_bodies();
-    const auto& patterns = match->get_patterns();
-    
-    if (bodies.empty() || patterns.empty()) {
-        return nullptr;
-    }
-    
-    // Create exit block
-    BasicBlock* exit_block = BasicBlock::Create(context_, "match.exit", func);
-    
-    // First pass: categorize patterns
-    // - Switch cases: integer/string literals
-    // - Conditional cases: ranges, wildcards, complex patterns
-    
-    std::vector<size_t> switch_indices;
-    std::vector<size_t> conditional_indices;
-    size_t wildcard_index = SIZE_MAX;
-    
-    for (size_t i = 0; i < patterns.size(); i++) {
-        auto* pattern = patterns[i].get();
-        
-        // Check if pattern is a wildcard (_)
-        if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(pattern)) {
-            if (ident->get_name() == "_") {
-                wildcard_index = i;
-                continue;
-            }
-        }
-        
-        // Check if pattern is a literal (integer or string)
-        if (dynamic_cast<ast::LiteralExpr*>(pattern)) {
-            switch_indices.push_back(i);
-        } else {
-            conditional_indices.push_back(i);
-        }
-    }
-    
-    // If all patterns are suitable for switch, use switch instruction
-    if (switch_indices.size() >= 2 && conditional_indices.empty()) {
-        // Create switch instruction
-        BasicBlock* default_block = (wildcard_index != SIZE_MAX) 
-            ? BasicBlock::Create(context_, "match.default", func, exit_block)
-            : exit_block;
-        
-        SwitchInst* switch_inst = builder_->CreateSwitch(subject_val, default_block, switch_indices.size());
-        
-        // Add switch cases
-        for (size_t idx : switch_indices) {
-            auto* pattern = patterns[idx].get();
-            auto* body = bodies[idx].get();
-            
-            BasicBlock* case_block = BasicBlock::Create(context_, "match.case", func, exit_block);
-            builder_->SetInsertPoint(case_block);
-            
-            if (auto* lit = dynamic_cast<ast::LiteralExpr*>(pattern)) {
-                if (lit->get_type() == TokenType::Number) {
-                    int64_t case_val = std::get<int64_t>(lit->get_value());
-                    switch_inst->addCase(builder_->getInt64(case_val), case_block);
-                } else if (lit->get_type() == TokenType::String) {
-                    // String literals use hash-based switch
-                    // For now, fall through to conditional
-                }
-            }
-            
-            // Generate body
-            if (auto* stmt = dynamic_cast<ast::Statement*>(body)) {
-                codegen_statement(stmt);
-            }
-            builder_->CreateBr(exit_block);
-        }
-        
-        // Handle wildcard/default
-        if (wildcard_index != SIZE_MAX) {
-            builder_->SetInsertPoint(default_block);
-            auto* body = bodies[wildcard_index].get();
-            if (auto* stmt = dynamic_cast<ast::Statement*>(body)) {
-                codegen_statement(stmt);
-            }
-            builder_->CreateBr(exit_block);
-        }
-    } else {
-        // Use conditional branches for complex patterns
-        BasicBlock* current_block = builder_->GetInsertBlock();
-        
-        for (size_t i = 0; i < patterns.size(); i++) {
-            auto* pattern = patterns[i].get();
-            auto* body = bodies[i].get();
-            
-            BasicBlock* case_block = BasicBlock::Create(context_, "match.case", func, exit_block);
-            BasicBlock* next_block = nullptr;
-            
-            // Generate condition for this pattern
-            builder_->SetInsertPoint(current_block);
-            
-            Value* condition = nullptr;
-            
-            // Wildcard always matches
-            if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(pattern)) {
-                if (ident->get_name() == "_") {
-                    condition = builder_->getTrue();
-                }
-            }
-            
-            // Literal pattern: subject == literal
-            if (auto* lit = dynamic_cast<ast::LiteralExpr*>(pattern)) {
-                Value* lit_val = codegen_literal(lit);
-                if (lit_val) {
-                    if (subject_val->getType()->isIntegerTy() && lit_val->getType()->isIntegerTy()) {
-                        condition = builder_->CreateICmpEQ(subject_val, lit_val);
-                    } else if (subject_val->getType()->isFloatingPointTy() && lit_val->getType()->isFloatingPointTy()) {
-                        condition = builder_->CreateFCmpOEQ(subject_val, lit_val);
-                    }
-                }
-            }
-            
-            // Create next block for fallthrough if not last
-            if (i + 1 < patterns.size()) {
-                next_block = BasicBlock::Create(context_, "match.next", func, exit_block);
-            }
-            
-            // Default: branch to case block
-            if (condition) {
-                builder_->CreateCondBr(condition, case_block, next_block ? next_block : exit_block);
-            } else {
-                builder_->CreateBr(case_block);
-            }
-            
-            // Generate case body
-            builder_->SetInsertPoint(case_block);
-            if (auto* stmt = dynamic_cast<ast::Statement*>(body)) {
-                codegen_statement(stmt);
-            }
-            builder_->CreateBr(exit_block);
-            
-            if (next_block) {
-                current_block = next_block;
-            }
-        }
-    }
-    
-    builder_->SetInsertPoint(exit_block);
-    return nullptr;
-}
 
 // Generate code for comparison expression
 // NOTE: CompareExpr class doesn't exist - comparisons handled as BinaryExpr

@@ -13,7 +13,7 @@
 #include <optional>
 #include <variant>
 
-#include "common/source_location.h"
+// #include "common/source_location.h"  // TODO: create this file
 #include "bytecode/bytecode.h"
 #include "vm/claw_vm.h"
 
@@ -378,7 +378,7 @@ private:
     
     // Source management
     std::string source_root_;
-    std::map<std::string, std::vector<std::string>> source_cache_;
+    mutable std::map<std::string, std::vector<std::string>> source_cache_;
     
     // Breakpoint lookup maps
     std::map<DebugLocation, int> location_to_breakpoint_;
@@ -386,7 +386,7 @@ private:
     
     // Private methods
     int find_breakpoint_at(const DebugLocation& loc) const;
-    bool should_pause_at_breakpoint(const Breakpoint& bp);
+    bool should_pause_at_breakpoint(Breakpoint& bp);
     void update_debug_state();
     void on_breakpoint_hit(const Breakpoint& bp);
     void on_step_complete();

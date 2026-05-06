@@ -78,7 +78,7 @@ public:
 
 private:
     // 尝试将指令折叠为常量
-    std::optional<std::pair<std::shared_ptr<Type>, std::variant<int64_t, double, bool, std::string>>>
+    std::optional<std::pair<std::shared_ptr<Type>, std::variant<int64_t, double, std::string, bool, std::vector<int8_t>>>>
     try_fold(Instruction& inst);
 
     // 整数运算折叠
@@ -92,7 +92,7 @@ private:
     std::optional<bool> fold_float_comparison(OpCode op, double lhs, double rhs);
 
     // 常量池 (Value → 常量值映射)
-    std::unordered_map<Value*, std::variant<int64_t, double, bool, std::string>> known_constants_;
+    std::unordered_map<Value*, std::variant<int64_t, double, std::string, bool, std::vector<int8_t>>> known_constants_;
 };
 
 // ============================================================================
@@ -140,8 +140,7 @@ public:
     std::string name() const override { return "CSE"; }
     bool run(Function& fn, PassStats& stats) override;
 
-private:
-    // 指令签名 (用于判断两个指令是否计算相同的结果)
+    // 指令签名 (用于判断两个指令是否计算相同的结果) — public 供 GlobalCSEPass 复用
     struct InstSignature {
         OpCode op;
         std::vector<Value*> operands;
@@ -161,6 +160,7 @@ private:
         }
     };
 
+private:
     // 判断指令是否可 CSE (纯计算, 无副作用)
     bool is_cse_candidate(const Instruction& inst) const;
 };
@@ -286,6 +286,129 @@ public:
 private:
     // 判断两个 Store 是否写入同一地址
     bool is_same_location(Value* addr1, Value* addr2);
+};
+
+
+// ============================================================================
+// Pass 11: 全局公共子表达式消除 (Global CSE)
+// ============================================================================
+
+class GlobalCSEPass : public IRPass {
+public:
+    std::string name() const override { return "GlobalCSE"; }
+    bool run(Function& fn, PassStats& stats) override;
+
+private:
+    // 判断指令是否可全局 CSE
+    bool is_global_cse_candidate(const Instruction& inst) const;
+
+    // 判断从 def 到 use 的路径上是否有可能改变结果的指令
+    bool is_available(const Instruction& def, const Instruction& use,
+                      const std::unordered_set<BasicBlock*>& reaching_blocks);
+};
+
+// ============================================================================
+// Pass 12: 别名分析 (Alias Analysis)
+// ============================================================================
+
+enum class AliasResult {
+    NoAlias,      // 两个指针绝不指向同一内存
+    MayAlias,     // 两个指针可能指向同一内存
+    MustAlias,    // 两个指针一定指向同一内存
+};
+
+struct AliasInfo {
+    // 判断两个 Value 是否别名
+    virtual AliasResult alias(Instruction* v1, Instruction* v2) = 0;
+
+    // 判断 ptr 是否可能指向任何 location
+    virtual bool may_access(Instruction* ptr, const std::unordered_set<Instruction*>& locations) = 0;
+
+    virtual ~AliasInfo() = default;
+};
+
+class BasicAliasAnalysisPass : public IRPass, public AliasInfo {
+public:
+    std::string name() const override { return "BasicAliasAnalysis"; }
+    bool run(Function& fn, PassStats& stats) override;
+
+    // AliasInfo 接口实现
+    AliasResult alias(Instruction* v1, Instruction* v2) override;
+    bool may_access(Instruction* ptr, const std::unordered_set<Instruction*>& locations) override;
+
+private:
+    // pair hasher for Value* pairs
+    struct ValuePairHash {
+        size_t operator()(const std::pair<Instruction*, Instruction*>& p) const {
+            auto h1 = std::hash<Instruction*>{}(p.first);
+            auto h2 = std::hash<Instruction*>{}(p.second);
+            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
+    // 缓存的别名分析结果
+    std::unordered_map<std::pair<Instruction*, Instruction*>, AliasResult, ValuePairHash> alias_cache_;
+
+    // 指向同一 Alloca 的指针集合
+    std::unordered_map<Instruction*, std::unordered_set<Instruction*>> alloca_aliases_;
+
+    // 分析两个 Alloca 是否可能别名
+    AliasResult alias_allocas(AllocaInst* a1, AllocaInst* a2);
+
+    // 分析 GEP 的别名关系
+    AliasResult alias_gep(GetElementPtrInst* gep, Instruction* other);
+
+    // 构建别名信息
+    void build_alias_info(Function& fn);
+
+    // 分析函数已执行标志
+    bool analyzed_ = false;
+
+    // 当前函数引用
+    Function* current_fn_ = nullptr;
+};
+
+// ============================================================================
+// Pass 13: IR 验证器 (IR Verifier)
+// ============================================================================
+
+class IRVerifierPass : public IRPass {
+public:
+    std::string name() const override { return "IRVerifier"; }
+    bool run(Function& fn, PassStats& stats) override;
+    bool run(Module& mod, PassStats& stats) override;
+
+    // 获取验证错误列表
+    const std::vector<std::string>& errors() const { return errors_; }
+    const std::vector<std::string>& warnings() const { return warnings_; }
+
+    // 是否验证通过
+    bool is_valid() const { return errors_.empty(); }
+
+private:
+    std::vector<std::string> errors_;
+    std::vector<std::string> warnings_;
+
+    // 验证单个基本块
+    void verify_block(BasicBlock& bb);
+
+    // 验证单条指令
+    void verify_instruction(Instruction& inst, BasicBlock& bb);
+
+    // 验证类型一致性
+    void verify_types(Function& fn);
+
+    // 验证 SSA 属性
+    void verify_ssa(Function& fn);
+
+    // 验证控制流完整性
+    void verify_control_flow(Function& fn);
+
+    // 验证 PHI 节点
+    void verify_phi_nodes(Function& fn);
+
+    // 辅助: 获取值的类型
+    std::shared_ptr<Type> get_value_type(Value* v);
 };
 
 // ============================================================================

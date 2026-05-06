@@ -71,6 +71,7 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
     // First pass: resolve labels
     for (size_t i = 0; i < func.code.size(); i++) {
         const auto& inst = func.code[i];
+        (void)inst;
         
         // Jump targets are encoded in the instruction's operand
         // Handle them in the second pass
@@ -700,6 +701,10 @@ bool modifies_flags(bytecode::OpCode op) {
     // IADD, ISUB, IMUL, IDIV and their float versions
     // These are the arithmetic ops that modify flags
     return false; // Simplified - let the emitter handle it
+}
+
+void NativeCodeGenerator::set_config(const Config& cfg) {
+    config_ = cfg;
 }
 
 } // namespace codegen

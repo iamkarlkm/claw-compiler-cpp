@@ -49,14 +49,14 @@ void PerfProfiler::end_event(PerfEventType type) {
     auto duration = end_us - start_us;
     
     // 记录事件
-    events_.push_back({type, ctx.name, start_us, end_us});
+    events_.push_back({type, ctx.name, static_cast<size_t>(start_us), static_cast<size_t>(end_us)});
     
     // 更新统计
     auto& stats = stats_[type];
     stats.call_count++;
     stats.total_time_us += duration;
-    stats.min_time_us = std::min(stats.min_time_us, duration);
-    stats.max_time_us = std::max(stats.max_time_us, duration);
+    stats.min_time_us = std::min(stats.min_time_us, static_cast<size_t>(duration));
+    stats.max_time_us = std::max(stats.max_time_us, static_cast<size_t>(duration));
     
     event_stack_.pop_back();
 }

@@ -64,7 +64,7 @@ public:
 
     // 单独函数生成
     std::string generate_function(const ir::Function* func);
-    std::string generate_global(const ir::GlobalVariable* global);
+    std::string generate_global(const ir::Value* global);
 
     // 配置
     void set_config(const NativeCodegenConfig& config);
@@ -124,9 +124,6 @@ private:
     std::string generate_switch(const ir::Instruction* inst);
 
     // 表达式生成
-    std::string generate_constant(const ir::Constant* constant);
-    std::string generate_constant_array(const ir::ConstantArray* arr);
-    std::string generate_constant_tuple(const ir::ConstantTuple* tup);
     std::string generate_operand(const ir::Value* operand);
 
     // 工具函数

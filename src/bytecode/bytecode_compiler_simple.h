@@ -75,7 +75,6 @@ private:
     void compileBreak(const ast::BreakStmt& stmt);
     void compileContinue(const ast::ContinueStmt& stmt);
     void compileBlock(const ast::BlockStmt& block);
-    void compileIf(const ast::IfStmt& stmt);
     void compileExprStmt(const ast::ExprStmt& stmt);
     
     // Expression compilation

@@ -15,11 +15,12 @@
 #include <memory>
 #include <functional>
 #include "common/common.h"
+#include "../interpreter/interpreter.h"
 
 namespace claw {
 
-// Forward declarations
-class Value;
+// Use interpreter::Value directly via include
+// Do NOT add 'using Value' alias here to avoid conflicts with bytecode::Value
 
 /**
  * @brief Represents a runtime type with frequency count
@@ -122,7 +123,7 @@ public:
      * @param location_id Unique identifier for the location (e.g., "func:var")
      * @param value The runtime value
      */
-    void record_type(const std::string& location_id, const Value* value);
+    void record_type(const std::string& location_id, const interpreter::Value* value);
     
     /**
      * @brief Record a type at a call site
@@ -132,14 +133,14 @@ public:
      */
     void record_call(const std::string& call_id, 
                      const std::string& function_name,
-                     const std::vector<const Value*>& args);
+                     const std::vector<const interpreter::Value*>& args);
     
     /**
      * @brief Record return type for a function
      * @param function_name Name of the function
      * @param return_value The return value
      */
-    void record_return(const std::string& function_name, const Value* return_value);
+    void record_return(const std::string& function_name, const interpreter::Value* return_value);
     
     /**
      * @brief Record loop iteration
@@ -250,10 +251,10 @@ private:
     
     // Profiling state
     bool enabled_ = true;
-    uint64_t total_samples_ = 0;
+    uint64_t total_samples = 0;
     
     // Helper methods
-    TypeProfile::TypeKind value_to_type_kind(const Value* value) const;
+    TypeProfile::TypeKind value_to_type_kind(const interpreter::Value* value) const;
     void update_type_counts(VariableProfile& profile, TypeProfile::TypeKind kind);
 };
 
@@ -261,7 +262,7 @@ private:
 
 inline void VariableProfile::record_type(TypeProfile::TypeKind kind) {
     type_counts[kind]++;
-    total_samples_++;
+    total_samples++;
 }
 
 inline TypeProfile::TypeKind VariableProfile::get_most_likely_type() const {
@@ -281,12 +282,12 @@ inline TypeProfile::TypeKind VariableProfile::get_most_likely_type() const {
 }
 
 inline double VariableProfile::get_confidence(TypeProfile::TypeKind kind) const {
-    if (total_samples_ == 0) return 0.0;
+    if (total_samples == 0) return 0.0;
     
     auto it = type_counts.find(kind);
     if (it == type_counts.end()) return 0.0;
     
-    return static_cast<double>(it->second) / total_samples_;
+    return static_cast<double>(it->second) / total_samples;
 }
 
 inline bool CallSiteProfile::is_monomorphic() const {

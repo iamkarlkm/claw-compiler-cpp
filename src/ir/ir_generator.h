@@ -9,7 +9,7 @@
 #include <stack>
 #include <string>
 #include <vector>
-#include "ir/ir.h"
+#include "ir.h"
 #include "../ast/ast.h"
 
 namespace claw {
@@ -21,7 +21,7 @@ public:
     IRGenerator();
     
     // 主转换入口
-    std::shared_ptr<ir::Module> generate(std::shared_ptr<ast::Module> ast);
+    std::shared_ptr<ir::Module> generate(ast::Program* program);
     
 private:
     // IR 构建器
@@ -55,101 +55,119 @@ private:
     void declare_variable(const std::string& name, std::shared_ptr<ir::Value> value);
     std::shared_ptr<ir::Value> lookup_variable(const std::string& name);
     
+    // AST type → IR type mapping (string-based, since ast has no Type hierarchy)
+    std::shared_ptr<ir::Type> map_ast_type(const std::string& type_name);
+    
     // 表达式转换
-    std::shared_ptr<ir::Value> generate_expression(std::shared_ptr<ast::Expression> expr);
+    std::shared_ptr<ir::Value> generate_expression(ast::Expression* expr);
     
     // 字面量转换
-    std::shared_ptr<ir::Value> generate_literal(std::shared_ptr<ast::LiteralExpr> lit);
+    std::shared_ptr<ir::Value> generate_literal(ast::LiteralExpr* lit);
     
     // 标识符转换
-    std::shared_ptr<ir::Value> generate_identifier(std::shared_ptr<ast::IdentifierExpr> id);
+    std::shared_ptr<ir::Value> generate_identifier(ast::IdentifierExpr* id);
     
     // 二元表达式转换
-    std::shared_ptr<ir::Value> generate_binary_expr(std::shared_ptr<ast::BinaryExpr> bin);
+    std::shared_ptr<ir::Value> generate_binary_expr(ast::BinaryExpr* bin);
     
     // 一元表达式转换
-    std::shared_ptr<ir::Value> generate_unary_expr(std::shared_ptr<ast::UnaryExpr> un);
+    std::shared_ptr<ir::Value> generate_unary_expr(ast::UnaryExpr* un);
     
     // 调用表达式转换
-    std::shared_ptr<ir::Value> generate_call(std::shared_ptr<ast::CallExpr> call);
+    std::shared_ptr<ir::Value> generate_call(ast::CallExpr* call);
     
     // 下标表达式转换
-    std::shared_ptr<ir::Value> generate_index(std::shared_ptr<ast::IndexExpr> idx);
+    std::shared_ptr<ir::Value> generate_index(ast::IndexExpr* idx);
+    
+    // 成员访问表达式转换
+    std::shared_ptr<ir::Value> generate_member(ast::MemberExpr* member);
+    
+    // 数组字面量
+    std::shared_ptr<ir::Value> generate_array_literal(ast::ArrayExpr* arr);
+    
+    // 元组字面量
+    std::shared_ptr<ir::Value> generate_tuple_literal(ast::TupleExpr* tup);
+    
+    // Lambda 表达式
+    std::shared_ptr<ir::Value> generate_lambda(ast::LambdaExpr* lambda);
     
     // 语句转换
-    void generate_statement(std::shared_ptr<ast::Statement> stmt);
+    void generate_statement(ast::Statement* stmt);
     
     // 函数声明转换
-    void generate_function_decl(std::shared_ptr<ast::FunctionDecl> decl);
+    void generate_function_decl(ast::FunctionStmt* decl);
     
     // 返回语句转换
-    void generate_return(std::shared_ptr<ast::ReturnStmt> ret);
+    void generate_return(ast::ReturnStmt* ret);
     
     // 变量声明转换
-    void generate_let(std::shared_ptr<ast::LetStmt> let);
+    void generate_let(ast::LetStmt* let);
     
     // 赋值语句转换
-    void generate_assign(std::shared_ptr<ast::AssignStmt> assign);
+    void generate_assign(ast::AssignStmt* assign);
     
     // 条件语句转换
-    void generate_if(std::shared_ptr<ast::IfStmt> if_stmt);
+    void generate_if(ast::IfStmt* if_stmt);
     
     // 循环语句转换
-    void generate_loop(std::shared_ptr<ast::LoopStmt> loop);
-    void generate_for(std::shared_ptr<ast::ForStmt> for_loop);
-    void generate_while(std::shared_ptr<ast::WhileStmt> while_loop);
+    void generate_for(ast::ForStmt* for_loop);
+    void generate_while(ast::WhileStmt* while_loop);
     
     // Break/Continue 转换
     void generate_break();
     void generate_continue();
     
     // 块语句转换
-    void generate_block(std::shared_ptr<ast::BlockStmt> block);
+    void generate_block(ast::BlockStmt* block);
     
     // 表达式语句转换
-    void generate_expr_stmt(std::shared_ptr<ast::ExpressionStmt> expr_stmt);
+    void generate_expr_stmt(ast::ExprStmt* expr_stmt);
     
     // 匹配语句转换
-    void generate_match(std::shared_ptr<ast::MatchStmt> match);
+    void generate_match(ast::MatchStmt* match);
     
     // 事件系统转换
-    void generate_publish(std::shared_ptr<ast::PublishStmt> publish);
-    void generate_subscribe(std::shared_ptr<ast::SubscribeStmt> sub);
+    void generate_publish(ast::PublishStmt* publish);
+    void generate_subscribe(ast::SubscribeStmt* sub);
     std::shared_ptr<ir::Function> generate_function_handler(
-        std::shared_ptr<ast::FunctionStmt> handler, 
+        ast::FunctionStmt* handler, 
         const std::string& event_name);
     
-    // 增强版表达式分发
-    std::shared_ptr<ir::Value> generate_expression_enhanced(std::shared_ptr<ast::Expression> expr);
-    std::shared_ptr<ir::Value> generate_literal_enhanced(std::shared_ptr<ast::LiteralExpr> lit);
-    std::shared_ptr<ir::Value> generate_bytes_literal(std::shared_ptr<ast::LiteralExpr> lit);
-    std::shared_ptr<ir::Value> generate_index_enhanced(std::shared_ptr<ast::IndexExpr> idx);
-    std::shared_ptr<ir::Value> generate_array_literal(std::shared_ptr<ast::ArrayExpr> arr);
-    std::shared_ptr<ir::Value> generate_tuple_literal(std::shared_ptr<ast::TupleExpr> tup);
-    std::shared_ptr<ir::Value> generate_lambda(std::shared_ptr<ast::LambdaExpr> lambda);
-    std::shared_ptr<ir::Value> generate_field_access(std::shared_ptr<ast::FieldExpr> field);
-    std::shared_ptr<ir::Value> generate_tensor_create(std::shared_ptr<ast::TensorExpr> tensor);
-    std::shared_ptr<ir::Value> generate_tensor_op(std::shared_ptr<ast::TensorOpExpr> tensor_op);
-    
-    // 增强版语句分发
-    void generate_statement_enhanced(std::shared_ptr<ast::Statement> stmt);
-    void generate_for_enhanced(std::shared_ptr<ast::ForStmt> for_loop);
-    void generate_for_array(const std::string& loop_var,
-                             std::shared_ptr<ir::Value> array_ptr,
-                             ir::ArrayType* arr_type,
-                             std::shared_ptr<ast::Statement> body);
-    void generate_for_tensor(const std::string& loop_var,
-                              std::shared_ptr<ir::Value> tensor_ptr,
-                              ir::TensorType* tensor_type,
-                              std::shared_ptr<ast::Statement> body);
-    
-    // 操作码映射
-    ir::OpCode map_binary_op(ast::BinaryOp op);
-    ir::OpCode map_unary_op(ast::UnaryOp op);
-    ir::OpCode map_comparison_op(ast::BinaryOp op);
+    // 操作码映射 (TokenType-based, matching current AST API)
+    ir::OpCode map_binary_op(TokenType op);
+    ir::OpCode map_unary_op(TokenType op);
+    ir::OpCode map_comparison_op(TokenType op);
     
     // 基本块创建辅助
     std::shared_ptr<ir::BasicBlock> create_block(const std::string& name);
+
+    // ====== 增强版方法 ======
+
+    // 增强版字面量 (适配 variant API)
+    std::shared_ptr<ir::Value> generate_literal_enhanced(ast::LiteralExpr* lit);
+
+    // 增强版下标 (GEP)
+    std::shared_ptr<ir::Value> generate_index_enhanced(ast::IndexExpr* idx);
+
+    // 字段访问 (MemberExpr)
+    std::shared_ptr<ir::Value> generate_field_access(ast::MemberExpr* field);
+
+    // 增强版 for 循环 (支持数组/张量迭代)
+    void generate_for_enhanced(ast::ForStmt* for_loop);
+    void generate_for_array(const std::string& loop_var,
+                            std::shared_ptr<ir::Value> array_ptr,
+                            ir::ArrayType* arr_type,
+                            ast::ASTNode* body);
+    void generate_for_tensor(const std::string& loop_var,
+                             std::shared_ptr<ir::Value> tensor_ptr,
+                             ir::TensorType* tensor_type,
+                             ast::ASTNode* body);
+
+    // 增强版表达式分发
+    std::shared_ptr<ir::Value> generate_expression_enhanced(ast::Expression* expr);
+
+    // 增强版语句分发
+    void generate_statement_enhanced(ast::Statement* stmt);
 };
 
 } // namespace claw

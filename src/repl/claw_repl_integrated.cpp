@@ -715,7 +715,7 @@ void IntegratedREPL::load_session(const std::string& filepath) {
 void IntegratedREPL::add_to_history(const std::string& line) {
     if (!line.empty() && (history_.empty() || history_.back() != line)) {
         history_.push_back(line);
-        if (history_.size() > config_.max_history) {
+        if (history_.size() > static_cast<size_t>(config_.max_history)) {
             history_.erase(history_.begin());
         }
     }
@@ -731,7 +731,7 @@ std::optional<std::string> IntegratedREPL::history_up() {
 }
 
 std::optional<std::string> IntegratedREPL::history_down() {
-    if (history_.empty() || history_index_ >= history_.size() - 1) {
+    if (history_.empty() || history_index_ >= static_cast<int>(history_.size() - 1)) {
         return std::nullopt;
     }
     history_index_++;

@@ -9,16 +9,17 @@
 #include <algorithm>
 #include <iostream>
 #include <optional>
+#include <sys/mman.h>
 
 namespace claw {
 namespace jit {
+
 
 // ============================================================================
 // CodeCache 实现
 // ============================================================================
 
 CodeCache::CodeCache(size_t max_size) : max_size_(max_size) {
-    // 使用 mmap 分配代码缓存
 }
 
 CodeCache::~CodeCache() {
@@ -27,31 +28,36 @@ CodeCache::~CodeCache() {
 
 void* CodeCache::allocate(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     if (used_size_ + size > max_size_) {
-        // 尝试清理旧的分配
         clear();
         if (used_size_ + size > max_size_) {
             return nullptr;
         }
     }
-    
-    // 使用 malloc 分配可执行内存
-    // 注意: 实际生产环境应使用 mmap + mprotect
-    void* ptr = malloc(size);
-    if (ptr) {
-        allocations_.push_back({ptr, size});
-        used_size_ += size;
+
+    // 使用 mmap 分配可执行内存
+    // macOS: MAP_PRIVATE | MAP_ANON, 先 RW 再 mprotect 为 RX
+    size_t alloc_size = (size + 4095) & ~4095; // 页对齐
+    if (alloc_size == 0) alloc_size = 4096;
+
+    void* ptr = mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (ptr == MAP_FAILED) {
+        return nullptr;
     }
+
+    allocations_.push_back({ptr, alloc_size});
+    used_size_ += alloc_size;
     return ptr;
 }
 
-void CodeCache::deallocate(void* ptr, size_t size) {
+void CodeCache::deallocate(void* ptr, [[maybe_unused]] size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     for (auto it = allocations_.begin(); it != allocations_.end(); ++it) {
         if (it->first == ptr) {
-            free(ptr);
+            munmap(ptr, it->second);
             used_size_ -= it->second;
             allocations_.erase(it);
             return;
@@ -61,9 +67,9 @@ void CodeCache::deallocate(void* ptr, size_t size) {
 
 void CodeCache::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
-    
+
     for (const auto& alloc : allocations_) {
-        free(alloc.first);
+        munmap(alloc.first, alloc.second);
     }
     allocations_.clear();
     used_size_ = 0;
@@ -133,7 +139,7 @@ MethodJITCompiler::~MethodJITCompiler() {
 
 CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
     CompilationResult result;
-    
+
     // 检查缓存
     auto it = compiled_functions_.find(func.name);
     if (it != compiled_functions_.end()) {
@@ -141,47 +147,154 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
         result.machine_code = it->second;
         return result;
     }
-    
+
     // [NEW] 执行寄存器分配
     auto reg_allocation = allocate_registers_for_function(func);
-    
+
     // 估计代码大小
     size_t code_size = estimate_code_size(func);
-    
+
     // 分配代码缓存
     void* code_ptr = code_cache_->allocate(code_size);
     if (!code_ptr) {
         result.error_message = "Failed to allocate code cache";
         return result;
     }
-    
+
+    // 提前注册函数地址，支持自引用（递归）
+    compiled_functions_[func.name] = code_ptr;
+
     // 编译函数 - 完整的 x86-64 代码生成
     void* current = code_ptr;
     
     // 生成函数序言
-    emit_prologue(current, func.local_count);
-    
+    emit_prologue(current, func.local_count, func.arity);
+
+    // 初始化类型跟踪 (参数类型从字节码函数元数据获取)
+    last_pushed_type_ = bytecode::ValueType::I64;
+    local_types_.assign(func.local_count, bytecode::ValueType::I64);
+    for (size_t i = 0; i < func.param_types.size() && i < func.local_count; ++i) {
+        local_types_[i] = func.param_types[i];
+    }
+    global_types_.clear();
+    type_stack_.clear();
+
+    // 记录每条字节码指令对应的本地代码地址
+    std::vector<void*> instruction_addrs(func.code.size(), nullptr);
+    struct PendingJump { void* patch_addr; size_t jump_size; size_t target_idx; };
+    std::vector<PendingJump> pending_jumps;
+
     // 编译每条字节码指令
-    for (const auto& inst : func.code) {
+    for (size_t i = 0; i < func.code.size(); ++i) {
+        const auto& inst = func.code[i];
+        instruction_addrs[i] = current;
+
         // 根据 OpCode 分发到对应的指令发射函数
         switch (inst.op) {
             // 栈操作
             case bytecode::OpCode::NOP:
+                break;
             case bytecode::OpCode::POP:
+                emit_stack_op(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                break;
             case bytecode::OpCode::DUP:
+                emit_stack_op(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.push_back(type_stack_.back());
+                break;
             case bytecode::OpCode::SWAP:
                 emit_stack_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    std::swap(type_stack_[type_stack_.size() - 1], type_stack_[type_stack_.size() - 2]);
+                }
                 break;
-                
-            // 整数运算
+
+            case bytecode::OpCode::PUSH: {
+                // 从常量池加载常量并压栈
+                uint8_t* code = static_cast<uint8_t*>(current);
+                uint32_t const_idx = inst.operand;
+                int64_t val = 0;
+                last_pushed_type_ = bytecode::ValueType::I64;
+                if (current_module_ && const_idx < current_module_->constants.values.size()) {
+                    const auto& cv = current_module_->constants.values[const_idx];
+                    if (cv.type == bytecode::ValueType::I64) {
+                        val = cv.data.i64;
+                    } else if (cv.type == bytecode::ValueType::BOOL) {
+                        val = cv.data.b ? 1 : 0;
+                    } else if (cv.type == bytecode::ValueType::F64) {
+                        last_pushed_type_ = bytecode::ValueType::F64;
+                        union { double d; uint64_t u; } conv;
+                        conv.d = cv.data.f64;
+                        code[0] = 0x48; code[1] = 0xB8;
+                        *reinterpret_cast<uint64_t*>(&code[2]) = conv.u;
+                        code[10] = 0x50; // push rax
+                        current = &code[11];
+                        type_stack_.push_back(last_pushed_type_);
+                        break;
+                    } else if (cv.type == bytecode::ValueType::STRING) {
+                        last_pushed_type_ = bytecode::ValueType::STRING;
+                        code[0] = 0x48; code[1] = 0xB8;
+                        *reinterpret_cast<uint64_t*>(&code[2]) = reinterpret_cast<uint64_t>(cv.str.c_str());
+                        code[10] = 0x50; // push rax
+                        current = &code[11];
+                        type_stack_.push_back(last_pushed_type_);
+                        break;
+                    }
+                }
+                if (val >= INT32_MIN && val <= INT32_MAX) {
+                    code[0] = 0x48; code[1] = 0xC7; code[2] = 0xC0;
+                    *reinterpret_cast<int32_t*>(&code[3]) = static_cast<int32_t>(val);
+                    code[7] = 0x50; // push rax
+                    current = &code[8];
+                } else {
+                    code[0] = 0x48; code[1] = 0xB8;
+                    *reinterpret_cast<int64_t*>(&code[2]) = val;
+                    code[10] = 0x50; // push rax
+                    current = &code[11];
+                }
+                type_stack_.push_back(last_pushed_type_);
+                break;
+            }
+
+            // 整数运算 (类型感知: 如果操作数都是浮点，发射浮点机器码)
             case bytecode::OpCode::IADD:
             case bytecode::OpCode::ISUB:
             case bytecode::OpCode::IMUL:
             case bytecode::OpCode::IDIV:
-            case bytecode::OpCode::IMOD:
-                emit_arithmetic_op(current, inst.op);
+            case bytecode::OpCode::IMOD: {
+                bool is_float = false;
+                if (type_stack_.size() >= 2) {
+                    bytecode::ValueType right = type_stack_[type_stack_.size() - 1];
+                    bytecode::ValueType left = type_stack_[type_stack_.size() - 2];
+                    if (left == bytecode::ValueType::F64 && right == bytecode::ValueType::F64) {
+                        is_float = true;
+                    }
+                }
+                if (is_float) {
+                    bytecode::OpCode float_op;
+                    switch (inst.op) {
+                        case bytecode::OpCode::IADD: float_op = bytecode::OpCode::FADD; break;
+                        case bytecode::OpCode::ISUB: float_op = bytecode::OpCode::FSUB; break;
+                        case bytecode::OpCode::IMUL: float_op = bytecode::OpCode::FMUL; break;
+                        case bytecode::OpCode::IDIV: float_op = bytecode::OpCode::FDIV; break;
+                        case bytecode::OpCode::IMOD: float_op = bytecode::OpCode::FMOD; break;
+                        default: float_op = inst.op; break;
+                    }
+                    emit_arithmetic_op(current, float_op);
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                    type_stack_.push_back(bytecode::ValueType::F64);
+                    last_pushed_type_ = bytecode::ValueType::F64;
+                } else {
+                    emit_arithmetic_op(current, inst.op);
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                    type_stack_.push_back(bytecode::ValueType::I64);
+                    last_pushed_type_ = bytecode::ValueType::I64;
+                }
                 break;
-                
+            }
+
             // 浮点运算
             case bytecode::OpCode::FADD:
             case bytecode::OpCode::FSUB:
@@ -189,18 +302,53 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::FDIV:
             case bytecode::OpCode::FMOD:
                 emit_arithmetic_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                type_stack_.push_back(bytecode::ValueType::F64);
+                last_pushed_type_ = bytecode::ValueType::F64;
                 break;
-                
-            // 整数比较
+
+            // 整数比较 (类型感知)
             case bytecode::OpCode::IEQ:
             case bytecode::OpCode::INE:
             case bytecode::OpCode::ILT:
             case bytecode::OpCode::ILE:
             case bytecode::OpCode::IGT:
-            case bytecode::OpCode::IGE:
-                emit_comparison_op(current, inst.op);
+            case bytecode::OpCode::IGE: {
+                bool is_float = false;
+                if (type_stack_.size() >= 2) {
+                    bytecode::ValueType right = type_stack_[type_stack_.size() - 1];
+                    bytecode::ValueType left = type_stack_[type_stack_.size() - 2];
+                    if (left == bytecode::ValueType::F64 && right == bytecode::ValueType::F64) {
+                        is_float = true;
+                    }
+                }
+                if (is_float) {
+                    bytecode::OpCode float_op;
+                    switch (inst.op) {
+                        case bytecode::OpCode::IEQ: float_op = bytecode::OpCode::FEQ; break;
+                        case bytecode::OpCode::INE: float_op = bytecode::OpCode::FNE; break;
+                        case bytecode::OpCode::ILT: float_op = bytecode::OpCode::FLT; break;
+                        case bytecode::OpCode::ILE: float_op = bytecode::OpCode::FLE; break;
+                        case bytecode::OpCode::IGT: float_op = bytecode::OpCode::FGT; break;
+                        case bytecode::OpCode::IGE: float_op = bytecode::OpCode::FGE; break;
+                        default: float_op = inst.op; break;
+                    }
+                    emit_comparison_op(current, float_op);
+                } else {
+                    emit_comparison_op(current, inst.op);
+                }
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
                 break;
-                
+            }
+
             // 浮点比较
             case bytecode::OpCode::FEQ:
             case bytecode::OpCode::FNE:
@@ -209,90 +357,333 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::FGT:
             case bytecode::OpCode::FGE:
                 emit_comparison_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
                 break;
-                
+
             // 逻辑/位运算
             case bytecode::OpCode::AND:
             case bytecode::OpCode::OR:
+                emit_logical_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
             case bytecode::OpCode::NOT:
             case bytecode::OpCode::BAND:
             case bytecode::OpCode::BOR:
             case bytecode::OpCode::BXOR:
             case bytecode::OpCode::BNOT:
                 emit_logical_op(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
                 break;
-                
+
             // 位移运算
             case bytecode::OpCode::SHL:
             case bytecode::OpCode::SHR:
             case bytecode::OpCode::USHR:
                 emit_shift_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
                 break;
-                
+
             // 类型转换
             case bytecode::OpCode::I2F:
+                emit_type_conversion(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::F64);
+                last_pushed_type_ = bytecode::ValueType::F64;
+                break;
             case bytecode::OpCode::F2I:
+            case bytecode::OpCode::I2B:
+            case bytecode::OpCode::B2I:
+                emit_type_conversion(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
             case bytecode::OpCode::I2S:
             case bytecode::OpCode::F2S:
+                emit_type_conversion(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::STRING);
+                last_pushed_type_ = bytecode::ValueType::STRING;
+                break;
             case bytecode::OpCode::S2I:
+                emit_type_conversion(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
             case bytecode::OpCode::S2F:
                 emit_type_conversion(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::F64);
+                last_pushed_type_ = bytecode::ValueType::F64;
                 break;
-                
+
             // 局部变量
             case bytecode::OpCode::LOAD_LOCAL:
                 emit_load_local(current, static_cast<size_t>(inst.operand));
+                if (inst.operand < local_types_.size()) {
+                    last_pushed_type_ = local_types_[inst.operand];
+                }
+                type_stack_.push_back(last_pushed_type_);
                 break;
             case bytecode::OpCode::STORE_LOCAL:
                 emit_store_local(current, static_cast<size_t>(inst.operand));
+                if (!type_stack_.empty()) {
+                    if (inst.operand < local_types_.size()) {
+                        local_types_[inst.operand] = type_stack_.back();
+                    }
+                    type_stack_.pop_back();
+                }
                 break;
             case bytecode::OpCode::LOAD_LOCAL_0:
                 emit_load_local(current, 0);
+                if (!local_types_.empty()) last_pushed_type_ = local_types_[0];
+                type_stack_.push_back(last_pushed_type_);
                 break;
             case bytecode::OpCode::LOAD_LOCAL_1:
                 emit_load_local(current, 1);
+                if (local_types_.size() > 1) last_pushed_type_ = local_types_[1];
+                type_stack_.push_back(last_pushed_type_);
                 break;
-                
-            // 跳转
+
+            // 跳转 - 正确处理前向/后向跳转
             case bytecode::OpCode::JMP:
             case bytecode::OpCode::JMP_IF:
             case bytecode::OpCode::JMP_IF_NOT:
-            case bytecode::OpCode::LOOP:
-                emit_jump_op(current, inst.op, static_cast<int32_t>(inst.operand));
+            case bytecode::OpCode::LOOP: {
+                int32_t rel = static_cast<int32_t>(inst.operand);
+                size_t target_idx = static_cast<size_t>(static_cast<int64_t>(i) + 1 + rel);
+                uint8_t* code = static_cast<uint8_t*>(current);
+
+                if (inst.op == bytecode::OpCode::JMP) {
+                    code[0] = 0xe9;
+                    if (target_idx <= i) {
+                        int32_t offset = static_cast<int32_t>(
+                            static_cast<uint8_t*>(instruction_addrs[target_idx]) - (code + 5));
+                        *reinterpret_cast<int32_t*>(&code[1]) = offset;
+                    } else {
+                        *reinterpret_cast<int32_t*>(&code[1]) = 0;
+                        pending_jumps.push_back({&code[1], 4, target_idx});
+                    }
+                    current = &code[5];
+                } else if (inst.op == bytecode::OpCode::JMP_IF) {
+                    code[0] = 0x58; // pop rax
+                    code[1] = 0x48; code[2] = 0x85; code[3] = 0xc0; // test rax, rax
+                    code[4] = 0x0f; code[5] = 0x85; // jne rel32
+                    if (target_idx <= i) {
+                        int32_t offset = static_cast<int32_t>(
+                            static_cast<uint8_t*>(instruction_addrs[target_idx]) - (code + 10));
+                        *reinterpret_cast<int32_t*>(&code[6]) = offset;
+                    } else {
+                        *reinterpret_cast<int32_t*>(&code[6]) = 0;
+                        pending_jumps.push_back({&code[6], 4, target_idx});
+                    }
+                    current = &code[10];
+                    if (!type_stack_.empty()) type_stack_.pop_back();
+                } else if (inst.op == bytecode::OpCode::JMP_IF_NOT) {
+                    code[0] = 0x58; // pop rax
+                    code[1] = 0x48; code[2] = 0x85; code[3] = 0xc0; // test rax, rax
+                    code[4] = 0x0f; code[5] = 0x84; // je rel32
+                    if (target_idx <= i) {
+                        int32_t offset = static_cast<int32_t>(
+                            static_cast<uint8_t*>(instruction_addrs[target_idx]) - (code + 10));
+                        *reinterpret_cast<int32_t*>(&code[6]) = offset;
+                    } else {
+                        *reinterpret_cast<int32_t*>(&code[6]) = 0;
+                        pending_jumps.push_back({&code[6], 4, target_idx});
+                    }
+                    current = &code[10];
+                    if (!type_stack_.empty()) type_stack_.pop_back();
+                } else {
+                    code[0] = 0x59; // pop rcx
+                    code[1] = 0x48; code[2] = 0xff; code[3] = 0xc9; // dec rcx
+                    code[4] = 0x51; // push rcx
+                    code[5] = 0x0f; code[6] = 0x85; // jne rel32
+                    if (target_idx <= i) {
+                        int32_t offset = static_cast<int32_t>(
+                            static_cast<uint8_t*>(instruction_addrs[target_idx]) - (code + 11));
+                        *reinterpret_cast<int32_t*>(&code[7]) = offset;
+                    } else {
+                        *reinterpret_cast<int32_t*>(&code[7]) = 0;
+                        pending_jumps.push_back({&code[7], 4, target_idx});
+                    }
+                    current = &code[11];
+                }
                 break;
-                
+            }
+
             // 数组操作
             case bytecode::OpCode::ALLOC_ARRAY:
-            case bytecode::OpCode::LOAD_INDEX:
+                emit_array_op(current, inst.op);
+                type_stack_.push_back(bytecode::ValueType::ARRAY);
+                last_pushed_type_ = bytecode::ValueType::ARRAY;
+                break;
+            case bytecode::OpCode::LOAD_INDEX: {
+                // Determine object type (object is below index on stack)
+                bytecode::ValueType obj_type = bytecode::ValueType::I64;
+                if (type_stack_.size() >= 2) {
+                    obj_type = type_stack_[type_stack_.size() - 2];
+                }
+
+                uint8_t* code = static_cast<uint8_t*>(current);
+                // pop rsi (index, top of stack)
+                code[0] = 0x5e;
+                // pop rdi (object pointer)
+                code[1] = 0x5f;
+                // call <runtime_func>
+                code[2] = 0xe8;
+
+                void* func_addr = nullptr;
+                if (obj_type == bytecode::ValueType::TUPLE) {
+                    func_addr = get_runtime_function_by_name("tuple_get");
+                } else {
+                    func_addr = get_runtime_function_by_name("array_get");
+                }
+
+                if (func_addr) {
+                    int32_t offset = static_cast<int32_t>(
+                        reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
+                    );
+                    *reinterpret_cast<int32_t*>(&code[3]) = offset;
+                } else {
+                    *reinterpret_cast<int32_t*>(&code[3]) = 0;
+                }
+                // push rax (result)
+                code[7] = 0x50;
+                current = &code[8];
+
+                if (type_stack_.size() >= 2) {
+                    type_stack_.resize(type_stack_.size() - 2);
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
+            }
             case bytecode::OpCode::STORE_INDEX:
+                emit_array_op(current, inst.op);
+                if (type_stack_.size() >= 3) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
+                break;
             case bytecode::OpCode::ARRAY_LEN:
+                emit_array_op(current, inst.op);
+                if (!type_stack_.empty()) type_stack_.pop_back();
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
             case bytecode::OpCode::ARRAY_PUSH:
                 emit_array_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.pop_back();
+                    type_stack_.pop_back();
+                }
                 break;
-                
+
             // 返回
             case bytecode::OpCode::RET:
             case bytecode::OpCode::RET_NULL:
                 emit_return_op(current, inst.op);
                 break;
-                
+
             // 函数调用 (暂不展开内联)
-            case bytecode::OpCode::CALL:
-            case bytecode::OpCode::CALL_EXT:
+            case bytecode::OpCode::CALL: {
                 emit_call_op(current, inst);
+                // Pop callee + args, push return value
+                uint32_t arg_count = inst.operand;
+                size_t pop_count = arg_count + 1;
+                if (type_stack_.size() >= pop_count) {
+                    type_stack_.resize(type_stack_.size() - pop_count);
+                }
+                // Infer return type from callee if previous instruction was LOAD_GLOBAL
+                bytecode::ValueType ret_type = bytecode::ValueType::I64;
+                if (i > 0 && func.code[i-1].op == bytecode::OpCode::LOAD_GLOBAL) {
+                    uint32_t str_idx = static_cast<uint32_t>(func.code[i-1].operand);
+                    if (current_module_ && str_idx < current_module_->constants.values.size()) {
+                        const auto& cv = current_module_->constants.values[str_idx];
+                        if (cv.type == bytecode::ValueType::STRING) {
+                            for (const auto& f : current_module_->functions) {
+                                if (f.name == cv.str) {
+                                    ret_type = f.return_type;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                type_stack_.push_back(ret_type);
+                last_pushed_type_ = ret_type;
                 break;
-                
+            }
+            case bytecode::OpCode::CALL_EXT: {
+                emit_call_op(current, inst);
+                // Pop args, push return value
+                uint32_t ext_arg_count = (inst.operand >> 16) & 0xFFFF;
+                if (type_stack_.size() >= ext_arg_count) {
+                    type_stack_.resize(type_stack_.size() - ext_arg_count);
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
+            }
+
             // 全局变量
             case bytecode::OpCode::LOAD_GLOBAL:
                 emit_load_global(current, static_cast<uint32_t>(inst.operand));
+                if (current_module_ && inst.operand < current_module_->constants.values.size()) {
+                    const auto& cv = current_module_->constants.values[inst.operand];
+                    if (cv.type == bytecode::ValueType::STRING) {
+                        auto it = global_types_.find(cv.str);
+                        if (it != global_types_.end()) {
+                            last_pushed_type_ = it->second;
+                        }
+                    }
+                }
+                type_stack_.push_back(last_pushed_type_);
                 break;
             case bytecode::OpCode::STORE_GLOBAL:
                 emit_store_global(current, static_cast<uint32_t>(inst.operand));
+                if (!type_stack_.empty()) {
+                    if (current_module_ && inst.operand < current_module_->constants.values.size()) {
+                        const auto& cv = current_module_->constants.values[inst.operand];
+                        if (cv.type == bytecode::ValueType::STRING) {
+                            global_types_[cv.str] = type_stack_.back();
+                        }
+                    }
+                    type_stack_.pop_back();
+                }
                 break;
             case bytecode::OpCode::DEFINE_GLOBAL:
                 emit_define_global(current, static_cast<uint32_t>(inst.operand));
+                if (!type_stack_.empty()) {
+                    if (current_module_ && inst.operand < current_module_->constants.values.size()) {
+                        const auto& cv = current_module_->constants.values[inst.operand];
+                        if (cv.type == bytecode::ValueType::STRING) {
+                            global_types_[cv.str] = type_stack_.back();
+                        }
+                    }
+                    type_stack_.pop_back();
+                }
                 break;
-                
+
             // 张量操作
             case bytecode::OpCode::TENSOR_CREATE:
             case bytecode::OpCode::TENSOR_LOAD:
@@ -300,8 +691,10 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::TENSOR_MATMUL:
             case bytecode::OpCode::TENSOR_RESHAPE:
                 emit_tensor_op(current, inst.op);
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
                 break;
-                
+
             // 闭包操作
             case bytecode::OpCode::CLOSURE:
                 // 闭包创建需要运行时支持
@@ -310,14 +703,34 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::GET_UPVALUE:
                 emit_upvalue_op(current, inst.op);
                 break;
-                
+
             // 元组操作
-            case bytecode::OpCode::CREATE_TUPLE:
-            case bytecode::OpCode::LOAD_ELEM:
-            case bytecode::OpCode::STORE_ELEM:
+            case bytecode::OpCode::CREATE_TUPLE: {
                 emit_tuple_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.resize(type_stack_.size() - 2);
+                }
+                type_stack_.push_back(bytecode::ValueType::TUPLE);
+                last_pushed_type_ = bytecode::ValueType::TUPLE;
                 break;
-                
+            }
+            case bytecode::OpCode::LOAD_ELEM: {
+                emit_tuple_op(current, inst.op);
+                if (type_stack_.size() >= 2) {
+                    type_stack_.resize(type_stack_.size() - 2);
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                break;
+            }
+            case bytecode::OpCode::STORE_ELEM: {
+                emit_tuple_op(current, inst.op);
+                if (type_stack_.size() >= 3) {
+                    type_stack_.resize(type_stack_.size() - 3);
+                }
+                break;
+            }
+
             // 系统操作 - 使用运行时函数
             case bytecode::OpCode::PRINT:
             case bytecode::OpCode::PRINTLN:
@@ -327,29 +740,56 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::TYPE_OF:
                 emit_system_call(current, inst.op);
                 break;
-                
+
             // EXT 标准库函数调用 - 2026-04-26 新增
             case bytecode::OpCode::EXT:
                 // inst.args[0] 包含标准库函数 opcode
                 emit_ext_stdlib_call(current, inst);
                 break;
-                
+
             default:
                 // 未知操作码，跳过
                 break;
         }
     }
+
+    // 回填前向跳转
+    for (const auto& pj : pending_jumps) {
+        if (pj.target_idx < instruction_addrs.size() && instruction_addrs[pj.target_idx]) {
+            int32_t offset = static_cast<int32_t>(
+                static_cast<uint8_t*>(instruction_addrs[pj.target_idx]) -
+                (static_cast<uint8_t*>(pj.patch_addr) + pj.jump_size));
+            *reinterpret_cast<int32_t*>(pj.patch_addr) = offset;
+        }
+    }
     
-    // 生成函数结尾
-    emit_epilogue(current);
-    
+    // 生成函数结尾 (仅当最后一条指令不是返回时)
+    if (func.code.empty() ||
+        (func.code.back().op != bytecode::OpCode::RET &&
+         func.code.back().op != bytecode::OpCode::RET_NULL)) {
+        emit_epilogue(current);
+    }
+
+    // 计算实际生成的代码大小并设置可执行权限
+    size_t actual_size = static_cast<size_t>(
+        static_cast<uint8_t*>(current) - static_cast<uint8_t*>(code_ptr));
+    if (actual_size > 0) {
+        size_t page_size = 4096;
+        size_t protect_size = ((actual_size + page_size - 1) / page_size) * page_size;
+        if (protect_size == 0) protect_size = page_size;
+        if (mprotect(code_ptr, protect_size, PROT_READ | PROT_EXEC) != 0) {
+            result.error_message = "mprotect failed";
+            return result;
+        }
+    }
+
     // 更新缓存
     compiled_functions_[func.name] = code_ptr;
-    
+
     result.success = true;
     result.machine_code = code_ptr;
-    result.code_size = code_size;
-    
+    result.code_size = actual_size;
+
     return result;
 }
 
@@ -366,73 +806,75 @@ void MethodJITCompiler::clear_cache() {
     code_cache_->clear();
 }
 
-void MethodJITCompiler::emit_prologue(void*& code_ptr, size_t local_count) {
-    // 使用 X86_64Emitter 生成函数序言
-    if (emitter_) {
-        emitter_->push(x86_64::Register64::RBP);
-        emitter_->mov(x86_64::Register64::RBP, x86_64::Register64::RSP);
-        
-        if (local_count > 0) {
-            size_t stack_size = local_count * 8;
-            emitter_->sub(x86_64::Register64::RSP, x86_64::Imm32(static_cast<int32_t>(stack_size)));
-        }
-        
-        // 获取生成的代码
-        const uint8_t* code_buf = emitter_->code();
-        size_t code_size = emitter_->size();
-        
-        // 分配代码缓存
-        void* code_ptr = code_cache_->allocate(code_size);
-        if (!code_ptr) {
-            return;
-        }
-        
-        // 复制代码到缓存
-        std::memcpy(code_ptr, code_buf, code_size);
-        // Fallback: 手写字节码
-        uint8_t* code = static_cast<uint8_t*>(code_ptr);
-        code[0] = 0x55;
-        code[1] = 0x48;
-        code[2] = 0x89;
-        code[3] = 0xe5;
-        
-        if (local_count > 0) {
-            size_t stack_size = local_count * 8;
-            if (stack_size <= 127) {
-                code[4] = 0x48;
-                code[5] = 0x83;
-                code[6] = 0xec;
-                code[7] = static_cast<uint8_t>(stack_size);
-                code_ptr = &code[8];
-            } else {
-                code[4] = 0x48;
-                code[5] = 0x81;
-                code[6] = 0xec;
-                *reinterpret_cast<uint32_t*>(&code[7]) = static_cast<uint32_t>(stack_size);
-                code_ptr = &code[11];
-            }
+void MethodJITCompiler::emit_prologue(void*& code_ptr, size_t local_count, uint32_t arity) {
+    // 直接手写字节码到输出缓冲区
+    uint8_t* code = static_cast<uint8_t*>(code_ptr);
+    // push rbp
+    code[0] = 0x55;
+    // mov rbp, rsp
+    code[1] = 0x48;
+    code[2] = 0x89;
+    code[3] = 0xe5;
+    code += 4;
+
+    if (local_count > 0) {
+        // Round up to 16 bytes to maintain System V AMD64 stack alignment
+        size_t stack_size = ((local_count * 8 + 15) / 16) * 16;
+        if (stack_size <= 127) {
+            // sub rsp, imm8
+            code[0] = 0x48;
+            code[1] = 0x83;
+            code[2] = 0xec;
+            code[3] = static_cast<uint8_t>(stack_size);
+            code += 4;
         } else {
-            code_ptr = &code[4];
+            // sub rsp, imm32
+            code[0] = 0x48;
+            code[1] = 0x81;
+            code[2] = 0xec;
+            *reinterpret_cast<uint32_t*>(&code[3]) = static_cast<uint32_t>(stack_size);
+            code += 7;
         }
     }
+
+    // Store incoming register arguments into local variable slots
+    // System V AMD64: rdi=arg0, rsi=arg1, rdx=arg2, rcx=arg3, r8=arg4, r9=arg5
+    // Local slot i is at [rbp - (i+1)*8]
+    if (arity > 0) {
+        code[0] = 0x48; code[1] = 0x89; code[2] = 0x7d; code[3] = 0xf8; // mov [rbp-8], rdi
+        code += 4;
+    }
+    if (arity > 1) {
+        code[0] = 0x48; code[1] = 0x89; code[2] = 0x75; code[3] = 0xf0; // mov [rbp-16], rsi
+        code += 4;
+    }
+    if (arity > 2) {
+        code[0] = 0x48; code[1] = 0x89; code[2] = 0x55; code[3] = 0xe8; // mov [rbp-24], rdx
+        code += 4;
+    }
+    if (arity > 3) {
+        code[0] = 0x48; code[1] = 0x89; code[2] = 0x4d; code[3] = 0xe0; // mov [rbp-32], rcx
+        code += 4;
+    }
+    if (arity > 4) {
+        code[0] = 0x4c; code[1] = 0x89; code[2] = 0x45; code[3] = 0xd8; // mov [rbp-40], r8
+        code += 4;
+    }
+    if (arity > 5) {
+        code[0] = 0x4c; code[1] = 0x89; code[2] = 0x4d; code[3] = 0xd0; // mov [rbp-48], r9
+        code += 4;
+    }
+
+    code_ptr = code;
 }
 
 void MethodJITCompiler::emit_epilogue(void*& code_ptr) {
-    // 使用 X86_64Emitter 生成函数结尾
-    if (emitter_) {
-        emitter_->pop(x86_64::Register64::RBP);
-        emitter_->ret();
-        
-        // 获取生成的代码 (emitter 内部会处理)
-        const auto& code_buf = emitter_->code();
-        code_ptr = const_cast<void*>(static_cast<const void*>(code_buf));
-    } else {
-        // Fallback: 手写字节码
-        uint8_t* code = static_cast<uint8_t*>(code_ptr);
-        code[0] = 0x5d; // pop rbp
-        code[1] = 0xc3; // ret
-        code_ptr = &code[2];
-    }
+    // 直接手写字节码到输出缓冲区
+    uint8_t* code = static_cast<uint8_t*>(code_ptr);
+    code[0] = 0x48; code[1] = 0x89; code[2] = 0xec; // mov rsp, rbp
+    code[3] = 0x5d; // pop rbp
+    code[4] = 0xc3; // ret
+    code_ptr = &code[5];
 }
 
 void MethodJITCompiler::emit_call(void*& code_ptr, void* target) {
@@ -448,42 +890,38 @@ void MethodJITCompiler::emit_call(void*& code_ptr, void* target) {
 }
 
 void MethodJITCompiler::emit_load_local(void*& code_ptr, size_t slot) {
-    // x86-64: mov rax, [rbp - slot*8]
+    // x86-64: mov rax, [rbp - (slot+1)*8]; push rax
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    int8_t offset = -static_cast<int8_t>(slot * 8);
-    
+    int32_t offset = -static_cast<int32_t>((slot + 1) * 8);
+
     if (offset >= -128 && offset <= 127) {
-        code[0] = 0x48;
-        code[1] = 0x8b;
-        code[2] = 0x45;
-        code[3] = offset;
-        code_ptr = &code[4];
+        code[0] = 0x48; code[1] = 0x8b; code[2] = 0x45;
+        code[3] = static_cast<int8_t>(offset);
+        code[4] = 0x50; // push rax
+        code_ptr = &code[5];
     } else {
-        code[0] = 0x48;
-        code[1] = 0x8b;
-        code[2] = 0x85;
-        *reinterpret_cast<int32_t*>(&code[3]) = offset * 8;
-        code_ptr = &code[7];
+        code[0] = 0x48; code[1] = 0x8b; code[2] = 0x85;
+        *reinterpret_cast<int32_t*>(&code[3]) = offset;
+        code[7] = 0x50; // push rax
+        code_ptr = &code[8];
     }
 }
 
 void MethodJITCompiler::emit_store_local(void*& code_ptr, size_t slot) {
-    // x86-64: mov [rbp - slot*8], rax
+    // x86-64: pop rax; mov [rbp - (slot+1)*8], rax
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    int8_t offset = -static_cast<int8_t>(slot * 8);
-    
+    int32_t offset = -static_cast<int32_t>((slot + 1) * 8);
+
+    code[0] = 0x58; // pop rax
+
     if (offset >= -128 && offset <= 127) {
-        code[0] = 0x48;
-        code[1] = 0x89;
-        code[2] = 0x45;
-        code[3] = offset;
-        code_ptr = &code[4];
+        code[1] = 0x48; code[2] = 0x89; code[3] = 0x45;
+        code[4] = static_cast<int8_t>(offset);
+        code_ptr = &code[5];
     } else {
-        code[0] = 0x48;
-        code[1] = 0x89;
-        code[2] = 0x85;
-        *reinterpret_cast<int32_t*>(&code[3]) = offset * 8;
-        code_ptr = &code[7];
+        code[1] = 0x48; code[2] = 0x89; code[3] = 0x85;
+        *reinterpret_cast<int32_t*>(&code[4]) = offset;
+        code_ptr = &code[8];
     }
 }
 
@@ -493,49 +931,87 @@ void MethodJITCompiler::emit_store_local(void*& code_ptr, size_t slot) {
 
 void MethodJITCompiler::emit_arithmetic_op(void*& code_ptr, bytecode::OpCode op) {
     // x86-64 整数/浮点运算
-    // 操作: rax = rax <op> stack.top()
+    // Stack model: pop two operands, compute, push result
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::IADD:  // add rax, [rsp]
-            code[0] = 0x48; code[1] = 0x03; code[2] = 0x04; code[3] = 0x24;
-            code_ptr = &code[4];
-            break;
-        case bytecode::OpCode::ISUB:  // sub rax, [rsp]
-            code[0] = 0x48; code[1] = 0x2b; code[2] = 0x04; code[3] = 0x24;
-            code_ptr = &code[4];
-            break;
-        case bytecode::OpCode::IMUL:  // imul rax, [rsp]
-            code[0] = 0x48; code[1] = 0x0f; code[2] = 0xaf; code[3] = 0x04; code[4] = 0x24;
-            code_ptr = &code[5];
-            break;
-        case bytecode::OpCode::IDIV:  // idiv [rsp]
-            code[0] = 0x48; code[1] = 0x99;  // cqo
-            code[2] = 0x48; code[3] = 0xf7; code[4] = 0x3c; code[5] = 0x24; // idiv QWORD PTR [rsp]
+        case bytecode::OpCode::IADD:  // pop rdx; pop rax; add rax, rdx; push rax
+            code[0] = 0x5a;                       // pop rdx
+            code[1] = 0x58;                       // pop rax
+            code[2] = 0x48; code[3] = 0x01; code[4] = 0xd0; // add rax, rdx
+            code[5] = 0x50;                       // push rax
             code_ptr = &code[6];
             break;
-        case bytecode::OpCode::IMOD:  // idiv 后取 rdx
-            // 先执行 IDIV，然后 mov rax, rdx
-            code[0] = 0x48; code[1] = 0x99;
-            code[2] = 0x48; code[3] = 0xf7; code[4] = 0x3c; code[5] = 0x24;
-            code[6] = 0x48; code[7] = 0x89; code[8] = 0xd0; // mov rax, rdx
-            code_ptr = &code[9];
+        case bytecode::OpCode::ISUB:  // pop rdx; pop rax; sub rax, rdx; push rax
+            code[0] = 0x5a;
+            code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x29; code[4] = 0xd0; // sub rax, rdx
+            code[5] = 0x50;
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::FADD:  // addsd xmm0, [rsp]
-            code[0] = 0xf2; code[1] = 0x0f; code[2] = 0x58; code[3] = 0x04; code[4] = 0x24;
-            code_ptr = &code[5];
+        case bytecode::OpCode::IMUL:  // pop rdx; pop rax; imul rax, rdx; push rax
+            code[0] = 0x5a;
+            code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x0f; code[4] = 0xaf; code[5] = 0xc2; // imul rax, rdx
+            code[6] = 0x50;
+            code_ptr = &code[7];
             break;
-        case bytecode::OpCode::FSUB:  // subsd xmm0, [rsp]
-            code[0] = 0xf2; code[1] = 0x0f; code[2] = 0x5c; code[3] = 0x04; code[4] = 0x24;
-            code_ptr = &code[5];
+        case bytecode::OpCode::IDIV:  // pop rcx; pop rax; cqo; idiv rcx; push rax
+            code[0] = 0x59;                       // pop rcx
+            code[1] = 0x58;                       // pop rax
+            code[2] = 0x48; code[3] = 0x99;       // cqo
+            code[4] = 0x48; code[5] = 0xf7; code[6] = 0xf9; // idiv rcx
+            code[7] = 0x50;                       // push rax
+            code_ptr = &code[8];
             break;
-        case bytecode::OpCode::FMUL:  // mulsd xmm0, [rsp]
-            code[0] = 0xf2; code[1] = 0x0f; code[2] = 0x59; code[3] = 0x04; code[4] = 0x24;
-            code_ptr = &code[5];
+        case bytecode::OpCode::IMOD:  // pop rcx; pop rax; cqo; idiv rcx; mov rax, rdx; push rax
+            code[0] = 0x59;                       // pop rcx
+            code[1] = 0x58;                       // pop rax
+            code[2] = 0x48; code[3] = 0x99;       // cqo
+            code[4] = 0x48; code[5] = 0xf7; code[6] = 0xf9; // idiv rcx
+            code[7] = 0x48; code[8] = 0x89; code[9] = 0xd0; // mov rax, rdx
+            code[10] = 0x50;                      // push rax
+            code_ptr = &code[11];
             break;
-        case bytecode::OpCode::FDIV:  // divsd xmm0, [rsp]
-            code[0] = 0xf2; code[1] = 0x0f; code[2] = 0x5e; code[3] = 0x04; code[4] = 0x24;
-            code_ptr = &code[5];
+        case bytecode::OpCode::FADD:  // pop rax; movq xmm1, rax; pop rax; movq xmm0, rax; addsd xmm0, xmm1; movq rax, xmm0; push rax
+            code[0] = 0x58; // pop rax
+            code[1] = 0x66; code[2] = 0x48; code[3] = 0x0f; code[4] = 0x6e; code[5] = 0xc8; // movq xmm1, rax
+            code[6] = 0x58; // pop rax
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xc0; // movq xmm0, rax
+            code[12] = 0xf2; code[13] = 0x0f; code[14] = 0x58; code[15] = 0xc1; // addsd xmm0, xmm1
+            code[16] = 0x66; code[17] = 0x48; code[18] = 0x0f; code[19] = 0x7e; code[20] = 0xc0; // movq rax, xmm0
+            code[21] = 0x50; // push rax
+            code_ptr = &code[22];
+            break;
+        case bytecode::OpCode::FSUB:  // pop rax; movq xmm1, rax; pop rax; movq xmm0, rax; subsd xmm0, xmm1; movq rax, xmm0; push rax
+            code[0] = 0x58;
+            code[1] = 0x66; code[2] = 0x48; code[3] = 0x0f; code[4] = 0x6e; code[5] = 0xc8; // movq xmm1, rax
+            code[6] = 0x58;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xc0; // movq xmm0, rax
+            code[12] = 0xf2; code[13] = 0x0f; code[14] = 0x5c; code[15] = 0xc1; // subsd xmm0, xmm1
+            code[16] = 0x66; code[17] = 0x48; code[18] = 0x0f; code[19] = 0x7e; code[20] = 0xc0; // movq rax, xmm0
+            code[21] = 0x50;
+            code_ptr = &code[22];
+            break;
+        case bytecode::OpCode::FMUL:  // pop rax; movq xmm1, rax; pop rax; movq xmm0, rax; mulsd xmm0, xmm1; movq rax, xmm0; push rax
+            code[0] = 0x58;
+            code[1] = 0x66; code[2] = 0x48; code[3] = 0x0f; code[4] = 0x6e; code[5] = 0xc8; // movq xmm1, rax
+            code[6] = 0x58;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xc0; // movq xmm0, rax
+            code[12] = 0xf2; code[13] = 0x0f; code[14] = 0x59; code[15] = 0xc1; // mulsd xmm0, xmm1
+            code[16] = 0x66; code[17] = 0x48; code[18] = 0x0f; code[19] = 0x7e; code[20] = 0xc0; // movq rax, xmm0
+            code[21] = 0x50;
+            code_ptr = &code[22];
+            break;
+        case bytecode::OpCode::FDIV:  // pop rax; movq xmm1, rax; pop rax; movq xmm0, rax; divsd xmm0, xmm1; movq rax, xmm0; push rax
+            code[0] = 0x58;
+            code[1] = 0x66; code[2] = 0x48; code[3] = 0x0f; code[4] = 0x6e; code[5] = 0xc8; // movq xmm1, rax
+            code[6] = 0x58;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xc0; // movq xmm0, rax
+            code[12] = 0xf2; code[13] = 0x0f; code[14] = 0x5e; code[15] = 0xc1; // divsd xmm0, xmm1
+            code[16] = 0x66; code[17] = 0x48; code[18] = 0x0f; code[19] = 0x7e; code[20] = 0xc0; // movq rax, xmm0
+            code[21] = 0x50;
+            code_ptr = &code[22];
             break;
         default:
             // 未知运算，跳过
@@ -544,55 +1020,119 @@ void MethodJITCompiler::emit_arithmetic_op(void*& code_ptr, bytecode::OpCode op)
 }
 
 void MethodJITCompiler::emit_comparison_op(void*& code_ptr, bytecode::OpCode op) {
-    // x86-64 比较操作
+    // x86-64 比较操作: pop two operands, compare, push boolean result
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::IEQ:  // cmp rax, [rsp]; sete al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;  // cmp rax, [rsp]
-            code[4] = 0x0f; code[5] = 0x94; code[6] = 0xc0;                   // sete al
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;                   // movzx rax, al
-            code_ptr = &code[10];
+        case bytecode::OpCode::IEQ:
+            code[0] = 0x5a; // pop rdx
+            code[1] = 0x58; // pop rax
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0; // cmp rax, rdx
+            code[5] = 0x0f; code[6] = 0x94; code[7] = 0xc0; // sete al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0; // movzx rax, al
+            code[11] = 0x50; // push rax
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::INE:  // cmp rax, [rsp]; setne al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;
-            code[4] = 0x0f; code[5] = 0x95; code[6] = 0xc0;
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;
-            code_ptr = &code[10];
+        case bytecode::OpCode::INE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
+            code[5] = 0x0f; code[6] = 0x95; code[7] = 0xc0; // setne al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0;
+            code[11] = 0x50;
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::ILT:  // cmp rax, [rsp]; setl al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;
-            code[4] = 0x0f; code[5] = 0x9c; code[6] = 0xc0;
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;
-            code_ptr = &code[10];
+        case bytecode::OpCode::ILT:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
+            code[5] = 0x0f; code[6] = 0x9c; code[7] = 0xc0; // setl al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0;
+            code[11] = 0x50;
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::ILE:  // cmp rax, [rsp]; setle al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;
-            code[4] = 0x0f; code[5] = 0x9e; code[6] = 0xc0;
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;
-            code_ptr = &code[10];
+        case bytecode::OpCode::ILE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
+            code[5] = 0x0f; code[6] = 0x9e; code[7] = 0xc0; // setle al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0;
+            code[11] = 0x50;
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::IGT:  // cmp rax, [rsp]; setg al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;
-            code[4] = 0x0f; code[5] = 0x9f; code[6] = 0xc0;
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;
-            code_ptr = &code[10];
+        case bytecode::OpCode::IGT:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
+            code[5] = 0x0f; code[6] = 0x9f; code[7] = 0xc0; // setg al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0;
+            code[11] = 0x50;
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::IGE:  // cmp rax, [rsp]; setge al; movzx rax, al
-            code[0] = 0x48; code[1] = 0x3b; code[2] = 0x04; code[3] = 0x24;
-            code[4] = 0x0f; code[5] = 0x9d; code[6] = 0xc0;
-            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0;
-            code_ptr = &code[10];
+        case bytecode::OpCode::IGE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
+            code[5] = 0x0f; code[6] = 0x9d; code[7] = 0xc0; // setge al
+            code[8] = 0x0f; code[9] = 0xb6; code[10] = 0xc0;
+            code[11] = 0x50;
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::FEQ:  // ucomisd xmm0, [rsp]; sete al
-            code[0] = 0x66; code[1] = 0x0f; code[2] = 0x2e; code[3] = 0x04; code[4] = 0x24;
-            code[5] = 0x0f; code[6] = 0x94; code[7] = 0xc0;
-            code_ptr = &code[8];
+        case bytecode::OpCode::FEQ:
+            code[0] = 0x5a; // pop rdx (right)
+            code[1] = 0x58; // pop rax (left)
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0; // movq xmm0, rax
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca; // movq xmm1, rdx
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1; // ucomisd xmm0, xmm1
+            code[16] = 0x0f; code[17] = 0x94; code[18] = 0xc0; // sete al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0; // movzx rax, al
+            code[22] = 0x50; // push rax
+            code_ptr = &code[23];
             break;
-        case bytecode::OpCode::FLT:  // ucomisd xmm0, [rsp]; setb al
-            code[0] = 0x66; code[1] = 0x0f; code[2] = 0x2e; code[3] = 0x04; code[4] = 0x24;
-            code[5] = 0x0f; code[6] = 0x92; code[7] = 0xc0;
-            code_ptr = &code[8];
+        case bytecode::OpCode::FNE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca;
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1;
+            code[16] = 0x0f; code[17] = 0x95; code[18] = 0xc0; // setne al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0;
+            code[22] = 0x50;
+            code_ptr = &code[23];
+            break;
+        case bytecode::OpCode::FLT:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca;
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1;
+            code[16] = 0x0f; code[17] = 0x92; code[18] = 0xc0; // setb al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0;
+            code[22] = 0x50;
+            code_ptr = &code[23];
+            break;
+        case bytecode::OpCode::FLE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca;
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1;
+            code[16] = 0x0f; code[17] = 0x96; code[18] = 0xc0; // setbe al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0;
+            code[22] = 0x50;
+            code_ptr = &code[23];
+            break;
+        case bytecode::OpCode::FGT:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca;
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1;
+            code[16] = 0x0f; code[17] = 0x97; code[18] = 0xc0; // seta al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0;
+            code[22] = 0x50;
+            code_ptr = &code[23];
+            break;
+        case bytecode::OpCode::FGE:
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x66; code[3] = 0x48; code[4] = 0x0f; code[5] = 0x6e; code[6] = 0xc0;
+            code[7] = 0x66; code[8] = 0x48; code[9] = 0x0f; code[10] = 0x6e; code[11] = 0xca;
+            code[12] = 0x66; code[13] = 0x0f; code[14] = 0x2e; code[15] = 0xc1;
+            code[16] = 0x0f; code[17] = 0x93; code[18] = 0xc0; // setae al
+            code[19] = 0x0f; code[20] = 0xb6; code[21] = 0xc0;
+            code[22] = 0x50;
+            code_ptr = &code[23];
             break;
         default:
             break;
@@ -600,35 +1140,47 @@ void MethodJITCompiler::emit_comparison_op(void*& code_ptr, bytecode::OpCode op)
 }
 
 void MethodJITCompiler::emit_logical_op(void*& code_ptr, bytecode::OpCode op) {
-    // 逻辑运算: and, or, not
+    // 逻辑运算: pop operands, compute, push result
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::AND:  // and rax, [rsp]
-            code[0] = 0x48; code[1] = 0x23; code[2] = 0x04; code[3] = 0x24;
-            code_ptr = &code[4];
+        case bytecode::OpCode::AND:  // pop rdx; pop rax; and rax, rdx; push rax
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x21; code[4] = 0xd0; // and rax, rdx
+            code[5] = 0x50;
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::OR:   // or rax, [rsp]
-            code[0] = 0x48; code[1] = 0x0b; code[2] = 0x04; code[3] = 0x24;
-            code_ptr = &code[4];
+        case bytecode::OpCode::OR:   // pop rdx; pop rax; or rax, rdx; push rax
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x09; code[4] = 0xd0; // or rax, rdx
+            code[5] = 0x50;
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::NOT:  // not rax
-            code[0] = 0x48; code[1] = 0xf7; code[2] = 0xd0;
-            code_ptr = &code[3];
+        case bytecode::OpCode::NOT:  // pop rax; test rax, rax; sete al; movzx rax, al; push rax
+            code[0] = 0x58; // pop rax
+            code[1] = 0x48; code[2] = 0x85; code[3] = 0xc0; // test rax, rax
+            code[4] = 0x0f; code[5] = 0x94; code[6] = 0xc0; // sete al (logical not)
+            code[7] = 0x0f; code[8] = 0xb6; code[9] = 0xc0; // movzx rax, al
+            code[10] = 0x50; // push rax
+            code_ptr = &code[11];
             break;
-        case bytecode::OpCode::BAND: // and rax, [rsp]
+        case bytecode::OpCode::BAND:
             emit_arithmetic_op(code_ptr, bytecode::OpCode::AND);
             break;
-        case bytecode::OpCode::BOR:  // or rax, [rsp]
+        case bytecode::OpCode::BOR:
             emit_arithmetic_op(code_ptr, bytecode::OpCode::OR);
             break;
-        case bytecode::OpCode::BXOR: // xor rax, [rsp]
-            code[0] = 0x48; code[1] = 0x33; code[2] = 0x04; code[3] = 0x24;
-            code_ptr = &code[4];
+        case bytecode::OpCode::BXOR: // pop rdx; pop rax; xor rax, rdx; push rax
+            code[0] = 0x5a; code[1] = 0x58;
+            code[2] = 0x48; code[3] = 0x31; code[4] = 0xd0; // xor rax, rdx
+            code[5] = 0x50;
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::BNOT: // not rax
-            code[0] = 0x48; code[1] = 0xf7; code[2] = 0xd0;
-            code_ptr = &code[3];
+        case bytecode::OpCode::BNOT: // pop rax; not rax; push rax
+            code[0] = 0x58;
+            code[1] = 0x48; code[2] = 0xf7; code[3] = 0xd0; // not rax
+            code[4] = 0x50;
+            code_ptr = &code[5];
             break;
         default:
             break;
@@ -636,21 +1188,30 @@ void MethodJITCompiler::emit_logical_op(void*& code_ptr, bytecode::OpCode op) {
 }
 
 void MethodJITCompiler::emit_shift_op(void*& code_ptr, bytecode::OpCode op) {
-    // 位移运算
+    // 位移运算: pop count (rcx), pop value (rax), shift, push result
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::SHL:  // shl rax, cl
-            code[0] = 0x48; code[1] = 0xd3; code[2] = 0xe0;
-            code_ptr = &code[3];
+        case bytecode::OpCode::SHL:  // pop rcx; pop rax; shl rax, cl; push rax
+            code[0] = 0x59; // pop rcx
+            code[1] = 0x58; // pop rax
+            code[2] = 0x48; code[3] = 0xd3; code[4] = 0xe0; // shl rax, cl
+            code[5] = 0x50; // push rax
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::SHR:  // shr rax, cl
-            code[0] = 0x48; code[1] = 0xd3; code[2] = 0xe8;
-            code_ptr = &code[3];
+        case bytecode::OpCode::SHR:  // pop rcx; pop rax; sar rax, cl; push rax
+            code[0] = 0x59; // pop rcx
+            code[1] = 0x58; // pop rax
+            code[2] = 0x48; code[3] = 0xd3; code[4] = 0xf8; // sar rax, cl
+            code[5] = 0x50; // push rax
+            code_ptr = &code[6];
             break;
-        case bytecode::OpCode::USHR: // shr rax, cl (无符号同样)
-            code[0] = 0x48; code[1] = 0xd3; code[2] = 0xec;
-            code_ptr = &code[3];
+        case bytecode::OpCode::USHR: // pop rcx; pop rax; shr rax, cl; push rax
+            code[0] = 0x59; // pop rcx
+            code[1] = 0x58; // pop rax
+            code[2] = 0x48; code[3] = 0xd3; code[4] = 0xe8; // shr rax, cl
+            code[5] = 0x50; // push rax
+            code_ptr = &code[6];
             break;
         default:
             break;
@@ -734,11 +1295,9 @@ void MethodJITCompiler::emit_stack_op(void*& code_ptr, bytecode::OpCode op) {
             code[0] = 0x48; code[1] = 0x83; code[2] = 0xc4; code[3] = 0x08;
             code_ptr = &code[4];
             break;
-        case bytecode::OpCode::DUP:  // push [rsp]; push [rsp-8]
+        case bytecode::OpCode::DUP:  // push QWORD PTR [rsp]
             code[0] = 0xff; code[1] = 0x74; code[2] = 0x24; code[3] = 0x00;  // push QWORD PTR [rsp]
-            code[4] = 0x48; code[5] = 0x8b; code[6] = 0x44; code[7] = 0x24; code[8] = 0x08; // mov rax, [rsp+8]
-            code[9] = 0x50; // push rax
-            code_ptr = &code[10];
+            code_ptr = &code[4];
             break;
         case bytecode::OpCode::SWAP: // mov rax, [rsp]; mov rcx, [rsp+8]; mov [rsp], rcx; mov [rsp+8], rax
             code[0] = 0x48; code[1] = 0x8b; code[2] = 0x04; code[3] = 0x24;  // mov rax, [rsp]
@@ -788,27 +1347,68 @@ void MethodJITCompiler::emit_jump_op(void*& code_ptr, bytecode::OpCode op, int32
 void MethodJITCompiler::emit_array_op(void*& code_ptr, bytecode::OpCode op) {
     // 数组操作
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::ALLOC_ARRAY:  // 分配数组 (调用运行时)
+        case bytecode::OpCode::ALLOC_ARRAY: {
+            // alloc_array(size=0, element_type=0) -> void*
+            code[0] = 0x48; code[1] = 0x31; code[2] = 0xff;  // xor rdi, rdi
+            code[3] = 0x48; code[4] = 0x31; code[5] = 0xf6;  // xor rsi, rsi
+            code[6] = 0xe8;  // call
+            void* func_addr = get_runtime_function_by_name("alloc_array");
+            if (func_addr) {
+                int32_t offset = static_cast<int32_t>(
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[11])
+                );
+                *reinterpret_cast<int32_t*>(&code[7]) = offset;
+            } else {
+                *reinterpret_cast<int32_t*>(&code[7]) = 0;
+            }
+            code[11] = 0x50;  // push rax
+            code_ptr = &code[12];
             break;
-        case bytecode::OpCode::LOAD_INDEX:   // 加载数组元素
-            // rax = *(rax + rcx * 8)  (假设 rax=array, rcx=index)
-            code[0] = 0x48; code[1] = 0x8b; code[2] = 0x04; code[3] = 0xc8; // mov rax, [rax+rcx*8]
-            code_ptr = &code[4];
+        }
+        case bytecode::OpCode::LOAD_INDEX:
+            // 已内联到编译循环中，此处不再使用
             break;
-        case bytecode::OpCode::STORE_INDEX:  // 存储数组元素
-            // *(rax + rcx * 8) = rdx
-            code[0] = 0x48; code[1] = 0x89; code[2] = 0x14; code[3] = 0xc8; // mov [rax+rcx*8], rdx
-            code_ptr = &code[4];
+        case bytecode::OpCode::STORE_INDEX:
+            // 已内联到编译循环中，此处不再使用
             break;
-        case bytecode::OpCode::ARRAY_LEN:    // 获取数组长度
-            // rax = *(rax + 偏移量) (假设 length 在对象头部)
-            code[0] = 0x48; code[1] = 0x8b; code[2] = 0x40; code[3] = 0x00; // mov rax, [rax]
-            code_ptr = &code[4];
+        case bytecode::OpCode::ARRAY_LEN: {
+            // 栈: [array_ptr]
+            // pop rdi
+            code[0] = 0x5f;
+            code[1] = 0xe8;
+            void* func_addr = get_runtime_function_by_name("array_len");
+            if (func_addr) {
+                int32_t offset = static_cast<int32_t>(
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[6])
+                );
+                *reinterpret_cast<int32_t*>(&code[2]) = offset;
+            } else {
+                *reinterpret_cast<int32_t*>(&code[2]) = 0;
+            }
+            code[6] = 0x50;
+            code_ptr = &code[7];
             break;
-        case bytecode::OpCode::ARRAY_PUSH:   // 数组追加
+        }
+        case bytecode::OpCode::ARRAY_PUSH: {
+            // 栈: [array_ptr, value] (value 在栈顶)
+            // array_push(void* arr_ptr, int64_t value)
+            code[0] = 0x5e;  // pop rsi (value)
+            code[1] = 0x5f;  // pop rdi (array_ptr)
+            code[2] = 0xe8;  // call
+            void* func_addr = get_runtime_function_by_name("array_push");
+            if (func_addr) {
+                int32_t offset = static_cast<int32_t>(
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
+                );
+                *reinterpret_cast<int32_t*>(&code[3]) = offset;
+            } else {
+                *reinterpret_cast<int32_t*>(&code[3]) = 0;
+            }
+            code_ptr = &code[7];
             break;
+        }
         default:
             break;
     }
@@ -820,108 +1420,82 @@ void MethodJITCompiler::emit_array_op(void*& code_ptr, bytecode::OpCode op) {
 
 void MethodJITCompiler::emit_tuple_op(void*& code_ptr, bytecode::OpCode op) {
     // 元组操作: 创建、加载元素、存储元素
-    // 元组存储为 std::tuple<Value, Value>*，通过指针访问
+    // JIT 使用硬件栈: 从栈上弹出操作数到寄存器, 调用运行时, 压入结果
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
         case bytecode::OpCode::CREATE_TUPLE: {
-            // 创建元组: 调用运行时函数 alloc_tuple(double a, double b)
-            // 栈上: rax = 元素0, rcx = 元素1
-            // 调用 alloc_tuple(rax, rcx)
-            
-            // 将 rax 移动到 rdi (第一个参数)
-            code[0] = 0x48; code[1] = 0x89; code[2] = 0xc7;  // mov rdi, rax
-            // 将 rcx 移动到 rsi (第二个参数)
-            code[3] = 0x48; code[4] = 0x89; code[5] = 0xce;  // mov rsi, rcx
+            // 栈: [elem0, elem1] (elem1 在栈顶)
+            // alloc_tuple(int64_t a, int64_t b) -> void*
+            // pop rsi (b = elem1)
+            code[0] = 0x5e;
+            // pop rdi (a = elem0)
+            code[1] = 0x5f;
             // call alloc_tuple
-            code[6] = 0xe8;
-            
-            // 获取运行时函数地址
+            code[2] = 0xe8;
             void* func_addr = get_runtime_function_by_name("alloc_tuple");
             if (func_addr) {
                 int32_t offset = static_cast<int32_t>(
-                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[10])
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
                 );
-                *reinterpret_cast<int32_t*>(&code[7]) = offset;
-                code_ptr = &code[11];
+                *reinterpret_cast<int32_t*>(&code[3]) = offset;
             } else {
-                // 如果找不到函数，跳过但保留空间
-                *reinterpret_cast<int32_t*>(&code[7]) = 0;
-                code_ptr = &code[11];
+                *reinterpret_cast<int32_t*>(&code[3]) = 0;
             }
+            // push rax (result tuple pointer)
+            code[7] = 0x50;
+            code_ptr = &code[8];
             break;
         }
-        
+
         case bytecode::OpCode::LOAD_ELEM: {
-            // 加载元组元素: rax = tuple->get(index)
-            // 假设: rax = tuple 指针, rcx = 索引 (0 或 1)
-            // 需要调用 tuple_get(void* tuple, int index)
-            
-            // 将 rax 移动到 rdi
-            code[0] = 0x48; code[1] = 0x89; code[2] = 0xc7;  // mov rdi, rax
-            // 将 rcx (索引) 移动到 rsi
-            code[3] = 0x48; code[4] = 0x89; code[5] = 0xce;  // mov rsi, rcx
+            // 栈: [tuple_ptr, index] (index 在栈顶)
+            // tuple_get(void* tuple, int index) -> int64_t
+            // pop rsi (index)
+            code[0] = 0x5e;
+            // pop rdi (tuple_ptr)
+            code[1] = 0x5f;
             // call tuple_get
-            code[6] = 0xe8;
-            
+            code[2] = 0xe8;
             void* func_addr = get_runtime_function_by_name("tuple_get");
             if (func_addr) {
                 int32_t offset = static_cast<int32_t>(
-                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[10])
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
                 );
-                *reinterpret_cast<int32_t*>(&code[7]) = offset;
-                code_ptr = &code[11];
+                *reinterpret_cast<int32_t*>(&code[3]) = offset;
             } else {
-                *reinterpret_cast<int32_t*>(&code[7]) = 0;
-                code_ptr = &code[11];
+                *reinterpret_cast<int32_t*>(&code[3]) = 0;
             }
+            // push rax (result)
+            code[7] = 0x50;
+            code_ptr = &code[8];
             break;
         }
-        
+
         case bytecode::OpCode::STORE_ELEM: {
-            // 存储元组元素: tuple->set(index, value)
-            // 假设: rax = tuple 指针, rcx = 索引, rdx = value
-            
-            // 实现方式 A: 使用运行时函数
-            // tuple_set(void* tuple, int index, double value)
-            // mov rdi, rax (tuple)
-            // mov rsi, rcx (index)
-            // mov rdx, rdx (value) - 已经是第三个参数
+            // 栈: [tuple_ptr, index, value] (value 在栈顶)
+            // tuple_set(void* tuple, int index, int64_t value)
+            // pop rdx (value)
+            code[0] = 0x5a;
+            // pop rsi (index)
+            code[1] = 0x5e;
+            // pop rdi (tuple_ptr)
+            code[2] = 0x5f;
             // call tuple_set
-            
-            // 简化实现: 直接内存访问 (假设元组是 std::tuple<Value, Value>)
-            // 每个 Value 是 16 字节 (type + union)
-            // 元组布局: [element0: 16 bytes][element1: 16 bytes]
-            
-            // rcx * 16 计算偏移量
-            // lea rax, [rax + rcx * 16]
-            code[0] = 0x48; code[1] = 0x8d; code[2] = 0x04; code[3] = 0xc8; // lea rax, [rax + rcx * 16]
-            
-            // mov [rax], rdx (存储值)
-            code[4] = 0x49; code[5] = 0x89; code[6] = 0x10; // mov [r8], rdx (r8 is first arg register for float)
-            
-            // 简化: 使用运行时函数
-            // mov rdi, rax (tuple pointer)
-            code[7] = 0x48; code[8] = 0x89; code[9] = 0xc7; // mov rdi, rax
-            // mov rsi, rcx (index)
-            code[10] = 0x48; code[11] = 0x89; code[12] = 0xce; // mov rsi, rcx
-            // mov rdx, rdx (value - already in rdx)
-            code[13] = 0xe8;
-            
+            code[3] = 0xe8;
             void* func_addr = get_runtime_function_by_name("tuple_set");
             if (func_addr) {
                 int32_t offset = static_cast<int32_t>(
-                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[17])
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[8])
                 );
-                *reinterpret_cast<int32_t*>(&code[14]) = offset;
-                code_ptr = &code[18];
+                *reinterpret_cast<int32_t*>(&code[4]) = offset;
             } else {
-                *reinterpret_cast<int32_t*>(&code[14]) = 0;
-                code_ptr = &code[18];
+                *reinterpret_cast<int32_t*>(&code[4]) = 0;
             }
+            code_ptr = &code[8];
             break;
         }
-        
+
         default:
             break;
     }
@@ -936,61 +1510,131 @@ void MethodJITCompiler::emit_call_op(void*& code_ptr, const bytecode::Instructio
     // System V AMD64 ABI: 参数通过 rdi, rsi, rdx, rcx, r8, r9 传递
     // 返回值在 rax (或 xmm0 for float)
     // 栈布局: [return addr][saved rbp][locals...]
-    
+
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
     uint32_t arg_count = inst.operand;
-    
+
     if (inst.op == bytecode::OpCode::CALL_EXT) {
-        // 外部函数调用 - 从常量池获取函数地址
-        // operand 是常量池中函数地址的索引
-        
-        // 从常量池加载函数地址到 rax
-        // mov rax, [rip + constant_pool_addr]
-        // 这需要重定位信息，简化为使用立即 call
-        
-        // call [constant_pool_base + index * 8]
-        // 使用 indirect call: ff 15 / 2 / d0
-        code[0] = 0xff;  // opcode prefix for indirect call
-        code[1] = 0x15;
-        // 接下来是 RIP-relative offset (需要计算)
-        *reinterpret_cast<int32_t*>(&code[2]) = 0;  // 占位
-        code_ptr = &code[6];
-    } else {
-        // 内部函数调用 - 简化实现
-        // 保存返回地址到栈并调用
-        
-        // push rbp (建立栈帧)
-        code[0] = 0x55;  // push rbp
-        // mov rbp, rsp
-        code[1] = 0x48; code[2] = 0x89; code[3] = 0xe5;
-        
-        // 分配局部空间
-        if (arg_count > 0) {
-            code[4] = 0x48; code[5] = 0x83; code[6] = 0xec; 
-            code[7] = static_cast<uint8_t>(arg_count * 8);  // 每个参数 8 字节
-            code_ptr = &code[8];
-        } else {
-            code[4] = 0x48; code[5] = 0x83; code[6] = 0xec; code[7] = 0x20;
-            code_ptr = &code[8];
+        // 外部函数调用 - 从 operand 解码 str_idx 和 arg_count
+        uint32_t str_idx = inst.operand & 0xFFFF;
+        uint32_t ext_arg_count = (inst.operand >> 16) & 0xFFFF;
+
+        std::string func_name;
+        if (current_module_ && str_idx < current_module_->constants.values.size()) {
+            func_name = current_module_->constants.values[str_idx].str;
         }
-        
-        (void)arg_count;  // 参数数量
+
+        void* func_addr = nullptr;
+        bool use_xmm0 = false;
+
+        // 对 print/println 做类型感知分发
+        if ((func_name == "print" || func_name == "println") && ext_arg_count == 1) {
+            std::string target_name;
+            if (last_pushed_type_ == bytecode::ValueType::F64) {
+                target_name = func_name + "_f64";
+                use_xmm0 = true;
+            } else if (last_pushed_type_ == bytecode::ValueType::STRING) {
+                target_name = func_name + "_str";
+            } else {
+                target_name = func_name + "_i64";
+            }
+            func_addr = get_runtime_function_by_name(target_name);
+            if (!func_addr) {
+                func_addr = get_runtime_function_by_name(func_name);
+            }
+        } else {
+            if (!func_name.empty()) {
+                func_addr = get_runtime_function_by_name(func_name);
+            }
+            if (!func_addr) {
+                func_addr = get_runtime_function_by_name("println");
+            }
+        }
+
+        size_t off = 0;
+
+        if ((func_name == "print" || func_name == "println") && ext_arg_count == 1 && use_xmm0) {
+            // 浮点参数: pop rax; movq xmm0, rax
+            code[off++] = 0x58; // pop rax
+            code[off++] = 0x66; code[off++] = 0x48; code[off++] = 0x0f; code[off++] = 0x6e; code[off++] = 0xc0; // movq xmm0, rax
+        } else {
+            // Pop args from stack into registers (reverse order: top-of-stack is last arg)
+            // System V AMD64: rdi, rsi, rdx, rcx, r8, r9
+            switch (ext_arg_count) {
+                case 6: code[off++] = 0x41; code[off++] = 0x59; // pop r9
+                case 5: code[off++] = 0x41; code[off++] = 0x58; // pop r8
+                case 4: code[off++] = 0x59; // pop rcx
+                case 3: code[off++] = 0x5a; // pop rdx
+                case 2: code[off++] = 0x5e; // pop rsi
+                case 1: code[off++] = 0x5f; // pop rdi
+                default: break;
+            }
+        }
+
+        // movabs rax, func_addr
+        code[off++] = 0x48;
+        code[off++] = 0xB8;
+        *reinterpret_cast<uint64_t*>(&code[off]) = reinterpret_cast<uint64_t>(func_addr);
+        off += 8;
+
+        // call rax
+        code[off++] = 0xFF;
+        code[off++] = 0xD0;
+
+        // push return value onto stack (matches VM behavior)
+        code[off++] = 0x50; // push rax
+
+        code_ptr = &code[off];
+    } else {
+        // 内部函数调用 (CALL)
+        // Stack: [arg0, arg1, ..., callee]
+        // Pop callee into rax, then pop args into registers
+        size_t off = 0;
+
+        // Pop callee address into rax
+        code[off++] = 0x58; // pop rax
+
+        // Pop args from stack into registers (System V AMD64: rdi, rsi, rdx, rcx, r8, r9)
+        // Note: stack top after popping callee is the LAST arg pushed.
+        // Fallthrough order ensures correct register assignment.
+        switch (arg_count) {
+            case 6: code[off++] = 0x41; code[off++] = 0x59; // pop r9
+            case 5: code[off++] = 0x41; code[off++] = 0x58; // pop r8
+            case 4: code[off++] = 0x59; // pop rcx
+            case 3: code[off++] = 0x5a; // pop rdx
+            case 2: code[off++] = 0x5e; // pop rsi
+            case 1: code[off++] = 0x5f; // pop rdi
+            default: break;
+        }
+
+        // call rax
+        code[off++] = 0xFF;
+        code[off++] = 0xD0;
+
+        // push return value onto stack
+        code[off++] = 0x50; // push rax
+
+        code_ptr = &code[off];
     }
 }
 
 void MethodJITCompiler::emit_return_op(void*& code_ptr, bytecode::OpCode op) {
-    // 返回操作
+    // 返回操作 - 先恢复 rsp 清理栈，再返回
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
+
     switch (op) {
-        case bytecode::OpCode::RET:  // pop rbp; ret
-            code[0] = 0x5d; code[1] = 0xc3;
-            code_ptr = &code[2];
-            break;
-        case bytecode::OpCode::RET_NULL:  // xor rax, rax; pop rbp; ret
-            code[0] = 0x48; code[1] = 0x31; code[2] = 0xc0;
-            code[3] = 0x5d; code[4] = 0xc3;
+        case bytecode::OpCode::RET:  // mov rsp, rbp; pop rbp; ret
+            code[0] = 0x48; code[1] = 0x89; code[2] = 0xec; // mov rsp, rbp
+            code[3] = 0x5d; // pop rbp
+            code[4] = 0xc3; // ret
             code_ptr = &code[5];
+            break;
+        case bytecode::OpCode::RET_NULL:  // mov rsp, rbp; xor rax, rax; pop rbp; ret
+            code[0] = 0x48; code[1] = 0x89; code[2] = 0xec; // mov rsp, rbp
+            code[3] = 0x48; code[4] = 0x31; code[5] = 0xc0; // xor rax, rax
+            code[6] = 0x5d; // pop rbp
+            code[7] = 0xc3; // ret
+            code_ptr = &code[8];
             break;
         default:
             break;
@@ -1002,16 +1646,38 @@ void MethodJITCompiler::emit_return_op(void*& code_ptr, bytecode::OpCode op) {
 // ============================================================================
 
 void MethodJITCompiler::emit_load_global(void*& code_ptr, uint32_t idx) {
-    // x86-64: mov rax, [rip + global_addr] (需要重定位)
-    // 简化实现: 使用 r15 作为全局变量基址
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
-    
-    // mov rax, [r15 + idx * 8]
+
+    // Check if this global is a function name we can resolve at compile time
+    if (current_module_ && idx < current_module_->constants.values.size()) {
+        const auto& cv = current_module_->constants.values[idx];
+        if (cv.type == bytecode::ValueType::STRING) {
+            const std::string& name = cv.str;
+            // Look up in module functions
+            for (const auto& func : current_module_->functions) {
+                if (func.name == name) {
+                    void* func_addr = get_compiled_code(name);
+                    if (func_addr) {
+                        // movabs rax, func_addr
+                        code[0] = 0x48; code[1] = 0xB8;
+                        *reinterpret_cast<uint64_t*>(&code[2]) = reinterpret_cast<uint64_t>(func_addr);
+                        code[10] = 0x50; // push rax
+                        code_ptr = &code[11];
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fallback: read from r15-based global table (may not work for non-functions)
     code[0] = 0x49;  // REX.WB for R15
     code[1] = 0x8b;
     code[2] = 0x87;
     *reinterpret_cast<uint32_t*>(&code[3]) = idx * 8;  // disp32
-    code_ptr = &code[7];
+    code[7] = 0x50; // push rax
+    code_ptr = &code[8];
 }
 
 void MethodJITCompiler::emit_store_global(void*& code_ptr, uint32_t idx) {
@@ -1199,23 +1865,22 @@ void MethodJITCompiler::emit_system_call(void*& code_ptr, bytecode::OpCode op) {
     switch (op) {
         case bytecode::OpCode::PRINT:
         case bytecode::OpCode::PRINTLN: {
-            // 调用运行时打印函数
-            // mov rdi, rax (参数在栈顶)
-            code[0] = 0x48; code[1] = 0x89; code[2] = 0xc7;  // mov rdi, rax
+            // Pop argument from stack into rdi
+            code[0] = 0x5f;  // pop rdi
             // call runtime function
-            code[3] = 0xe8;
-            
+            code[1] = 0xe8;
+
             void* func_addr = get_runtime_function_by_name(
-                op == bytecode::OpCode::PRINT ? "print" : "println");
+                op == bytecode::OpCode::PRINT ? "print_i64" : "println_i64");
             if (func_addr) {
                 int32_t offset = static_cast<int32_t>(
-                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[6])
                 );
-                *reinterpret_cast<int32_t*>(&code[4]) = offset;
-                code_ptr = &code[8];
+                *reinterpret_cast<int32_t*>(&code[2]) = offset;
+                code_ptr = &code[6];
             } else {
-                *reinterpret_cast<int32_t*>(&code[4]) = 0;
-                code_ptr = &code[8];
+                *reinterpret_cast<int32_t*>(&code[2]) = 0;
+                code_ptr = &code[6];
             }
             break;
         }
@@ -1357,7 +2022,7 @@ CompilationResult OptimizingJITCompiler::optimize_compile(const bytecode::Functi
     
     // 生成优化后的机器码 (类似 MethodJIT)
     void* current = code_ptr;
-    emit_prologue(current, optimized_func.local_count);
+    emit_prologue(current, optimized_func.local_count, optimized_func.arity);
     
     for (const auto& inst : optimized_func.code) {
         (void)inst;
@@ -1388,7 +2053,7 @@ void OptimizingJITCompiler::clear_cache() {
     code_cache_->clear();
 }
 
-void OptimizingJITCompiler::emit_prologue(void*& code_ptr, size_t local_count) {
+void OptimizingJITCompiler::emit_prologue(void*& code_ptr, size_t local_count, uint32_t arity) {
     // x86-64 函数序言 (优化版本)
     // push rbp
     // mov rbp, rsp
@@ -1402,9 +2067,9 @@ void OptimizingJITCompiler::emit_prologue(void*& code_ptr, size_t local_count) {
     code[2] = 0x89;
     code[3] = 0xe5;
     
-    // 分配局部变量空间
+    // 分配局部变量空间 (16字节对齐)
     if (local_count > 0) {
-        size_t stack_size = local_count * 8;
+        size_t stack_size = ((local_count * 8 + 15) / 16) * 16;
         if (stack_size <= 127) {
             code[4] = 0x48;
             code[5] = 0x83;
@@ -2141,6 +2806,15 @@ JITCompiler::JITCompiler(const JITConfig& config) : config_(config) {
 
 JITCompiler::~JITCompiler() {
     clear_all_caches();
+}
+
+void JITCompiler::set_module(const bytecode::Module* module) {
+    if (method_jit_) {
+        method_jit_->set_module(module);
+    }
+    if (optimizing_jit_) {
+        optimizing_jit_->set_module(module);
+    }
 }
 
 JITConfig JITCompiler::default_config() {

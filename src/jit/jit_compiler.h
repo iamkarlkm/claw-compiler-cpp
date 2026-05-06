@@ -118,11 +118,12 @@ class MethodJITCompiler {
 public:
     MethodJITCompiler();
     ~MethodJITCompiler();
-    
+
     CompilationResult compile(const bytecode::Function& func);
     void* get_compiled_code(const std::string& func_name);
     void clear_cache();
-    
+    void set_module(const bytecode::Module* module) { current_module_ = module; }
+
 private:
     std::unordered_map<std::string, void*> compiled_functions_;
     std::unique_ptr<CodeCache> code_cache_;
@@ -133,12 +134,21 @@ private:
     // 线性扫描寄存器分配器 [NEW]
     std::unique_ptr<LinearScanRegisterAllocator> reg_allocator_;
     
+    // 当前编译的模块 (用于查找常量池字符串)
+    const bytecode::Module* current_module_ = nullptr;
+
     // 局部变量槽位映射
     std::unordered_map<uint32_t, int32_t> local_offsets_;
     int32_t next_offset_ = -8;  // 栈偏移从 -8 开始 (返回地址)
+
+    // 类型跟踪（简化版，用于 print/println 的参数类型推断）
+    bytecode::ValueType last_pushed_type_ = bytecode::ValueType::I64;
+    std::vector<bytecode::ValueType> local_types_;
+    std::unordered_map<std::string, bytecode::ValueType> global_types_;
+    std::vector<bytecode::ValueType> type_stack_;
     
     // 辅助方法 - 使用 X86_64Emitter
-    void emit_prologue(void*& current, size_t local_count);
+    void emit_prologue(void*& current, size_t local_count, uint32_t arity = 0);
     void emit_epilogue(void*& current);
     void emit_call(void*& current, void* target);
     void emit_load_local(void*& current, size_t slot);
@@ -205,18 +215,22 @@ class OptimizingJITCompiler {
 public:
     OptimizingJITCompiler();
     ~OptimizingJITCompiler();
-    
+
     CompilationResult optimize_compile(const bytecode::Function& func);
     void* get_optimized_code(const std::string& func_name);
     void clear_cache();
-    
+    void set_module(const bytecode::Module* module) { current_module_ = module; }
+
 private:
     std::unordered_map<std::string, void*> optimized_functions_;
     std::unique_ptr<CodeCache> code_cache_;
     
     // x86-64 机器码发射器 (本次集成)
     std::unique_ptr<x86_64::X86_64Emitter> emitter_;
-    
+
+    // 当前编译的模块
+    const bytecode::Module* current_module_ = nullptr;
+
     // 局部变量槽位映射
     std::unordered_map<uint32_t, int32_t> local_offsets_;
     
@@ -230,7 +244,7 @@ private:
     void inline_function(bytecode::Function& func, size_t call_offset, const bytecode::Function& callee);
     
     // 代码生成辅助 - 使用 X86_64Emitter
-    void emit_prologue(void*& current, size_t local_count);
+    void emit_prologue(void*& current, size_t local_count, uint32_t arity = 0);
     void emit_epilogue(void*& current);
     size_t estimate_code_size(const bytecode::Function& func);
 };
@@ -255,6 +269,7 @@ public:
     void* compile_or_get_cached(const bytecode::Function& func);
     void* compile_optimized(const bytecode::Function& func);
     bool should_optimize(const std::string& func_name);
+    void set_module(const bytecode::Module* module);
     
     // 内联缓存
     void* lookup_inline_cache(const std::string& func_name, 

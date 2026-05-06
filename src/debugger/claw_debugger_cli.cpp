@@ -494,7 +494,7 @@ bool DebuggerCLI::execute_command(const std::string& line) {
 }
 
 std::string DebuggerCLI::readline() {
-    char* line = readline("(claw-dbg) ");
+    char* line = ::readline("(claw-dbg) ");
     if (line == nullptr) {
         return "quit";
     }

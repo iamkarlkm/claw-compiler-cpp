@@ -20,7 +20,7 @@ namespace semantic {
 // Forward declarations
 class SemanticAnalyzer;
 class Scope;
-class Symbol;
+struct Symbol;
 
 // Symbol kinds
 enum class SymbolKind {
@@ -49,19 +49,17 @@ struct Symbol {
     std::string name;
     SymbolKind kind;
     claw::type::TypePtr type;
-    ast::ASTNode* definition;
-    Scope* scope;
-    SymbolVisibility visibility;
-    bool is_mutable;
-    bool is_initialized;
-    bool is_captured;
-    int depth;
+    ast::ASTNode* definition = nullptr;
+    Scope* scope = nullptr;
+    SymbolVisibility visibility = SymbolVisibility::Private;
+    bool is_mutable = false;
+    bool is_initialized = false;
+    bool is_captured = false;
+    int depth = 0;
     
+    Symbol() = default;
     Symbol(const std::string& n, SymbolKind k, claw::type::TypePtr t, ast::ASTNode* def, Scope* s)
-        : name(n), kind(k), type(t), definition(def), scope(s),
-          visibility(SymbolVisibility::Private), 
-          is_mutable(false), is_initialized(false), 
-          is_captured(false), depth(0) {}
+        : name(n), kind(k), type(t), definition(def), scope(s) {}
 };
 
 // Scope represents a lexical scoping level
@@ -126,6 +124,7 @@ public:
     Scope* enter_scope(const std::string& name = "");
     void exit_scope();
     Scope* current_scope() { return scope_stack_.top(); }
+    const Scope* current_scope() const { return scope_stack_.top(); }
     
     // Symbol operations
     bool define(const std::string& name, SymbolKind kind, claw::type::TypePtr type, 
@@ -210,7 +209,7 @@ private:
     // Visit methods for AST nodes
     void visit_program(ast::Program* program);
     void visit_function(ast::FunctionStmt* func);
-    void visit_parameter(ast::ParamDecl* param);
+    void visit_parameter(const std::string& name, const std::string& type_name);
     void visit_statement(ast::Statement* stmt);
     void visit_expression(ast::Expression* expr);
     
@@ -219,7 +218,6 @@ private:
     void visit_if(ast::IfStmt* if_stmt);
     void visit_while(ast::WhileStmt* while_stmt);
     void visit_for(ast::ForStmt* for_stmt);
-    void visit_loop(ast::LoopStmt* loop_stmt);
     void visit_return(ast::ReturnStmt* ret);
     void visit_break(ast::BreakStmt* brk);
     void visit_continue(ast::ContinueStmt* cont);
@@ -241,7 +239,6 @@ private:
     void visit_lambda(ast::LambdaExpr* lambda);
     void visit_array(ast::ArrayExpr* arr);
     void visit_tuple(ast::TupleExpr* tup);
-    void visit_ref(ast::RefExpr* ref);
     
     // Type checking helpers
     claw::type::TypePtr infer_expression_type(ast::Expression* expr);

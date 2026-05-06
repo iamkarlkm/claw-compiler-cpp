@@ -190,12 +190,13 @@ size_t FunctionInliner::estimate_size(const bytecode::Function& func) {
 
 InlineDecision FunctionInliner::should_inline(
     const bytecode::Function& caller,
-    size_t call_offset,
+    [[maybe_unused]] size_t call_offset,
     const bytecode::Function& callee) {
 
     InlineDecision decision;
 
     size_t caller_size = estimate_size(caller);
+    (void)caller_size;
     size_t callee_size = estimate_size(callee);
 
     // 启发式: 小函数且调用收益大于开销
@@ -236,7 +237,7 @@ std::unordered_map<uint32_t, uint32_t> FunctionInliner::build_param_map(
 
 bytecode::Function FunctionInliner::inline_function(
     bytecode::Function& caller,
-    size_t call_offset,
+    [[maybe_unused]] size_t call_offset,
     const bytecode::Function& callee) {
 
     bytecode::Function result = caller;

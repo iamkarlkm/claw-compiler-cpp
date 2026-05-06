@@ -1,5 +1,5 @@
 // ir.cpp - Claw 中间表示 (IR) 实现
-#include "ir/ir.h"
+#include "ir.h"
 #include <sstream>
 #include <stdexcept>
 
@@ -543,25 +543,9 @@ std::shared_ptr<Value> IRBuilder::create_cast(
     return result;
 }
 
-std::shared_ptr<Value> IRBuilder::create_tensor_create(
-    std::vector<int64_t> shape, std::shared_ptr<Type> elem_type) {
-    // TODO: 实现张量创建
-    return nullptr;
-}
+// Tensor methods moved to ir_enhanced.cpp
 
-std::shared_ptr<Value> IRBuilder::create_tensor_load(
-    std::shared_ptr<Value> tensor, std::vector<std::shared_ptr<Value>> indices) {
-    // TODO: 实现张量加载
-    return nullptr;
-}
-
-void IRBuilder::create_tensor_store(
-    std::shared_ptr<Value> tensor, std::vector<std::shared_ptr<Value>> indices,
-    std::shared_ptr<Value> value) {
-    // TODO: 实现张量存储
-}
-
-void IRBuilder::create_panic(std::string message) {
+void IRBuilder::create_panic(std::string message) { (void)message;
     auto panic_inst = std::make_shared<Instruction>(OpCode::Panic, nullptr);
     panic_inst->loc = {};
     

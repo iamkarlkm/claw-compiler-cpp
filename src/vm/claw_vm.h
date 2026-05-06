@@ -24,6 +24,9 @@
 #include "bytecode/bytecode.h"
 
 namespace claw {
+
+namespace debugger { class Debugger; }
+
 namespace vm {
 
 // ============================================================================
@@ -150,6 +153,7 @@ struct Value {
     static Value float_v(double f) { Value v; v.tag = ValueTag::FLOAT; v.data = f; return v; }
     static Value string_v(const std::string& s) { Value v; v.tag = ValueTag::STRING; v.data = s; return v; }
     static Value array_v(std::shared_ptr<ArrayValue> arr) { Value v; v.tag = ValueTag::ARRAY; v.data = arr; return v; }
+    static Value array_v(std::vector<Value> elems);
     static Value tuple_v(std::shared_ptr<TupleValue> t) { Value v; v.tag = ValueTag::TUPLE; v.data = t; return v; }
     static Value tensor_v(std::shared_ptr<TensorValue> t) { Value v; v.tag = ValueTag::TENSOR; v.data = t; return v; }
     static Value iterator_v(std::shared_ptr<IteratorValue> iter) { Value v; v.tag = ValueTag::ITERATOR; v.data = iter; return v; }
@@ -197,6 +201,17 @@ struct Value {
         return empty;
     }
     
+    // Array access helper (returns shared_ptr for direct manipulation)
+    std::shared_ptr<ArrayValue> as_array_ptr() {
+        if (is_array()) return std::get<std::shared_ptr<ArrayValue>>(data);
+        return nullptr;
+    }
+    const std::shared_ptr<ArrayValue>& as_array_ptr() const {
+        static const std::shared_ptr<ArrayValue> empty;
+        if (is_array()) return std::get<std::shared_ptr<ArrayValue>>(data);
+        return empty;
+    }
+    
     // String representation
     std::string to_string() const;
     std::string type_name() const;
@@ -214,6 +229,13 @@ struct ArrayValue {
     // GC support: marked flag
     bool marked = false;
 };
+
+// Deferred inline implementation (needs complete ArrayValue)
+inline Value Value::array_v(std::vector<Value> elems) {
+    auto arr = std::make_shared<ArrayValue>();
+    arr->elements = std::move(elems);
+    return Value::array_v(arr);
+}
 
 struct TupleValue {
     std::vector<Value> elements;
@@ -313,6 +335,7 @@ struct CallFrame {
     int32_t ip;                // Instruction pointer
     int32_t base_stack;        // Base of this frame's stack slots
     int32_t slot_count;        // Number of slots in this frame
+    int32_t local_count;       // Number of local variables in this frame
 };
 
 // ============================================================================
@@ -446,6 +469,15 @@ public:
     // Debug/inspect
     std::string dump_stack() const;
     std::string dump_callframes() const;
+    
+    // Global variable inspection (for debugger/REPL)
+    int32_t get_global_idx(const std::string& name) { return runtime.get_global_idx(name); }
+    Value get_global(int32_t idx) const { return runtime.get_global(idx); }
+    void set_global(int32_t idx, const Value& val) { runtime.set_global(idx, val); }
+    int32_t define_global(const std::string& name) { return runtime.define_global(name); }
+    const std::map<std::string, int32_t>& get_global_map() const { return runtime.get_global_map(); }
+    
+    friend class ::claw::debugger::Debugger;
     
 private:
     bytecode::Module current_module;

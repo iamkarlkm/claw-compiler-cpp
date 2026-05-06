@@ -1,0 +1,227 @@
+# Claw Compiler - Comprehensive Makefile
+# Supports: macOS, Linux
+# No CMake required
+
+CXX = clang++
+CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -I. -Isrc
+DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -I. -Isrc -DCLAW_DEBUG
+LDFLAGS = -lpthread
+
+# Detect OS
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS specific flags
+    CXXFLAGS += -stdlib=libc++
+endif
+
+# ============================================================================
+# Core Sources
+# ============================================================================
+
+CORE_SOURCES = \
+    src/common/common.h \
+    src/lexer/lexer.h \
+    src/lexer/token.h \
+    src/parser/parser.h \
+    src/ast/ast.h \
+    src/type/type_system.h \
+    src/type/type_checker.cpp \
+    src/semantic/semantic_analyzer.cpp \
+    src/ir/ir.cpp \
+    src/ir/ir_generator.cpp \
+    src/ir/ir_enhanced.cpp \
+    src/ir/ir_generator_enhanced.cpp \
+    src/ir_bytecode_bridge.cpp \
+    src/bridge/ir_bytecode_bridge.cpp \
+    src/bytecode/bytecode.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/interpreter/interpreter.cpp \
+    src/pipeline/execution_engine.cpp \
+    src/pipeline/execution_engine_enhanced.cpp \
+    src/pipeline/execution_pipeline.cpp \
+    src/pipeline/perf_profiler.cpp \
+    src/codegen/codegen.cpp \
+    src/codegen/native_codegen.cpp \
+    src/native_codegen/native_codegen.cpp \
+    src/emitter/x86_64_emitter.cpp \
+    src/emitter/arm64_emitter.cpp \
+    src/emitter/riscv_emitter.cpp \
+    src/emitter/reg_alloc.cpp \
+    src/jit/jit_compiler.cpp \
+    src/jit/jit_runtime.cpp \
+    src/jit/jit_stdlib_integration.cpp \
+    src/jit/deoptimization.cpp \
+    src/jit/stack_frame.cpp \
+    src/jit/optimizations.cpp \
+    src/jit/tracing_jit.cpp \
+    src/jit/type_profiler.cpp \
+    src/jit/inline_cache.cpp \
+    src/jit/hot_spot.cpp \
+    src/module/module.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp \
+    src/package/package_manager.cpp \
+    src/package/manifest_parser.cpp \
+    src/package/dependency_resolver.cpp \
+    src/package/lock_file.cpp \
+    src/auto_scheduler/auto_scheduler.cpp \
+    src/auto_scheduler/vm_evaluator.cpp \
+    src/auto_scheduler/ml_evaluator.cpp \
+    src/auto_scheduler/schedule_cache.cpp \
+    src/auto_scheduler/schedule_space.cpp \
+    src/auto_scheduler/search_strategy.cpp \
+    src/ml/feature_extractor.cpp \
+    src/ml/ml_cost_model.cpp \
+    src/ml/ml_cost_model_adapter.cpp \
+    src/backend/cuda_codegen.cpp \
+    src/benchmark/benchmark.cpp \
+    src/tensorir/tensor_ir.cpp \
+    src/tensorir/tensor_ir_generator.cpp \
+    src/repl/claw_repl.cpp \
+    src/repl/claw_repl_integrated.cpp \
+    src/repl/repl.cpp \
+    src/debugger/claw_debugger.cpp \
+    src/debugger/claw_debugger_cli.cpp \
+    src/json/json.h \
+    src/main.cpp
+
+# ============================================================================
+# Test Sources
+# ============================================================================
+
+TEST_BENCHMARK_SOURCES = src/benchmark/benchmark.cpp src/test/test_benchmark.cpp
+TEST_PACKAGE_SOURCES = src/package/package_manager.cpp src/package/manifest_parser.cpp \
+    src/package/dependency_resolver.cpp src/package/lock_file.cpp src/test/test_package_manager.cpp
+TEST_CUDA_SOURCES = src/backend/cuda_codegen.cpp src/tensorir/tensor_ir.cpp src/test/test_cuda_codegen.cpp
+TEST_DEBUGGER_SOURCES = src/debugger/claw_debugger.cpp src/test/test_debugger.cpp
+TEST_AUTO_SCHEDULER_SOURCES = src/auto_scheduler/auto_scheduler.cpp src/auto_scheduler/vm_evaluator.cpp src/auto_scheduler/ml_evaluator.cpp \
+    src/auto_scheduler/schedule_cache.cpp src/auto_scheduler/schedule_space.cpp \
+    src/auto_scheduler/search_strategy.cpp src/test/test_auto_scheduler.cpp
+TEST_VM_EVALUATOR_SOURCES = src/auto_scheduler/vm_evaluator.cpp src/auto_scheduler/schedule_space.cpp \
+    src/auto_scheduler/search_strategy.cpp src/auto_scheduler/schedule_cache.cpp \
+    src/auto_scheduler/auto_scheduler.cpp src/auto_scheduler/ml_evaluator.cpp \
+    src/pipeline/perf_profiler.cpp \
+    src/tensorir/tensor_ir.cpp src/test/test_vm_evaluator.cpp
+TEST_TENSORIR_SOURCES = src/tensorir/tensor_ir.cpp src/test/test_tensor_ir.cpp
+TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/test/test_wasm_ir.cpp
+TEST_ATTRIBUTE_SOURCES = src/frontend/attribute.cpp src/test/test_attribute.cpp
+TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/test/test_doc_generator.cpp
+
+# ============================================================================
+# Targets
+# ============================================================================
+
+.PHONY: all clean test help \
+    test-benchmark test-cuda test-package test-debugger \
+    test-auto-scheduler test-tensorir test-wasm test-attribute test-docgen test-vm-evaluator
+
+all: claw claw-lsp claw-repl
+
+help:
+	@echo "Claw Compiler Build System"
+	@echo ""
+	@echo "Available targets:"
+	@echo "  all              - Build all main targets"
+	@echo "  claw             - Build main compiler"
+	@echo "  claw-lsp         - Build LSP server"
+	@echo "  claw-repl        - Build REPL"
+	@echo "  test             - Run all tests"
+	@echo "  test-benchmark   - Run benchmark framework tests"
+	@echo "  test-cuda        - Run CUDA codegen tests"
+	@echo "  test-package     - Run package manager tests"
+	@echo "  test-debugger    - Run debugger tests"
+	@echo "  test-auto-scheduler - Run auto-scheduler tests"
+	@echo "  test-vm-evaluator  - Run VM evaluator tests"
+	@echo "  test-tensorir    - Run tensor IR tests"
+	@echo "  test-attribute   - Run attribute/macro system tests"
+	@echo "  clean            - Clean build artifacts"
+	@echo ""
+
+# Main compiler
+claw: $(CORE_SOURCES)
+	$(CXX) $(CXXFLAGS) -o $@ $(filter %.cpp,$^) $(LDFLAGS)
+
+# LSP Server
+claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# REPL
+claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrated.cpp src/repl/repl.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+test: test-benchmark test-cuda test-package test-debugger test-auto-scheduler test-vm-evaluator test-tensorir test-wasm test-attribute test-docgen
+	@echo ""
+	@echo "=== All Tests Completed ==="
+
+test-benchmark:
+	$(CXX) $(CXXFLAGS) -o test_benchmark $(TEST_BENCHMARK_SOURCES)
+	@./test_benchmark
+
+test-cuda:
+	$(CXX) $(CXXFLAGS) -o test_cuda $(TEST_CUDA_SOURCES)
+	@./test_cuda
+
+test-package:
+	$(CXX) $(CXXFLAGS) -o test_package $(TEST_PACKAGE_SOURCES)
+	@./test_package
+
+test-debugger:
+	$(CXX) $(CXXFLAGS) -o test_debugger $(TEST_DEBUGGER_SOURCES)
+	@./test_debugger
+
+test-auto-scheduler:
+	$(CXX) $(CXXFLAGS) -o test_auto_scheduler $(TEST_AUTO_SCHEDULER_SOURCES)
+	@./test_auto_scheduler
+
+test-vm-evaluator:
+	$(CXX) $(CXXFLAGS) -o test_vm_evaluator $(TEST_VM_EVALUATOR_SOURCES)
+	@./test_vm_evaluator
+
+test-tensorir:
+	$(CXX) $(CXXFLAGS) -o test_tensorir $(TEST_TENSORIR_SOURCES)
+	@./test_tensorir
+
+test-wasm:
+	$(CXX) $(CXXFLAGS) -o test_wasm $(TEST_WASM_SOURCES)
+	@./test_wasm
+
+test-attribute:
+	$(CXX) $(CXXFLAGS) -o test_attribute $(TEST_ATTRIBUTE_SOURCES)
+	@./test_attribute
+
+test-docgen:
+	$(CXX) $(CXXFLAGS) -o test_docgen $(TEST_DOCGEN_SOURCES)
+	@./test_docgen
+
+# ============================================================================
+# Clean
+# ============================================================================
+
+clean:
+	rm -f claw claw-lsp claw-repl
+	rm -f test_benchmark test_cuda test_package test_debugger
+	rm -f test_auto_scheduler test_tensorir test_wasm test_attribute test_docgen test_vm_evaluator
+	rm -f *.o
+
+# ============================================================================
+# Debug builds
+# ============================================================================
+
+debug-claw: $(CORE_SOURCES)
+	$(CXX) $(DEBUG_FLAGS) -o claw-debug $(filter %.cpp,$^) $(LDFLAGS)
+
+# ============================================================================
+# Installation
+# ============================================================================
+
+install: all
+	@echo "Installing Claw Compiler..."
+	@mkdir -p $(DESTDIR)/usr/local/bin
+	@cp claw claw-lsp claw-repl $(DESTDIR)/usr/local/bin/
+	@echo "Installation complete!"

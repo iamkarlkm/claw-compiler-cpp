@@ -161,7 +161,7 @@ int Debugger::run(const std::shared_ptr<bytecode::Module>& module,
     
     try {
         // Execute the module
-        vm::Value result = vm_->execute(module, args);
+        vm::Value result = vm_->execute();
         
         state_.is_terminated = true;
         state_.is_running = false;
@@ -169,8 +169,8 @@ int Debugger::run(const std::shared_ptr<bytecode::Module>& module,
         emit_event(DebugEvent(DebugEventType::Terminated));
         
         // Return integer result if applicable
-        if (result.type == vm::ValueType::INT) {
-            return static_cast<int>(result.data.as_int);
+        if (result.is_int()) {
+            return static_cast<int>(result.as_int());
         }
         
         return 0;
@@ -244,7 +244,7 @@ void Debugger::pause() {
 
 void Debugger::stop() {
     if (vm_) {
-        vm_->halt();
+        vm_->op_halt();
     }
     
     state_.is_running = false;
@@ -277,13 +277,13 @@ std::vector<VariableInfo> Debugger::get_global_variables() const {
     
     std::vector<VariableInfo> result;
     
-    const auto& globals = vm_->get_global_variables();
+    const auto& globals = vm_->get_global_map();
     for (const auto& pair : globals) {
         VariableInfo info;
         info.name = pair.first;
-        info.value = pair.second;
-        info.value_repr = value_to_string(pair.second);
-        info.type_name = vm::Value::type_name_static(pair.second.type);
+        info.value = vm_->get_global(pair.second);
+        info.value_repr = value_to_string(info.value);
+        info.type_name = info.value.type_name();
         info.is_global = true;
         result.push_back(info);
     }
@@ -307,10 +307,10 @@ std::optional<vm::Value> Debugger::evaluate(const std::string& expr) {
     }
     
     // Check globals
-    const auto& globals = vm_->get_global_variables();
+    const auto& globals = vm_->get_global_map();
     auto it = globals.find(expr);
     if (it != globals.end()) {
-        return it->second;
+        return vm_->get_global(it->second);
     }
     
     return std::nullopt;
@@ -326,14 +326,14 @@ std::optional<VariableInfo> Debugger::get_variable(const std::string& name) cons
     
     // Check globals
     if (vm_) {
-        const auto& globals = vm_->get_global_variables();
+        const auto& globals = vm_->get_global_map();
         auto it = globals.find(name);
         if (it != globals.end()) {
             VariableInfo info;
             info.name = it->first;
-            info.value = it->second;
-            info.value_repr = value_to_string(it->second);
-            info.type_name = vm::Value::type_name_static(it->second.type);
+            info.value = vm_->get_global(it->second);
+            info.value_repr = value_to_string(info.value);
+            info.type_name = info.value.type_name();
             info.is_global = true;
             return info;
         }
@@ -448,7 +448,7 @@ void Debugger::set_source_root(const std::string& path) {
 // Private Methods
 // ============================================================================
 
-bool Debugger::should_pause_at_breakpoint(const Breakpoint& bp) {
+bool Debugger::should_pause_at_breakpoint(Breakpoint& bp) {
     if (!bp.enabled) {
         return false;
     }
@@ -463,8 +463,7 @@ bool Debugger::should_pause_at_breakpoint(const Breakpoint& bp) {
     // Check condition
     if (!bp.condition.empty()) {
         auto result = evaluate(bp.condition);
-        if (!result || result->type != vm::ValueType::BOOL || 
-            result->data.as_bool == false) {
+        if (!result || !result->is_bool() || !result->as_bool()) {
             return false;
         }
     }

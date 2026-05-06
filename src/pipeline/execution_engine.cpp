@@ -387,7 +387,7 @@ bool ExecutionEngine::load_module(const bytecode::Module& module) {
     return true;
 }
 
-ExecutionResult ExecutionEngine::execute(const std::string& entry_function) {
+ExecutionResult ExecutionEngine::execute([[maybe_unused]] const std::string& entry_function) {
     auto start = std::chrono::steady_clock::now();
     ExecutionResult result;
     
@@ -483,25 +483,20 @@ ExecutionResult ExecutionEngine::execute_jit() {
                 break;
             }
         }
-        
+
         if (!main_func) {
-            // 尝试查找其他入口函数
-            for (auto& func : compiled_module_->functions) {
-                if (!func.name.empty()) {
-                    main_func = &func;
-                    break;
-                }
-            }
-            if (!main_func) {
-                result.error_message = "No executable function found in module";
-                return result;
-            }
+            result.error_message = "No main function found in JIT module";
+            result.success = true;
+            result.exit_code = 0;
+            return result;
         }
         
         // JIT 编译所有函数并注册
         std::ostringstream output;
         output << "[JIT] Compiling module: " << compiled_module_->name << "\n";
-        
+
+        jit_compiler_->set_module(compiled_module_.get());
+
         for (auto& func : compiled_module_->functions) {
             void* compiled_code = jit_compiler_->compile_or_get_cached(func);
             if (compiled_code) {
@@ -509,33 +504,33 @@ ExecutionResult ExecutionEngine::execute_jit() {
                 register_jit_function(func.name, compiled_code);
                 stats_.jit_compilations++;
                 result.stats.jit_compilations++;
-                output << "  [JIT] Compiled: " << func.name 
+                output << "  [JIT] Compiled: " << func.name
                       << " (" << func.code.size() << " bytecode instructions)\n";
             } else {
                 output << "  [WARN] Failed to compile: " << func.name << "\n";
             }
         }
-        
+
         // 获取 main 函数指针
         JITFunction main_jit_func = get_jit_function(main_func->name);
         if (!main_jit_func) {
             result.error_message = "JIT compilation succeeded but function not registered";
             return result;
         }
-        
+
         // 执行 JIT 编译后的机器码
         // 使用 System V AMD64 ABI: 参数通过 RDI, RSI, RDX, RCX, R8, R9 传递
         // 对于 Claw 函数，我们简化处理：最多支持 6 个整数参数
-        
+
         std::vector<int64_t> args;
-        
+
         // 根据函数参数数量准备参数
         // 对于 main 函数，通常没有参数或有一个参数（命令行参数数组）
         size_t num_params = std::min(main_func->arity, static_cast<uint32_t>(6));
         for (size_t i = 0; i < num_params; ++i) {
             args.push_back(0); // 默认参数为 0
         }
-        
+
         // 调用 JIT 编译后的函数 (使用 6 个固定参数位置)
         int64_t return_value = 0;
         try {

@@ -1,6 +1,7 @@
 // jit/jit_stdlib_integration.cpp - JIT 标准库函数集成实现
 
 #include "jit_stdlib_integration.h"
+#include "jit_runtime.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -85,7 +86,7 @@ void JitStdlibCompiler::emit_ext_call(Emitter* emitter, int opcode, size_t arg_c
 }
 
 // 显式实例化模板以避免链接错误
-template void JitStdlibCompiler::emit_ext_call<class std::nullptr_t>(
+template void JitStdlibCompiler::emit_ext_call<std::nullptr_t>(
     std::nullptr_t*, int, size_t);
 
 // ============================================================================
@@ -121,6 +122,16 @@ void jit_ext_print(void* value) {
 void jit_ext_println(void* value) {
     jit_ext_print(value);
     std::cout << "\n";
+}
+
+// print_i64(value) - 打印整数
+void jit_ext_print_i64(int64_t value) {
+    std::cout << value;
+}
+
+// println_i64(value) - 打印整数并换行
+void jit_ext_println_i64(int64_t value) {
+    std::cout << value << "\n";
 }
 
 // input() - 读取一行输入
@@ -288,7 +299,7 @@ char* jit_ext_str_substring(const char* s, int64_t start, int64_t len) {
         r[0] = '\0';
         return r;
     }
-    size_t actual_len = (len > 0) ? std::min((size_t)len, slen - start) : slen - start;
+    size_t actual_len = (len > 0) ? std::min(static_cast<size_t>(len), static_cast<size_t>(slen - start)) : static_cast<size_t>(slen - start);
     char* r = new char[actual_len + 1];
     strncpy(r, s + start, actual_len);
     r[actual_len] = '\0';
@@ -579,8 +590,14 @@ char* jit_ext_type_of(void* value) {
 
 static const std::vector<JitRuntimeFunction> g_jit_runtime_functions = {
     // I/O
-    {"print", reinterpret_cast<void*>(&jit_ext_print), 0, "void print(value)"},
-    {"println", reinterpret_cast<void*>(&jit_ext_println), 1, "void println(value)"},
+    {"print", reinterpret_cast<void*>(&jit_ext_print_i64), 0, "void print(int64_t)"},
+    {"println", reinterpret_cast<void*>(&jit_ext_println_i64), 1, "void println(int64_t)"},
+    {"print_i64", reinterpret_cast<void*>(&jit_ext_print_i64), 0, "void print_i64(int64_t)"},
+    {"println_i64", reinterpret_cast<void*>(&jit_ext_println_i64), 1, "void println_i64(int64_t)"},
+    {"print_f64", reinterpret_cast<void*>(&runtime::print_f64), 0, "void print_f64(double)"},
+    {"println_f64", reinterpret_cast<void*>(&runtime::println_f64), 1, "void println_f64(double)"},
+    {"print_str", reinterpret_cast<void*>(&runtime::print_str), 0, "void print_str(const char*)"},
+    {"println_str", reinterpret_cast<void*>(&runtime::println_str), 1, "void println_str(const char*)"},
     {"input", reinterpret_cast<void*>(&jit_ext_input), 2, "string input()"},
     {"input_str", reinterpret_cast<void*>(&jit_ext_input_str), 3, "string input_str(prompt)"},
     {"read_file", reinterpret_cast<void*>(&jit_ext_read_file), 4, "string read_file(filename)"},
@@ -631,16 +648,26 @@ static const std::vector<JitRuntimeFunction> g_jit_runtime_functions = {
     {"random_int", reinterpret_cast<void*>(&jit_ext_random_int), 54, "int random_int(min, max)"},
     {"random_seed", reinterpret_cast<void*>(&jit_ext_random_seed), 55, "void random_seed(seed)"},
 
-    // 数组
-    {"arr_len", reinterpret_cast<void*>(&jit_ext_arr_len), 60, "int arr_len(arr)"},
-    {"arr_push", reinterpret_cast<void*>(&jit_ext_arr_push), 61, "array arr_push(arr, val)"},
-    {"arr_pop", reinterpret_cast<void*>(&jit_ext_arr_pop), 62, "value arr_pop(arr)"},
-    {"arr_sort", reinterpret_cast<void*>(&jit_ext_arr_sort), 65, "void arr_sort(arr)"},
-    {"arr_reverse", reinterpret_cast<void*>(&jit_ext_arr_reverse), 66, "void arr_reverse(arr)"},
-    {"arr_find", reinterpret_cast<void*>(&jit_ext_arr_find), 67, "int arr_find(arr, val)"},
-    {"arr_contains", reinterpret_cast<void*>(&jit_ext_arr_contains), 68, "bool arr_contains(arr, val)"},
-    {"arr_concat", reinterpret_cast<void*>(&jit_ext_arr_concat), 70, "array arr_concat(arr1, arr2)"},
-    {"arr_range", reinterpret_cast<void*>(&jit_ext_arr_range), 72, "array arr_range(start, end, step)"},
+    // 数组 / 元组 底层运行时 (供 JIT 调用)
+    {"alloc_array", reinterpret_cast<void*>(&runtime::alloc_array), 56, "void* alloc_array(size, type)"},
+    {"array_get", reinterpret_cast<void*>(&runtime::array_get), 57, "int64_t array_get(arr, idx)"},
+    {"array_set", reinterpret_cast<void*>(&runtime::array_set), 58, "void array_set(arr, idx, val)"},
+    {"array_len", reinterpret_cast<void*>(&runtime::array_len), 59, "int64_t array_len(arr)"},
+    {"array_push", reinterpret_cast<void*>(&runtime::array_push), 60, "void array_push(arr, val)"},
+    {"alloc_tuple", reinterpret_cast<void*>(&runtime::alloc_tuple), 63, "void* alloc_tuple(a, b)"},
+    {"tuple_get", reinterpret_cast<void*>(&runtime::tuple_get), 64, "int64_t tuple_get(t, idx)"},
+    {"tuple_set", reinterpret_cast<void*>(&runtime::tuple_set), 69, "void tuple_set(t, idx, val)"},
+
+    // 数组 高级函数
+    {"arr_len", reinterpret_cast<void*>(&jit_ext_arr_len), 70, "int arr_len(arr)"},
+    {"arr_push", reinterpret_cast<void*>(&jit_ext_arr_push), 71, "array arr_push(arr, val)"},
+    {"arr_pop", reinterpret_cast<void*>(&jit_ext_arr_pop), 72, "value arr_pop(arr)"},
+    {"arr_sort", reinterpret_cast<void*>(&jit_ext_arr_sort), 73, "void arr_sort(arr)"},
+    {"arr_reverse", reinterpret_cast<void*>(&jit_ext_arr_reverse), 74, "void arr_reverse(arr)"},
+    {"arr_find", reinterpret_cast<void*>(&jit_ext_arr_find), 75, "int arr_find(arr, val)"},
+    {"arr_contains", reinterpret_cast<void*>(&jit_ext_arr_contains), 76, "bool arr_contains(arr, val)"},
+    {"arr_concat", reinterpret_cast<void*>(&jit_ext_arr_concat), 77, "array arr_concat(arr1, arr2)"},
+    {"arr_range", reinterpret_cast<void*>(&jit_ext_arr_range), 78, "array arr_range(start, end, step)"},
 
     // 文件
     {"file_exists", reinterpret_cast<void*>(&jit_ext_file_exists), 85, "bool file_exists(path)"},
@@ -657,16 +684,20 @@ static const std::vector<JitRuntimeFunction> g_jit_runtime_functions = {
     {"type_of", reinterpret_cast<void*>(&jit_ext_type_of), 94, "string type_of(value)"},
 };
 
+} // namespace runtime
+
 // ============================================================================
 // 函数查找实现
 // ============================================================================
 
+
+
 const std::vector<JitRuntimeFunction>& get_jit_runtime_functions() {
-    return g_jit_runtime_functions;
+    return runtime::g_jit_runtime_functions;
 }
 
 void* get_runtime_function_by_opcode(int opcode) {
-    for (const auto& func : g_jit_runtime_functions) {
+    for (const auto& func : runtime::g_jit_runtime_functions) {
         if (func.opcode == opcode) {
             return func.address;
         }
@@ -675,7 +706,7 @@ void* get_runtime_function_by_opcode(int opcode) {
 }
 
 void* get_runtime_function_by_name(const std::string& name) {
-    for (const auto& func : g_jit_runtime_functions) {
+    for (const auto& func : runtime::g_jit_runtime_functions) {
         if (func.name == name) {
             return func.address;
         }
@@ -683,6 +714,5 @@ void* get_runtime_function_by_name(const std::string& name) {
     return nullptr;
 }
 
-} // namespace runtime
 } // namespace jit
 } // namespace claw

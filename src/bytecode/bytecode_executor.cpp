@@ -101,7 +101,7 @@ BytecodeExecutionResult BytecodeExecutor::execute_from_source(
     }
     
     // 执行编译和运行
-    return execute(program, verbose);
+    return execute(std::shared_ptr<ast::Program>(std::move(program)), verbose);
 }
 
 std::shared_ptr<bytecode::Module> BytecodeExecutor::compile_to_bytecode(

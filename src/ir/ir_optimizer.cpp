@@ -160,7 +160,7 @@ std::optional<bool> ConstantFoldingPass::fold_float_comparison(OpCode op, double
 }
 
 auto ConstantFoldingPass::try_fold(Instruction& inst)
-    -> std::optional<std::pair<std::shared_ptr<Type>, std::variant<int64_t, double, bool, std::string>>> {
+    -> std::optional<std::pair<std::shared_ptr<Type>, std::variant<int64_t, double, std::string, bool, std::vector<int8_t>>>> {
     // Select 指令: 常量条件 → 选择对应分支
     if (inst.opcode == OpCode::Select) {
         auto* sel = dynamic_cast<SelectInst*>(&inst);
@@ -250,7 +250,7 @@ bool ConstantFoldingPass::run(Function& fn, PassStats& stats) {
                 const_val->constant_value = folded->second;
 
                 // 记录映射以便后续引用替换
-                known_constants_[inst.get()] = folded->second;
+                known_constants_[const_val.get()] = folded->second;
                 stats.constants_folded++;
                 stats.instructions_simplified++;
                 changed = true;
@@ -729,7 +729,7 @@ bool LICMPass::is_safe_to_hoist(const Instruction& inst) {
     // 纯计算 (不读内存, 不写内存, 不抛异常) → 安全
     switch (inst.opcode) {
         case OpCode::Add: case OpCode::Sub: case OpCode::Mul:
-        case OpCode::Div: case OpCode::Mod:
+        
         case OpCode::Eq:  case OpCode::Ne:  case OpCode::Lt:
         case OpCode::Le:  case OpCode::Gt:  case OpCode::Ge:
         case OpCode::And: case OpCode::Or:  case OpCode::Not:
@@ -1003,7 +1003,7 @@ bool InliningPass::should_inline(const Function& caller, const Function& callee,
     if (callee.is_extern) return false;
     if (callee.is_recursive) return false;
     if (depth >= max_inline_depth_) return false;
-    if (count_instructions(callee) > max_inline_size_) return false;
+    if (count_instructions(callee) > static_cast<size_t>(max_inline_size_)) return false;
     return true;
 }
 
@@ -1176,15 +1176,22 @@ void PassManager::configure_defaults(OptLevel level) {
 
     if (level >= OptLevel::O2) {
         passes_.push_back(std::make_unique<CSEPass>());
+        passes_.push_back(std::make_unique<GlobalCSEPass>());
         passes_.push_back(std::make_unique<StrengthReductionPass>());
+        passes_.push_back(std::make_unique<BasicAliasAnalysisPass>());
         passes_.push_back(std::make_unique<LICMPass>());
         passes_.push_back(std::make_unique<DeadStoreEliminationPass>());
         // 内联 pass 需在 Module 级别单独执行
     }
 
     if (level >= OptLevel::O3) {
-        // O3 增加: 更激进的内联 + 多轮迭代
+        // O3 增加: 更激进的内联 + 多轮迭代 + IR 验证
         passes_.push_back(std::make_unique<InliningPass>(100, 4));
+    }
+
+    // 所有级别都在末尾添加 IR 验证 (诊断用)
+    if (level >= OptLevel::O2) {
+        passes_.push_back(std::make_unique<IRVerifierPass>());
     }
 }
 
@@ -1318,6 +1325,368 @@ PassStats optimize_function(Function& fn, OptLevel level) {
     auto stats = pm.run_to_fixedpoint(fn);
     pm.print_summary();
     return stats;
+}
+
+
+// ============================================================================
+// Pass 11: 全局公共子表达式消除 (Global CSE)
+// ============================================================================
+
+bool GlobalCSEPass::is_global_cse_candidate(const Instruction& inst) const {
+    switch (inst.opcode) {
+        case OpCode::Add: case OpCode::Sub: case OpCode::Mul:
+        case OpCode::Div: case OpCode::Mod:
+        case OpCode::And: case OpCode::Or: case OpCode::Not:
+        case OpCode::BitAnd: case OpCode::BitOr: case OpCode::BitXor:
+        case OpCode::BitNot: case OpCode::Shl: case OpCode::Shr:
+        case OpCode::Eq: case OpCode::Ne: case OpCode::Lt:
+        case OpCode::Le: case OpCode::Gt: case OpCode::Ge:
+        case OpCode::Trunc: case OpCode::ZExt: case OpCode::SExt:
+        case OpCode::FPTrunc: case OpCode::FPExt: case OpCode::FPToSI:
+        case OpCode::SIToFP: case OpCode::Select:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool GlobalCSEPass::is_available(const Instruction&, const Instruction&,
+                                  const std::unordered_set<BasicBlock*>&) {
+    return true; // simplified
+}
+
+bool GlobalCSEPass::run(Function& fn, PassStats& stats) {
+    bool changed = false;
+
+    using InstSignature = CSEPass::InstSignature;
+    using InstSignatureHash = CSEPass::InstSignatureHash;
+
+    std::unordered_map<InstSignature, std::shared_ptr<Value>, InstSignatureHash> global_seen;
+    std::unordered_set<Instruction*> to_remove;
+
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (!is_global_cse_candidate(*inst)) continue;
+
+            InstSignature sig;
+            sig.op = inst->opcode;
+            sig.type = inst->type;
+            for (auto& op : inst->operands) {
+                sig.operands.push_back(op.get());
+            }
+
+            auto it = global_seen.find(sig);
+            if (it != global_seen.end()) {
+                to_remove.insert(inst.get());
+                stats.cse_eliminated++;
+                changed = true;
+            } else {
+                auto result = std::make_shared<Value>(inst->name, inst->type);
+                result->defining_inst = inst;
+                global_seen[sig] = result;
+            }
+        }
+    }
+
+    if (!to_remove.empty()) {
+        for (auto& bb : fn.blocks) {
+            bb->instructions.erase(
+                std::remove_if(bb->instructions.begin(), bb->instructions.end(),
+                    [&](const std::shared_ptr<Instruction>& inst) {
+                        return to_remove.count(inst.get()) > 0;
+                    }),
+                bb->instructions.end());
+        }
+    }
+
+    return changed;
+}
+
+// ============================================================================
+// Pass 12: 别名分析 (Basic Alias Analysis)
+// ============================================================================
+
+void BasicAliasAnalysisPass::build_alias_info(Function& fn) {
+    alloca_aliases_.clear();
+    alias_cache_.clear();
+
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (inst->opcode == OpCode::Alloca) {
+                std::unordered_set<Instruction*> aliases;
+                aliases.insert(inst.get());
+                alloca_aliases_[inst.get()] = aliases;
+            }
+        }
+    }
+
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (inst->opcode == OpCode::GetElementPtr) {
+                auto* gep = dynamic_cast<GetElementPtrInst*>(inst.get());
+                if (gep && gep->base) {
+                    // GEP base is a Value; find which Alloca it came from
+                    Instruction* base_inst = nullptr;
+                    if (gep->base->defining_inst.lock()) {
+                        base_inst = gep->base->defining_inst.lock().get();
+                    }
+                    if (base_inst) {
+                        for (auto& [alloca, aliases] : alloca_aliases_) {
+                            if (aliases.count(base_inst)) {
+                                aliases.insert(inst.get());
+                                alloca_aliases_[inst.get()] = aliases;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    analyzed_ = true;
+    current_fn_ = &fn;
+}
+
+AliasResult BasicAliasAnalysisPass::alias_allocas(AllocaInst*, AllocaInst*) {
+    return AliasResult::MayAlias;
+}
+
+AliasResult BasicAliasAnalysisPass::alias_gep(GetElementPtrInst*, Instruction*) {
+    return AliasResult::MayAlias;
+}
+
+AliasResult BasicAliasAnalysisPass::alias(Instruction* v1, Instruction* v2) {
+    if (v1 == v2) return AliasResult::MustAlias;
+    if (!v1 || !v2) return AliasResult::NoAlias;
+
+    auto key = std::make_pair(std::min(v1, v2), std::max(v1, v2));
+    auto it = alias_cache_.find(key);
+    if (it != alias_cache_.end()) return it->second;
+
+    bool v1_found = false, v2_found = false;
+    for (auto& [alloca, aliases] : alloca_aliases_) {
+        bool has_v1 = aliases.count(v1);
+        bool has_v2 = aliases.count(v2);
+        if (has_v1 && has_v2) {
+            alias_cache_[key] = AliasResult::MayAlias;
+            return AliasResult::MayAlias;
+        }
+        v1_found = v1_found || has_v1;
+        v2_found = v2_found || has_v2;
+    }
+
+    if (v1_found && v2_found) {
+        alias_cache_[key] = AliasResult::NoAlias;
+        return AliasResult::NoAlias;
+    }
+
+    alias_cache_[key] = AliasResult::MayAlias;
+    return AliasResult::MayAlias;
+}
+
+bool BasicAliasAnalysisPass::may_access(Instruction* ptr, const std::unordered_set<Instruction*>& locations) {
+    for (auto* loc : locations) {
+        if (alias(ptr, loc) != AliasResult::NoAlias) return true;
+    }
+    return false;
+}
+
+bool BasicAliasAnalysisPass::run(Function& fn, PassStats& stats) {
+    build_alias_info(fn);
+    return false;
+}
+
+// ============================================================================
+// Pass 13: IR 验证器 (IR Verifier)
+// ============================================================================
+
+std::shared_ptr<Type> IRVerifierPass::get_value_type(Value* v) {
+    if (!v) return nullptr;
+    return v->type;
+}
+
+void IRVerifierPass::verify_instruction(Instruction& inst, BasicBlock& bb) {
+    for (size_t i = 0; i < inst.operands.size(); i++) {
+        if (!inst.operands[i]) {
+            errors_.push_back("  " + inst.name + ": operand " + std::to_string(i) + " is null");
+        }
+    }
+
+    if (inst.opcode == OpCode::Phi) {
+        auto* phi = dynamic_cast<PhiInst*>(&inst);
+        if (phi && phi->incoming.empty()) {
+            errors_.push_back("  " + inst.name + ": PHI node with no incoming values");
+        }
+    }
+
+    if (inst.opcode == OpCode::DynamicCast) {
+        auto* dyncast = dynamic_cast<DynamicCastInst*>(&inst);
+        if (dyncast && !dyncast->value) {
+            errors_.push_back("  " + inst.name + ": DynamicCast with null value");
+        }
+        if (dyncast && !dyncast->target_type) {
+            errors_.push_back("  " + inst.name + ": DynamicCast with null target_type");
+        }
+    }
+
+    if (inst.opcode == OpCode::Instanceof) {
+        auto* instof = dynamic_cast<InstanceofInst*>(&inst);
+        if (instof && !instof->value) {
+            errors_.push_back("  " + inst.name + ": Instanceof with null value");
+        }
+        if (instof && !instof->check_type) {
+            errors_.push_back("  " + inst.name + ": Instanceof with null check_type");
+        }
+    }
+
+    if (inst.opcode == OpCode::Store) {
+        auto* store = dynamic_cast<StoreInst*>(&inst);
+        if (store && (!store->address || !store->value)) {
+            errors_.push_back("  " + inst.name + ": Store with null address or value");
+        }
+    }
+
+    if (inst.opcode == OpCode::Call) {
+        auto* call = dynamic_cast<CallInst*>(&inst);
+        if (call && call->callee_name.empty()) {
+            warnings_.push_back("  " + inst.name + ": Call with empty callee_name");
+        }
+    }
+}
+
+void IRVerifierPass::verify_block(BasicBlock& bb) {
+    if (bb.instructions.empty()) {
+        warnings_.push_back("  Block '" + bb.name + "' is empty");
+    }
+
+    bool has_terminator = false;
+    for (auto& inst : bb.instructions) {
+        switch (inst->opcode) {
+            case OpCode::Ret: case OpCode::Br: case OpCode::CondBr:
+            case OpCode::Unreachable:
+                has_terminator = true;
+                break;
+            default:
+                break;
+        }
+        verify_instruction(*inst, bb);
+    }
+
+    if (!has_terminator && !bb.terminator) {
+        warnings_.push_back("  Block '" + bb.name + "' has no terminator");
+    }
+}
+
+void IRVerifierPass::verify_types(Function& fn) {
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (!inst->type && inst->opcode != OpCode::Store && inst->opcode != OpCode::Br
+                && inst->opcode != OpCode::CondBr && inst->opcode != OpCode::Ret
+                && inst->opcode != OpCode::Memset) {
+                warnings_.push_back("  " + inst->name + " (" +
+                    inst->get_op_name() + "): missing result type");
+            }
+        }
+    }
+}
+
+void IRVerifierPass::verify_ssa(Function& fn) {
+    std::unordered_set<std::string> defined;
+    for (auto& arg : fn.arguments) {
+        if (arg) defined.insert(arg->name);
+    }
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (!inst->name.empty()) {
+                if (defined.count(inst->name) && inst->opcode != OpCode::Phi) {
+                    warnings_.push_back("  SSA violation: '" + inst->name +
+                        "' defined multiple times");
+                }
+                defined.insert(inst->name);
+            }
+        }
+    }
+}
+
+void IRVerifierPass::verify_control_flow(Function& fn) {
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (inst->opcode == OpCode::CondBr) {
+                auto* cbr = dynamic_cast<CondBranchInst*>(inst.get());
+                if (cbr) {
+                    if (!cbr->true_block) {
+                        errors_.push_back("  CondBr in '" + bb->name + "': null true_block");
+                    }
+                    if (!cbr->false_block) {
+                        errors_.push_back("  CondBr in '" + bb->name + "': null false_block");
+                    }
+                }
+            }
+            if (inst->opcode == OpCode::Br) {
+                auto* br_inst = dynamic_cast<BranchInst*>(inst.get());
+                if (br_inst && !br_inst->target) {
+                    errors_.push_back("  Br in '" + bb->name + "': null target");
+                }
+            }
+        }
+    }
+}
+
+void IRVerifierPass::verify_phi_nodes(Function& fn) {
+    for (auto& bb : fn.blocks) {
+        for (auto& inst : bb->instructions) {
+            if (inst->opcode == OpCode::Phi) {
+                auto* phi = dynamic_cast<PhiInst*>(inst.get());
+                if (!phi) continue;
+                auto pred_count = bb->predecessors.size();
+                if (pred_count > 0 && phi->incoming.size() != pred_count) {
+                    warnings_.push_back("  PHI '" + inst->name + "' in block '" +
+                        bb->name + "': " + std::to_string(phi->incoming.size()) +
+                        " incoming values but " + std::to_string(pred_count) +
+                        " predecessors");
+                }
+            }
+        }
+    }
+}
+
+bool IRVerifierPass::run(Function& fn, PassStats& stats) {
+    errors_.clear();
+    warnings_.clear();
+
+    if (fn.blocks.empty()) {
+        errors_.push_back("Function '" + fn.name + "' has no basic blocks");
+        return false;
+    }
+
+    verify_types(fn);
+    verify_ssa(fn);
+    verify_control_flow(fn);
+    verify_phi_nodes(fn);
+
+    for (auto& bb : fn.blocks) {
+        verify_block(*bb);
+    }
+
+    if (!errors_.empty()) {
+        std::cerr << "[IRVerifier] Errors in function '" << fn.name << "':\n";
+        for (auto& e : errors_) std::cerr << "  ERROR: " << e << "\n";
+    }
+    if (!warnings_.empty()) {
+        std::cerr << "[IRVerifier] Warnings in function '" << fn.name << "':\n";
+        for (auto& w : warnings_) std::cerr << "  WARN: " << w << "\n";
+    }
+
+    return errors_.empty();
+}
+
+bool IRVerifierPass::run(Module& mod, PassStats& stats) {
+    bool all_valid = true;
+    for (auto& fn : mod.functions) {
+        if (!run(*fn, stats)) all_valid = false;
+    }
+    return all_valid;
 }
 
 } // namespace ir

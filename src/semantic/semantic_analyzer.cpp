@@ -76,7 +76,7 @@ void SymbolTable::exit_scope() {
     }
 }
 
-bool SymbolTable::define(const std::string& name, SymbolKind kind, TypePtr type,
+bool SymbolTable::define(const std::string& name, SymbolKind kind, claw::type::TypePtr type,
                          ast::ASTNode* def, bool is_mutable) {
     Symbol symbol(name, kind, type, def, current_scope());
     symbol.is_mutable = is_mutable;
@@ -117,10 +117,10 @@ std::vector<Symbol*> SymbolTable::get_captured_variables() {
         Scope* scope = stack.top();
         stack.pop();
         
-        for (auto& [name, symbol] : scope->symbols()) {
-            if (symbol.is_captured && !seen.count(name)) {
-                seen.insert(name);
-                result.push_back(&symbol);
+        for (auto& [sname, symbol] : scope->symbols()) {
+            if (symbol.is_captured && !seen.count(sname)) {
+                seen.insert(sname);
+                result.push_back(const_cast<Symbol*>(&symbol));
             }
         }
         
@@ -169,58 +169,63 @@ void SemanticAnalyzer::report_note(const std::string& msg, const SourceSpan& spa
 
 void SemanticAnalyzer::visit_program(ast::Program* program) {
     // First pass: collect all function declarations
-    for (auto& stmt : program->statements) {
-        if (auto* func = dynamic_cast<ast::FunctionDecl*>(stmt.get())) {
+    for (auto& stmt : program->get_declarations()) {
+        if (auto* func = dynamic_cast<ast::FunctionStmt*>(stmt.get())) {
             // Register function in global scope
-            TypePtr func_type = Type::create_function({}, Type::create_unit());
-            symbol_table_->define(func->name, SymbolKind::Function, func_type, func, false);
+            claw::type::TypePtr func_type = claw::type::Type::unit();
+            symbol_table_->define(func->get_name(), SymbolKind::Function, func_type, func, false);
         }
     }
     
     // Second pass: analyze each statement
-    for (auto& stmt : program->statements) {
+    for (auto& stmt : program->get_declarations()) {
         visit_statement(stmt.get());
     }
 }
 
-void SemanticAnalyzer::visit_function(ast::FunctionDecl* func) {
+void SemanticAnalyzer::visit_function(ast::FunctionStmt* func) {
     // Enter function scope
-    symbol_table_->enter_scope(func->name);
-    symbol_table_->set_function(func->name);
+    symbol_table_->enter_scope(func->get_name());
+    symbol_table_->set_function(func->get_name());
     
     // Determine return type
-    TypePtr return_type = Type::create_unit();  // Default unit
-    if (func->return_type) {
-        // Parse return type - simplified for now
-        return_type = Type::create_primitive(func->return_type.value().name);
+    claw::type::TypePtr return_type = claw::type::Type::unit();  // Default unit
+    const auto& ret_str = func->get_return_type();
+    if (!ret_str.empty()) {
+        // Simple mapping from string to type
+        return_type = claw::type::Type::unknown();
     }
     symbol_table_->set_return_type(return_type);
     
     // Analyze parameters
-    for (auto& param : func->params) {
-        visit_parameter(param.get());
+    for (auto& param : func->get_params()) {
+        visit_parameter(param.first, param.second);
     }
     
     // Analyze function body
-    if (func->body) {
-        visit_block(func->body.get());
+    if (func->get_body()) {
+        if (auto* block = dynamic_cast<ast::BlockStmt*>(func->get_body())) {
+            visit_block(block);
+        } else {
+            visit_statement(static_cast<ast::Statement*>(func->get_body()));
+        }
     }
     
     symbol_table_->clear_function();
     symbol_table_->exit_scope();
 }
 
-void SemanticAnalyzer::visit_parameter(ast::ParamDecl* param) {
-    TypePtr param_type = Type::create_primitive("i64");  // Default
+void SemanticAnalyzer::visit_parameter(const std::string& name, const std::string& type_name) {
+    claw::type::TypePtr param_type = claw::type::Type::unknown();
     
-    if (param->type_annotation) {
-        param_type = Type::create_primitive(param->type_annotation.value().name);
+    if (!type_name.empty()) {
+        param_type = claw::type::Type::unknown();
     }
     
-    symbol_table_->define(param->name, SymbolKind::Parameter, param_type, param, false);
+    symbol_table_->define(name, SymbolKind::Parameter, param_type, nullptr, false);
     
     // Mark parameter as initialized
-    symbol_table_->current_scope()->mark_initialized(param->name);
+    symbol_table_->current_scope()->mark_initialized(name);
 }
 
 // ============================================================================
@@ -238,8 +243,6 @@ void SemanticAnalyzer::visit_statement(ast::Statement* stmt) {
         visit_while(while_stmt);
     } else if (auto* for_stmt = dynamic_cast<ast::ForStmt*>(stmt)) {
         visit_for(for_stmt);
-    } else if (auto* loop_stmt = dynamic_cast<ast::LoopStmt*>(stmt)) {
-        visit_loop(loop_stmt);
     } else if (auto* ret = dynamic_cast<ast::ReturnStmt*>(stmt)) {
         visit_return(ret);
     } else if (auto* brk = dynamic_cast<ast::BreakStmt*>(stmt)) {
@@ -264,7 +267,7 @@ void SemanticAnalyzer::visit_statement(ast::Statement* stmt) {
 void SemanticAnalyzer::visit_block(ast::BlockStmt* block) {
     symbol_table_->enter_scope("block");
     
-    for (auto& stmt : block->statements) {
+    for (auto& stmt : block->get_statements()) {
         visit_statement(stmt.get());
     }
     
@@ -272,19 +275,22 @@ void SemanticAnalyzer::visit_block(ast::BlockStmt* block) {
 }
 
 void SemanticAnalyzer::visit_if(ast::IfStmt* if_stmt) {
-    // Analyze condition
-    if (if_stmt->condition) {
-        visit_expression(if_stmt->condition.get());
-    }
+    // Analyze conditions and branches
+    const auto& conditions = if_stmt->get_conditions();
+    const auto& bodies = if_stmt->get_bodies();
     
-    // Analyze then branch
-    if (if_stmt->then_branch) {
-        visit_statement(if_stmt->then_branch.get());
+    for (size_t i = 0; i < conditions.size() && i < bodies.size(); i++) {
+        if (conditions[i]) {
+            visit_expression(conditions[i].get());
+        }
+        if (bodies[i]) {
+            visit_statement(static_cast<ast::Statement*>(bodies[i].get()));
+        }
     }
     
     // Analyze else branch
-    if (if_stmt->else_branch) {
-        visit_statement(if_stmt->else_branch.get());
+    if (if_stmt->get_else_body()) {
+        visit_statement(static_cast<ast::Statement*>(if_stmt->get_else_body()));
     }
 }
 
@@ -292,13 +298,13 @@ void SemanticAnalyzer::visit_while(ast::WhileStmt* while_stmt) {
     symbol_table_->enter_loop();
     
     // Analyze condition
-    if (while_stmt->condition) {
-        visit_expression(while_stmt->condition.get());
+    if (while_stmt->get_condition()) {
+        visit_expression(while_stmt->get_condition());
     }
     
     // Analyze body
-    if (while_stmt->body) {
-        visit_statement(while_stmt->body.get());
+    if (while_stmt->get_body()) {
+        visit_statement(static_cast<ast::Statement*>(while_stmt->get_body()));
     }
     
     symbol_table_->exit_loop();
@@ -309,32 +315,19 @@ void SemanticAnalyzer::visit_for(ast::ForStmt* for_stmt) {
     symbol_table_->enter_scope("for");
     
     // Analyze iterator expression
-    if (for_stmt->iterable) {
-        visit_expression(for_stmt->iterable.get());
+    if (for_stmt->get_iterable()) {
+        visit_expression(for_stmt->get_iterable());
     }
     
     // Define loop variable
-    TypePtr var_type = Type::create_primitive("i64");
-    symbol_table_->define(for_stmt->var_name, SymbolKind::Variable, var_type, 
+    claw::type::TypePtr var_type = claw::type::Type::unknown();
+    symbol_table_->define(for_stmt->get_variable(), SymbolKind::Variable, var_type, 
                           for_stmt, false);
-    symbol_table_->current_scope()->mark_initialized(for_stmt->var_name);
+    symbol_table_->current_scope()->mark_initialized(for_stmt->get_variable());
     
     // Analyze body
-    if (for_stmt->body) {
-        visit_statement(for_stmt->body.get());
-    }
-    
-    symbol_table_->exit_scope();
-    symbol_table_->exit_loop();
-}
-
-void SemanticAnalyzer::visit_loop(ast::LoopStmt* loop_stmt) {
-    symbol_table_->enter_loop();
-    symbol_table_->enter_scope("loop");
-    
-    // Analyze body
-    if (loop_stmt->body) {
-        visit_statement(loop_stmt->body.get());
+    if (for_stmt->get_body()) {
+        visit_statement(static_cast<ast::Statement*>(for_stmt->get_body()));
     }
     
     symbol_table_->exit_scope();
@@ -343,155 +336,178 @@ void SemanticAnalyzer::visit_loop(ast::LoopStmt* loop_stmt) {
 
 void SemanticAnalyzer::visit_return(ast::ReturnStmt* ret) {
     if (!symbol_table_->in_function()) {
-        report_error("return statement outside of function", ret->span);
+        report_error("return statement outside of function", ret->get_span());
         return;
     }
     
     // Check return value type
-    if (ret->value) {
-        visit_expression(ret->value.get());
+    if (ret->get_value()) {
+        visit_expression(ret->get_value());
         
-        TypePtr expected = symbol_table_->current_return_type();
-        TypePtr actual = infer_expression_type(ret->value.get());
+        claw::type::TypePtr expected = symbol_table_->current_return_type();
+        claw::type::TypePtr actual = infer_expression_type(ret->get_value());
         
-        if (expected && actual && !check_compatibility(expected, actual, ret->span)) {
-            report_error("return type mismatch", ret->span);
+        if (expected && actual && !check_compatibility(expected, actual, ret->get_span())) {
+            report_error("return type mismatch", ret->get_span());
         }
     } else {
         // Return unit if no value
-        TypePtr expected = symbol_table_->current_return_type();
-        if (expected && expected->kind() != TypeKind::Unit) {
-            report_error("expected return value", ret->span);
+        claw::type::TypePtr expected = symbol_table_->current_return_type();
+        if (expected && expected->kind != claw::type::TypeKind::UNIT) {
+            report_error("expected return value", ret->get_span());
         }
     }
 }
 
 void SemanticAnalyzer::visit_break(ast::BreakStmt* brk) {
     if (symbol_table_->loop_depth() == 0) {
-        report_error("break statement outside of loop", brk->span);
+        report_error("break statement outside of loop", brk->get_span());
     }
 }
 
 void SemanticAnalyzer::visit_continue(ast::ContinueStmt* cont) {
     if (symbol_table_->loop_depth() == 0) {
-        report_error("continue statement outside of loop", cont->span);
+        report_error("continue statement outside of loop", cont->get_span());
     }
 }
 
 void SemanticAnalyzer::visit_let(ast::LetStmt* let) {
     // Determine variable type
-    TypePtr var_type = Type::create_primitive("i64");  // Default
-    
-    if (let->type_annotation) {
-        var_type = Type::create_primitive(let->type_annotation.value().name);
+    claw::type::TypePtr var_type = claw::type::Type::unknown();
+
+    const auto& type_str = let->get_type();
+    if (!type_str.empty()) {
+        var_type = claw::type::Type::unknown();
     }
-    
-    // Define variable in current scope
-    bool success = symbol_table_->define(let->name, SymbolKind::Variable, var_type, let, let->is_mutable);
-    
-    if (!success) {
-        report_error("variable '" + let->name + "' already defined", let->span);
+
+    // Tuple destructuring: let (a, b) = expr
+    if (let->is_tuple_destructuring()) {
+        for (const auto& name : let->get_tuple_names()) {
+            if (name == "_") continue; // skip discard placeholder
+            bool success = symbol_table_->define(name, SymbolKind::Variable, var_type, let, true);
+            if (!success) {
+                report_error("variable '" + name + "' already defined", let->get_span());
+                return;
+            }
+        }
+
+        if (let->get_initializer()) {
+            visit_expression(let->get_initializer());
+            claw::type::TypePtr init_type = infer_expression_type(let->get_initializer());
+            if (init_type && !check_compatibility(var_type, init_type, let->get_span())) {
+                report_error("type mismatch in initialization", let->get_span());
+            }
+            for (const auto& name : let->get_tuple_names()) {
+                if (name == "_") continue;
+                symbol_table_->current_scope()->mark_initialized(name);
+            }
+        }
         return;
     }
-    
+
+    // Define variable in current scope (always mutable for let bindings)
+    bool success = symbol_table_->define(let->get_name(), SymbolKind::Variable, var_type, let, true);
+
+    if (!success) {
+        report_error("variable '" + let->get_name() + "' already defined", let->get_span());
+        return;
+    }
+
     // Check initialization
-    if (let->initializer) {
-        visit_expression(let->initializer.get());
-        
-        TypePtr init_type = infer_expression_type(let->initializer.get());
-        if (init_type && !check_compatibility(var_type, init_type, let->span)) {
-            report_error("type mismatch in initialization", let->span);
+    if (let->get_initializer()) {
+        visit_expression(let->get_initializer());
+
+        claw::type::TypePtr init_type = infer_expression_type(let->get_initializer());
+        if (init_type && !check_compatibility(var_type, init_type, let->get_span())) {
+            report_error("type mismatch in initialization", let->get_span());
         }
-        
+
         // Mark as initialized
-        symbol_table_->current_scope()->mark_initialized(let->name);
+        symbol_table_->current_scope()->mark_initialized(let->get_name());
     }
 }
 
 void SemanticAnalyzer::visit_assign(ast::AssignStmt* assign) {
-    // Check if variable exists
-    Symbol* sym = symbol_table_->lookup(assign->target);
-    if (!sym) {
-        report_error("undefined variable: " + assign->target, assign->span);
-        return;
+    // Check if variable exists - target is an Expression, extract name if identifier
+    std::string target_name;
+    if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(assign->get_target())) {
+        target_name = ident->get_name();
     }
     
-    if (!sym->is_mutable) {
-        report_error("cannot assign to immutable variable: " + assign->target, assign->span);
-        return;
-    }
-    
-    // Analyze value
-    if (assign->value) {
-        visit_expression(assign->value.get());
+    if (!target_name.empty()) {
+        Symbol* sym = symbol_table_->lookup(target_name);
+        if (!sym) {
+            report_error("undefined variable: " + target_name, assign->get_span());
+            return;
+        }
         
-        TypePtr target_type = sym->type;
-        TypePtr value_type = infer_expression_type(assign->value.get());
-        
-        if (target_type && value_type && !check_compatibility(target_type, value_type, assign->span)) {
-            report_error("type mismatch in assignment", assign->span);
+        if (!sym->is_mutable) {
+            report_error("cannot assign to immutable variable: " + target_name, assign->get_span());
+            return;
         }
         
         // Mark as initialized
-        symbol_table_->current_scope()->mark_initialized(assign->target);
+        symbol_table_->current_scope()->mark_initialized(target_name);
+    }
+    
+    // Analyze target and value
+    visit_expression(assign->get_target());
+    if (assign->get_value()) {
+        visit_expression(assign->get_value());
     }
 }
 
 void SemanticAnalyzer::visit_expr_stmt(ast::ExprStmt* expr_stmt) {
-    if (expr_stmt->expression) {
-        visit_expression(expr_stmt->expression.get());
+    if (expr_stmt->get_expr()) {
+        visit_expression(expr_stmt->get_expr());
     }
 }
 
 void SemanticAnalyzer::visit_match(ast::MatchStmt* match) {
     // Analyze match expression
-    if (match->subject) {
-        visit_expression(match->subject.get());
+    if (match->get_expr()) {
+        visit_expression(match->get_expr());
     }
     
     // Analyze each arm
-    for (auto& arm : match->arms) {
-        if (arm->pattern) {
-            visit_expression(arm->pattern.get());
+    const auto& patterns = match->get_patterns();
+    const auto& bodies = match->get_bodies();
+    for (size_t i = 0; i < patterns.size() && i < bodies.size(); i++) {
+        if (patterns[i]) {
+            visit_expression(patterns[i].get());
         }
-        if (arm->body) {
-            visit_statement(arm->body.get());
+        if (bodies[i]) {
+            visit_statement(static_cast<ast::Statement*>(bodies[i].get()));
         }
     }
 }
 
 void SemanticAnalyzer::visit_publish(ast::PublishStmt* pub) {
-    // Analyze event name
-    if (pub->event_name) {
-        visit_expression(pub->event_name.get());
-    }
-    
-    // Analyze payload
-    if (pub->payload) {
-        visit_expression(pub->payload.get());
+    // Analyze arguments
+    for (auto& arg : pub->get_arguments()) {
+        visit_expression(arg.get());
     }
 }
 
 void SemanticAnalyzer::visit_subscribe(ast::SubscribeStmt* sub) {
-    // Analyze event name
-    if (sub->event_name) {
-        visit_expression(sub->event_name.get());
-    }
-    
     // Enter handler scope
     symbol_table_->enter_scope("subscribe_handler");
     
-    // Define event parameter if present
-    if (sub->param_name) {
-        TypePtr param_type = Type::create_primitive("any");
-        symbol_table_->define(sub->param_name.value(), SymbolKind::Parameter, 
-                             param_type, sub, false);
-        symbol_table_->current_scope()->mark_initialized(sub->param_name.value());
-    }
-    
-    // Analyze handler body
-    if (sub->handler) {
-        visit_statement(sub->handler.get());
+    // Analyze handler parameters and body
+    if (sub->get_handler()) {
+        // Register handler parameters
+        for (auto& param : sub->get_handler()->get_params()) {
+            visit_parameter(param.first, param.second);
+        }
+        
+        // Analyze handler body
+        if (sub->get_handler()->get_body()) {
+            if (auto* block = dynamic_cast<ast::BlockStmt*>(sub->get_handler()->get_body())) {
+                visit_block(block);
+            } else {
+                visit_statement(static_cast<ast::Statement*>(sub->get_handler()->get_body()));
+            }
+        }
     }
     
     symbol_table_->exit_scope();
@@ -509,6 +525,7 @@ void SemanticAnalyzer::visit_expression(ast::Expression* expr) {
     } else if (auto* lit = dynamic_cast<ast::LiteralExpr*>(expr)) {
         visit_literal(lit);
     } else if (auto* bin = dynamic_cast<ast::BinaryExpr*>(expr)) {
+    (void)bin;
         visit_binary(bin);
     } else if (auto* un = dynamic_cast<ast::UnaryExpr*>(expr)) {
         visit_unary(un);
@@ -524,84 +541,73 @@ void SemanticAnalyzer::visit_expression(ast::Expression* expr) {
         visit_array(arr);
     } else if (auto* tup = dynamic_cast<ast::TupleExpr*>(expr)) {
         visit_tuple(tup);
-    } else if (auto* ref = dynamic_cast<ast::RefExpr*>(expr)) {
-        visit_ref(ref);
     }
 }
 
 void SemanticAnalyzer::visit_identifier(ast::IdentifierExpr* ident) {
-    Symbol* sym = symbol_table_->lookup(ident->name);
+    Symbol* sym = symbol_table_->lookup(ident->get_name());
     if (!sym) {
-        report_error("undefined identifier: " + ident->name, ident->span);
+        report_error("undefined identifier: " + ident->get_name(), ident->get_span());
         return;
     }
     
     // Check initialization for variables
     if (sym->kind == SymbolKind::Variable && !sym->is_initialized) {
-        if (!symbol_table_->current_scope()->is_initialized(ident->name)) {
-            report_warning("variable used before initialization: " + ident->name, ident->span);
+        if (!symbol_table_->current_scope()->is_initialized(ident->get_name())) {
+            report_warning("variable used before initialization: " + ident->get_name(), ident->get_span());
         }
     }
 }
 
 void SemanticAnalyzer::visit_literal(ast::LiteralExpr* lit) {
     // Literals are self-typed, no analysis needed
-    // The type is determined by the literal value
-    (void)lit;  // Suppress unused warning
+    (void)lit;
 }
 
 void SemanticAnalyzer::visit_binary(ast::BinaryExpr* bin) {
     // Analyze operands
-    if (bin->left) visit_expression(bin->left.get());
-    if (bin->right) visit_expression(bin->right.get());
-    
-    // Check operator compatibility
-    // This is a simplified check - full implementation would check
-    // that the operator is valid for the operand types
+    if (bin->get_left()) visit_expression(bin->get_left());
+    if (bin->get_right()) visit_expression(bin->get_right());
 }
 
 void SemanticAnalyzer::visit_unary(ast::UnaryExpr* un) {
-    if (un->operand) {
-        visit_expression(un->operand.get());
+    if (un->get_operand()) {
+        visit_expression(un->get_operand());
     }
 }
 
 void SemanticAnalyzer::visit_call(ast::CallExpr* call) {
     // Analyze function being called
-    if (call->callee) {
-        visit_expression(call->callee.get());
+    if (call->get_callee()) {
+        visit_expression(call->get_callee());
     }
     
     // Analyze arguments
-    for (auto& arg : call->arguments) {
+    for (auto& arg : call->get_arguments()) {
         visit_expression(arg.get());
     }
     
     // Check that function exists
-    if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(call->callee.get())) {
-        Symbol* sym = symbol_table_->lookup(ident->name);
+    if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(call->get_callee())) {
+        Symbol* sym = symbol_table_->lookup(ident->get_name());
         if (!sym || (sym->kind != SymbolKind::Function && sym->kind != SymbolKind::Parameter)) {
-            report_warning("calling undefined function: " + ident->name, call->span);
+            report_warning("calling undefined function: " + ident->get_name(), call->get_span());
         }
     }
 }
 
 void SemanticAnalyzer::visit_index(ast::IndexExpr* idx) {
-    // Analyze indexed expression
-    if (idx->object) {
-        visit_expression(idx->object.get());
+    if (idx->get_object()) {
+        visit_expression(idx->get_object());
     }
-    
-    // Analyze index expression
-    if (idx->index) {
-        visit_expression(idx->index.get());
+    if (idx->get_index()) {
+        visit_expression(idx->get_index());
     }
 }
 
 void SemanticAnalyzer::visit_member(ast::MemberExpr* member) {
-    // Analyze object
-    if (member->object) {
-        visit_expression(member->object.get());
+    if (member->get_object()) {
+        visit_expression(member->get_object());
     }
 }
 
@@ -609,45 +615,33 @@ void SemanticAnalyzer::visit_lambda(ast::LambdaExpr* lambda) {
     symbol_table_->enter_scope("lambda");
     
     // Analyze parameters
-    for (auto& param : lambda->params) {
-        TypePtr param_type = Type::create_primitive("i64");  // Default
-        symbol_table_->define(param->name, SymbolKind::Parameter, param_type, param, false);
+    for (auto& param : lambda->get_params()) {
+        claw::type::TypePtr param_type = claw::type::Type::unknown();
+        symbol_table_->define(param.first, SymbolKind::Parameter, param_type, nullptr, false);
+        symbol_table_->current_scope()->mark_initialized(param.first);
     }
     
     // Analyze body
-    if (lambda->body) {
-        visit_statement(lambda->body.get());
+    if (lambda->get_body()) {
+        if (auto* block = dynamic_cast<ast::BlockStmt*>(lambda->get_body())) {
+            visit_block(block);
+        } else {
+            visit_statement(static_cast<ast::Statement*>(lambda->get_body()));
+        }
     }
     
     symbol_table_->exit_scope();
 }
 
 void SemanticAnalyzer::visit_array(ast::ArrayExpr* arr) {
-    // Analyze each element
-    for (auto& elem : arr->elements) {
+    for (auto& elem : arr->get_elements()) {
         visit_expression(elem.get());
     }
 }
 
 void SemanticAnalyzer::visit_tuple(ast::TupleExpr* tup) {
-    // Analyze each element
-    for (auto& elem : tup->elements) {
+    for (auto& elem : tup->get_elements()) {
         visit_expression(elem.get());
-    }
-}
-
-void SemanticAnalyzer::visit_ref(ast::RefExpr* ref) {
-    // Analyze referenced expression
-    if (ref->expression) {
-        visit_expression(ref->expression.get());
-        
-        // Check that the referenced variable is initialized
-        if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(ref->expression.get())) {
-            Symbol* sym = symbol_table_->lookup(ident->name);
-            if (sym && !symbol_table_->current_scope()->is_initialized(ident->name)) {
-                report_warning("referencing potentially uninitialized variable", ref->span);
-            }
-        }
     }
 }
 
@@ -655,95 +649,83 @@ void SemanticAnalyzer::visit_ref(ast::RefExpr* ref) {
 // Type Checking Helpers
 // ============================================================================
 
-TypePtr SemanticAnalyzer::infer_expression_type(ast::Expression* expr) {
+claw::type::TypePtr SemanticAnalyzer::infer_expression_type(ast::Expression* expr) {
     if (!expr) return nullptr;
     
     // Infer type based on expression type
     if (auto* lit = dynamic_cast<ast::LiteralExpr*>(expr)) {
-        switch (lit->literal_type) {
-            case ast::LiteralType::Integer:
-                return Type::create_primitive("i64");
-            case ast::LiteralType::Float:
-                return Type::create_primitive("f64");
-            case ast::LiteralType::String:
-                return Type::create_primitive("str");
-            case ast::LiteralType::Boolean:
-                return Type::create_primitive("bool");
-            case ast::LiteralType::Char:
-                return Type::create_primitive("char");
-            default:
-                return Type::create_primitive("any");
+        const auto& val = lit->get_value();
+        if (std::holds_alternative<int64_t>(val)) {
+            return claw::type::Type::int64();
+        } else if (std::holds_alternative<double>(val)) {
+            return claw::type::Type::float64();
+        } else if (std::holds_alternative<std::string>(val)) {
+            return claw::type::Type::string();
+        } else if (std::holds_alternative<bool>(val)) {
+            return claw::type::Type::boolean();
+        } else if (std::holds_alternative<char>(val)) {
+            return claw::type::Type::unknown();
         }
+        return claw::type::Type::unknown();
     }
     
     if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(expr)) {
-        Symbol* sym = symbol_table_->lookup(ident->name);
+        Symbol* sym = symbol_table_->lookup(ident->get_name());
         if (sym) return sym->type;
         return nullptr;
     }
     
     if (auto* bin = dynamic_cast<ast::BinaryExpr*>(expr)) {
         // Binary operators return numeric types for arithmetic
-        return Type::create_primitive("i64");
+        return claw::type::Type::int64();
     }
     
     if (auto* un = dynamic_cast<ast::UnaryExpr*>(expr)) {
-        return infer_expression_type(un->operand.get());
+        return infer_expression_type(un->get_operand());
     }
     
     if (auto* call = dynamic_cast<ast::CallExpr*>(expr)) {
-        if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(call->callee.get())) {
-            Symbol* sym = symbol_table_->lookup(ident->name);
+        if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(call->get_callee())) {
+            Symbol* sym = symbol_table_->lookup(ident->get_name());
             if (sym) return sym->type;
         }
-        return Type::create_primitive("any");
+        return claw::type::Type::unknown();
     }
     
-    if (auto* arr = dynamic_cast<ast::ArrayExpr*>(expr)) {
-        if (!arr->elements.empty()) {
-            TypePtr elem_type = infer_expression_type(arr->elements[0].get());
-            return Type::create_array(elem_type, arr->elements.size());
-        }
-        return Type::create_array(Type::create_primitive("any"), 0);
+    if (dynamic_cast<ast::ArrayExpr*>(expr)) {
+        return claw::type::Type::unknown();
     }
     
-    if (auto* idx = dynamic_cast<ast::IndexExpr*>(expr)) {
-        TypePtr obj_type = infer_expression_type(idx->object.get());
-        if (obj_type && obj_type->kind() == TypeKind::Array) {
-            // Return element type of array
-            return Type::create_primitive("any");
-        }
-        return nullptr;
+    if (dynamic_cast<ast::IndexExpr*>(expr)) {
+        return claw::type::Type::unknown();
     }
     
-    return Type::create_primitive("any");
+    return claw::type::Type::unknown();
 }
 
-bool SemanticAnalyzer::check_assignment(TypePtr target, TypePtr source, const SourceSpan& span) {
+bool SemanticAnalyzer::check_assignment(claw::type::TypePtr target, claw::type::TypePtr source, const SourceSpan& span) {
     return check_compatibility(target, source, span);
 }
 
-bool SemanticAnalyzer::check_compatibility(TypePtr expected, TypePtr actual, const SourceSpan& span) {
+bool SemanticAnalyzer::check_compatibility(claw::type::TypePtr expected, claw::type::TypePtr actual, const SourceSpan& span) {
     if (!expected || !actual) return true;  // Allow if types unknown
     
     // Same type is compatible
-    if (expected->kind() == actual->kind()) return true;
+    if (expected->kind == actual->kind) return true;
     
     // Unit is compatible with anything (void return)
-    if (expected->kind() == TypeKind::Unit) return true;
-    if (actual->kind() == TypeKind::Unit) return true;
+    if (expected->kind == claw::type::TypeKind::UNIT) return true;
+    if (actual->kind == claw::type::TypeKind::UNIT) return true;
     
     // Numeric types are loosely compatible
     bool expected_numeric = expected->is_numeric();
     bool actual_numeric = actual->is_numeric();
     if (expected_numeric && actual_numeric) return true;
     
-    // Any type accepts anything
-    if (expected->kind() == TypeKind::Primitive) {
-        auto* prim = static_cast<const PrimitiveType*>(expected.get());
-        if (prim->type_name == "any") return true;
-    }
+    // Any type accepts anything - check by name
+    if (expected->name == "any" || actual->name == "any") return true;
     
+    (void)span;
     return false;
 }
 

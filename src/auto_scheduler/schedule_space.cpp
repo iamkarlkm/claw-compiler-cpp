@@ -124,8 +124,11 @@ std::string ScheduleDecision::to_string() const {
         case Kind::Unroll: 
             oss << "unroll(" << str_params[0] << ", " << int_params[0] << ")";
             break;
-        case Kind::Parallel: 
+        case Kind::Parallel:
             oss << "parallel(" << str_params[0] << ", " << int_params[0] << ")";
+            break;
+        case Kind::Bind:
+            oss << "bind(" << str_params[0] << ", " << str_params[1] << ")";
             break;
         case Kind::CacheRead: 
             oss << "cache_read(" << str_params[0] << ", " << str_params[1] << ")";

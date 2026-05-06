@@ -238,7 +238,7 @@ private:
     std::vector<PendingJump> pending_jumps_;
     
     // Enable/disable optimizations
-    bool enable_phi_elimination_ = true;
+//    bool enable_phi_elimination_ = true;
     bool enable_constant_pooling_ = true;
     bool enable_cse_ = true;
     

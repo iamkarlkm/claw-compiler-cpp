@@ -1339,12 +1339,24 @@ void LSPServer::extractSymbolsFromStatement(ast::Statement* stmt,
         case ast::Statement::Kind::Let: {
             auto* let = dynamic_cast<ast::LetStmt*>(stmt);
             if (let) {
-                SymbolDefinition sym;
-                sym.name = let->get_name();
-                sym.kind = "variable";
-                sym.type = "let";
-                sym.location = spanToLocation(uri, span);
-                symbols.push_back(sym);
+                if (let->is_tuple_destructuring()) {
+                    for (const auto& name : let->get_tuple_names()) {
+                        if (name == "_") continue;
+                        SymbolDefinition sym;
+                        sym.name = name;
+                        sym.kind = "variable";
+                        sym.type = "let";
+                        sym.location = spanToLocation(uri, span);
+                        symbols.push_back(sym);
+                    }
+                } else {
+                    SymbolDefinition sym;
+                    sym.name = let->get_name();
+                    sym.kind = "variable";
+                    sym.type = "let";
+                    sym.location = spanToLocation(uri, span);
+                    symbols.push_back(sym);
+                }
             }
             break;
         }

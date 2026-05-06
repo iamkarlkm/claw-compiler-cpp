@@ -436,26 +436,42 @@ public:
     
     void set_type(const std::string& type) { type_ = type; }
     void set_name(const std::string& name) { name_ = name; }
-    void set_initializer(std::unique_ptr<Expression> init) { 
-        initializer_ = std::move(init); 
+    void set_initializer(std::unique_ptr<Expression> init) {
+        initializer_ = std::move(init);
     }
-    
+
+    // Tuple destructuring support: let (a, b) = expr
+    void add_tuple_name(const std::string& name) { tuple_names_.push_back(name); }
+    const std::vector<std::string>& get_tuple_names() const { return tuple_names_; }
+    bool is_tuple_destructuring() const { return !tuple_names_.empty(); }
+
     const std::string& get_name() const { return name_; }
     const std::string& get_type() const { return type_; }
     Expression* get_initializer() const { return initializer_.get(); }
-    
+
     std::string to_string() const override {
-        std::string result = "let " + name_;
+        std::string result = "let ";
+        if (is_tuple_destructuring()) {
+            result += "(";
+            for (size_t i = 0; i < tuple_names_.size(); i++) {
+                if (i > 0) result += ", ";
+                result += tuple_names_[i];
+            }
+            result += ")";
+        } else {
+            result += name_;
+        }
         if (!type_.empty()) result += ": " + type_;
         if (initializer_) result += " = " + initializer_->to_string();
         result += ";";
         return result;
     }
-    
+
 private:
     std::string name_;
     std::string type_;
     std::unique_ptr<Expression> initializer_;
+    std::vector<std::string> tuple_names_;
 };
 
 // Const declaration statement
@@ -1085,6 +1101,25 @@ struct TraitMethod {
     SourceSpan span;
     bool has_default_impl = false;
     std::unique_ptr<BlockStmt> default_body;
+
+    TraitMethod() = default;
+    TraitMethod(TraitMethod&&) = default;
+    TraitMethod& operator=(TraitMethod&&) = default;
+    TraitMethod(const TraitMethod& other)
+        : name(other.name), params(other.params), return_type(other.return_type),
+          span(other.span), has_default_impl(other.has_default_impl),
+          default_body(other.default_body ? std::make_unique<BlockStmt>(std::move(*other.default_body)) : nullptr) {}
+    TraitMethod& operator=(const TraitMethod& other) {
+        if (this != &other) {
+            name = other.name;
+            params = other.params;
+            return_type = other.return_type;
+            span = other.span;
+            has_default_impl = other.has_default_impl;
+            default_body = other.default_body ? std::make_unique<BlockStmt>(std::move(*other.default_body)) : nullptr;
+        }
+        return *this;
+    }
 };
 
 class TraitStmt : public Statement {
@@ -1141,6 +1176,25 @@ struct ImplMethod {
     std::unique_ptr<BlockStmt> body;
     SourceSpan span;
     bool is_pub = false;
+
+    ImplMethod() = default;
+    ImplMethod(ImplMethod&&) = default;
+    ImplMethod& operator=(ImplMethod&&) = default;
+    ImplMethod(const ImplMethod& other)
+        : name(other.name), params(other.params), return_type(other.return_type),
+          body(other.body ? std::make_unique<BlockStmt>(std::move(*other.body)) : nullptr),
+          span(other.span), is_pub(other.is_pub) {}
+    ImplMethod& operator=(const ImplMethod& other) {
+        if (this != &other) {
+            name = other.name;
+            params = other.params;
+            return_type = other.return_type;
+            body = other.body ? std::make_unique<BlockStmt>(std::move(*other.body)) : nullptr;
+            span = other.span;
+            is_pub = other.is_pub;
+        }
+        return *this;
+    }
 };
 
 class ImplStmt : public Statement {
@@ -1166,7 +1220,7 @@ public:
         }
         result += " { ";
         for (size_t i = 0; i < methods_.size(); i++) {
-            result += (methods_[i].is_pub ? "pub " : "") + "fn " + methods_[i].name + "(";
+            result += std::string(methods_[i].is_pub ? "pub " : "") + "fn " + methods_[i].name + "(";
             for (size_t j = 0; j < methods_[i].params.size(); j++) {
                 result += methods_[i].params[j].first + ": " + methods_[i].params[j].second;
                 if (j < methods_[i].params.size() - 1) result += ", ";

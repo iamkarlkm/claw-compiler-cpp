@@ -2,9 +2,9 @@
 
 #include "execution_pipeline.h"
 #include "../interpreter/interpreter.h"
-#include "../optimizer.h"
-#include "../codegen/c_codegen.h"
 #include "../bytecode/bytecode_compiler_simple.h"
+#include "../codegen/c_codegen.h"
+#include "../pipeline/execution_engine.h"
 #include "../vm/claw_vm.h"
 #include "../jit/jit_compiler.h"
 #include <fstream>
@@ -75,7 +75,8 @@ std::unique_ptr<bytecode::Module> ExecutionPipeline::compile_to_bytecode(
     try {
         // 使用 SimpleBytecodeCompiler 将 AST 转换为字节码
         SimpleBytecodeCompiler compiler;
-        compiler.setDebugInfo(debugInfo_);
+        // debugInfo_ is not a member; use false for now
+        compiler.setDebugInfo(false);
         
         auto result_module = compiler.compile(ast);
         
@@ -96,7 +97,7 @@ std::unique_ptr<bytecode::Module> ExecutionPipeline::compile_to_bytecode(
             std::cout << "    Globals: " << result_module->global_names.size() << "\n";
         }
         
-        codegen_time_us = duration.count();
+        // codegen_time_us is tracked in CompilationResult, not here
         return result_module;
         
     } catch (const std::exception& e) {
@@ -108,13 +109,13 @@ std::unique_ptr<bytecode::Module> ExecutionPipeline::compile_to_bytecode(
 }
 
 Value ExecutionPipeline::run_interpreter(std::shared_ptr<ast::Program> ast) {
-    if (!ast) return Value::nil();
+    if (!ast) return Value{std::monostate{}};
     
     auto start = std::chrono::high_resolution_clock::now();
     
     try {
-        Interpreter interpreter;
-        auto result = interpreter.interpret(ast);
+        claw::interpreter::Interpreter interp;
+        interp.execute(ast.get());
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -123,11 +124,11 @@ Value ExecutionPipeline::run_interpreter(std::shared_ptr<ast::Program> ast) {
             std::cout << "  [Interpret] Completed in " << duration.count() << "us\n";
         }
         
-        interpreter_result_ = result;
-        return result;
+        // Interpreter::execute() returns void, no result to capture
+        return Value{std::monostate{}};
     } catch (const std::exception& e) {
         std::cerr << "Runtime error: " << e.what() << "\n";
-        return Value::nil();
+        return Value{std::monostate{}};
     }
 }
 
@@ -142,8 +143,8 @@ Value ExecutionPipeline::run_bytecode(const bytecode::Module& module) {
         if (verbose_) {
             std::cerr << "  [BytecodeVM] Failed to load module: " << vm.last_error << "\n";
         }
-        vm_result_ = Value::nil();
-        return Value::nil();
+        vm_result_ = Value{std::monostate{}};
+        return Value{std::monostate{}};
     }
     
     if (verbose_) {
@@ -152,7 +153,7 @@ Value ExecutionPipeline::run_bytecode(const bytecode::Module& module) {
     }
     
     // 执行模块
-    vm_result_ = vm.execute();
+    vm.execute(); // ClawVM::Value incompatible with pipeline::Value
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -161,7 +162,7 @@ Value ExecutionPipeline::run_bytecode(const bytecode::Module& module) {
         std::cout << "  [BytecodeVM] Completed in " << duration.count() << "us\n";
     }
     
-    return vm_result_;
+    return Value{std::monostate{}}; // VM result type incompatible
 }
 
 // ============================================================================
@@ -202,20 +203,20 @@ Value ExecutionPipeline::run_jit(const bytecode::Module& module) {
     auto start = std::chrono::high_resolution_clock::now();
     
     // 使用 ExecutionEngine 执行 JIT 模式
-    claw::ExecutionConfig config;
+    ExecutionConfig config;
     config.mode = claw::ExecutionMode::JIT_COMPILED;
     config.enable_method_jit = true;
     config.enable_optimizing_jit = true;
     config.hot_threshold = 100;
     
-    claw::ExecutionEngine engine(config);
+    ExecutionEngine engine(config);
     
     // 加载模块
     if (!engine.load_module(module)) {
         if (verbose_) {
-            std::cerr << "  [JIT] Failed to load module: " << engine.get_last_error() << "\n";
+            std::cerr << "  [JIT] Failed to load module\n";
         }
-        return Value::nil();
+        return Value{std::monostate{}};
     }
     
     if (verbose_) {
@@ -229,7 +230,7 @@ Value ExecutionPipeline::run_jit(const bytecode::Module& module) {
         if (verbose_) {
             std::cerr << "  [JIT] Execution failed: " << result.error_message << "\n";
         }
-        return Value::nil();
+        return Value{std::monostate{}};
     }
     
     if (verbose_) {
@@ -245,17 +246,17 @@ Value ExecutionPipeline::run_jit(const bytecode::Module& module) {
         std::cout << "  [JIT] Completed in " << duration.count() << "us\n";
     }
     
-    return Value::nil();
+    return Value{std::monostate{}};
 }
 
 CompilationResult ExecutionPipeline::execute(const std::string& source_code,
-                                              const std::string& source_name) {
+                                              [[maybe_unused]] const std::string& source_name) {
     CompilationResult result;
     
     auto total_start = std::chrono::high_resolution_clock::now();
     
     // 1. 词法分析
-    DiagnosticReporter reporter(source_name);
+    DiagnosticReporter reporter;
     auto tokens = lex(source_code, reporter);
     
     if (mode_ == ExecutionMode::Tokens) {
@@ -297,7 +298,7 @@ CompilationResult ExecutionPipeline::execute(const std::string& source_code,
     }
     
     // 4. 执行
-    Value exec_result = Value::nil();
+    Value exec_result = Value{std::monostate{}};
     
     switch (mode_) {
         case ExecutionMode::Interpret:

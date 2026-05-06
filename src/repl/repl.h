@@ -75,7 +75,7 @@ private:
 // 结果展示格式化器
 class ResultFormatter {
 public:
-    static std::string format_value(const runtime::ClawValue& value);
+    static std::string format_value(const interpreter::Value& value);
     static std::string format_error(const std::string& error);
     static std::string format_ast(ast::ASTNode* node, int indent = 0);
     static std::string format_tokens(const std::vector<Token>& tokens);

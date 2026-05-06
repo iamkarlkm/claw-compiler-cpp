@@ -20,7 +20,7 @@
 #include "vm/claw_vm.h"
 #include "codegen/c_codegen.h"
 #include "codegen/native_codegen.h"
-#include "emitter/wasm/wasm_backend.h"
+// #include "emitter/wasm/wasm_backend.h"  // TODO: fix ast::Module → ast::Program
 #include "pipeline/execution_engine.h"
 #include "repl/claw_repl.h"
 
@@ -129,7 +129,6 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
             opts.mode = CompileOptions::Mode::Interpret;
         }
         else if (arg == "-b" || arg == "--bytecode") {
-            std::cerr << "[DEBUG] parse_args: setting mode to Bytecode\n";
             opts.mode = CompileOptions::Mode::Bytecode;
         }
         else if (arg == "-j" || arg == "--jit") {
@@ -189,7 +188,6 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
             else if (mode_arg == "ast") opts.mode = CompileOptions::Mode::AST;
             else if (mode_arg == "interpret" || mode_arg == "interp") opts.mode = CompileOptions::Mode::Interpret;
             else if (mode_arg == "bytecode") {
-                std::cerr << "[DEBUG] parse_args: setting mode to Bytecode (from --mode=)\n";
                 opts.mode = CompileOptions::Mode::Bytecode;
             }
             else if (mode_arg == "jit") opts.mode = CompileOptions::Mode::JIT;
@@ -313,8 +311,7 @@ bool run_interpreter(ast::Program& program, bool verbose) {
 // 字节码编译 - shared_ptr 版本 (主要入口)
 // ============================================================================
 
-bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show_ir) {
-    std::cerr << "[DEBUG] run_bytecode called with shared_ptr, mode=Bytecode\n";
+bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show_ir) { (void)show_ir;
     if (!program) {
         std::cerr << "Error: Null program pointer\n";
         return false;
@@ -383,7 +380,7 @@ bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
     if (verbose) {
         std::cout << "  Running in JIT mode...\n";
     }
-    
+
     // 读取源码文件用于 JIT 编译
     std::string source_content;
     std::ifstream input(input_file);
@@ -391,16 +388,16 @@ bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
         std::cerr << "Error: Cannot open input file: " << input_file << "\n";
         return false;
     }
-    
+
     // 读取文件内容 (修复: 原来缺少这行!)
     std::stringstream buffer;
     buffer << input.rdbuf();
     source_content = buffer.str();
-    
+
     if (verbose) {
         std::cout << "  Loaded " << source_content.size() << " bytes of source code\n";
     }
-    
+
     // 使用 ExecutionEngine 执行 JIT 模式
     claw::ExecutionConfig config;
     config.mode = claw::ExecutionMode::JIT_COMPILED;
@@ -409,15 +406,15 @@ bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
     config.hot_threshold = 1000;
     config.trace_execution = verbose;
     config.dump_bytecode = show_ir;
-    
+
     claw::ExecutionEngine engine(config);
-    
+
     // 加载源码并编译
     if (!engine.load_source(source_content)) {
         std::cerr << "Error: Failed to load source for JIT compilation\n";
         return false;
     }
-    
+
     // 执行
     auto result = engine.execute("main");
     
@@ -738,7 +735,6 @@ int main(int argc, char** argv) {
     // 根据模式执行
     bool success = false;
     
-    std::cerr << "[DEBUG] Before switch, opts.mode = " << (int)opts.mode << std::endl;
     
     switch (opts.mode) {
         case CompileOptions::Mode::Interpret:
@@ -767,13 +763,15 @@ int main(int argc, char** argv) {
             
         case CompileOptions::Mode::WebAssembly:
             {
-                // Generate WebAssembly using the new WASM backend
+                // TODO: fix wasm backend - ast::Module → ast::Program
+                std::cerr << "WebAssembly backend temporarily disabled (pending AST migration)\n";
+                success = false;
+                /*
                 claw::wasm::WasmModule wasm_module;
                 claw::wasm::WasmCodeGenerator wasm_gen(wasm_module);
                 std::string output;
                 success = wasm_gen.generate_from_program(program, output, opts.verbose);
                 if (success) {
-                    // Determine output file
                     std::string out_file = opts.output_file.empty() ? "output.wasm" : opts.output_file;
                     std::ofstream out(out_file, std::ios::binary);
                     if (out.is_open()) {
@@ -787,6 +785,7 @@ int main(int argc, char** argv) {
                 } else {
                     std::cerr << "WebAssembly generation failed\n";
                 }
+                */
             }
             break;
             
@@ -796,7 +795,6 @@ int main(int argc, char** argv) {
             break;
             
         default:
-            std::cerr << "[DEBUG] default case hit! mode=" << (int)opts.mode << "\n";
             std::cout << "Compilation successful (parse + typecheck only)\n";
             success = true;
             break;

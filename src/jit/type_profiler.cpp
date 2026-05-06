@@ -19,7 +19,7 @@ TypeProfiler::TypeProfiler() = default;
 
 TypeProfiler::~TypeProfiler() = default;
 
-void TypeProfiler::record_type(const std::string& location_id, const Value* value) {
+void TypeProfiler::record_type(const std::string& location_id, const interpreter::Value* value) {
     if (!enabled_ || !value) return;
     
     auto kind = value_to_type_kind(value);
@@ -35,12 +35,12 @@ void TypeProfiler::record_type(const std::string& location_id, const Value* valu
         it->second->record_type(kind);
     }
     
-    total_samples_++;
+    total_samples++;
 }
 
 void TypeProfiler::record_call(const std::string& call_id,
                                 const std::string& function_name,
-                                const std::vector<const Value*>& args) {
+                                const std::vector<const interpreter::Value*>& args) {
     if (!enabled_) return;
     
     // Get or create call site profile
@@ -83,7 +83,7 @@ void TypeProfiler::record_call(const std::string& call_id,
     }
 }
 
-void TypeProfiler::record_return(const std::string& function_name, const Value* return_value) {
+void TypeProfiler::record_return(const std::string& function_name, const interpreter::Value* return_value) {
     if (!enabled_ || !return_value) return;
     
     // Record return type for all call sites calling this function
@@ -119,7 +119,7 @@ std::shared_ptr<TypeProfile> TypeProfiler::get_type_profile(const std::string& l
     if (it != variable_profiles_.end()) {
         auto profile = std::make_shared<TypeProfile>();
         profile->kind = it->second->get_most_likely_type();
-        profile->count = it->second->total_samples_;
+        profile->count = it->second->total_samples;
         profile->confidence = it->second->get_confidence(profile->kind);
         return profile;
     }
@@ -147,7 +147,7 @@ bool TypeProfiler::should_jit_compile(const std::string& location_id) const {
     if (it == variable_profiles_.end()) return false;
     
     const auto& profile = it->second;
-    return profile->total_samples_ >= kMinCallsForJIT;
+    return profile->total_samples >= kMinCallsForJIT;
 }
 
 bool TypeProfiler::should_inline_call(const std::string& call_id) const {
@@ -162,8 +162,8 @@ std::vector<std::string> TypeProfiler::get_hot_locations() const {
     std::vector<std::pair<std::string, uint64_t>> hot;
     
     for (const auto& [id, profile] : variable_profiles_) {
-        if (profile->total_samples_ >= kMinCallsForJIT) {
-            hot.emplace_back(id, profile->total_samples_);
+        if (profile->total_samples >= kMinCallsForJIT) {
+            hot.emplace_back(id, profile->total_samples);
         }
     }
     
@@ -195,7 +195,7 @@ void TypeProfiler::clear() {
     variable_profiles_.clear();
     call_site_profiles_.clear();
     loop_profiles_.clear();
-    total_samples_ = 0;
+    total_samples = 0;
 }
 
 void TypeProfiler::set_enabled(bool enabled) {
@@ -210,7 +210,7 @@ std::string TypeProfiler::get_stats() const {
     std::string result;
     result += "=== Type Profiler Statistics ===\n";
     result += "Enabled: " + std::string(enabled_ ? "yes" : "no") + "\n";
-    result += "Total samples: " + std::to_string(total_samples_) + "\n";
+    result += "Total samples: " + std::to_string(total_samples) + "\n";
     result += "Tracked variables: " + std::to_string(variable_profiles_.size()) + "\n";
     result += "Tracked call sites: " + std::to_string(call_site_profiles_.size()) + "\n";
     result += "Tracked loops: " + std::to_string(loop_profiles_.size()) + "\n";
@@ -253,7 +253,7 @@ std::string TypeProfiler::serialize() const {
     for (const auto& [id, profile] : variable_profiles_) {
         if (!first) result += ",";
         first = false;
-        result += "{\"id\":\"" + id + "\",\"samples\":" + std::to_string(profile->total_samples_) + "}";
+        result += "{\"id\":\"" + id + "\",\"samples\":" + std::to_string(profile->total_samples) + "}";
     }
     result += "],";
     
@@ -278,30 +278,48 @@ std::string TypeProfiler::serialize() const {
     }
     result += "],";
     
-    result += "\"total_samples\":" + std::to_string(total_samples_) + "}";
+    result += "\"total_samples\":" + std::to_string(total_samples) + "}";
     
     return result;
 }
 
-bool TypeProfiler::deserialize(const std::string& data) {
+bool TypeProfiler::deserialize([[maybe_unused]] const std::string& data) {
     // Simple deserialization - just clear and start fresh for now
     // In a full implementation, parse the JSON-like format
     clear();
     return true;
 }
 
-TypeProfile::TypeKind TypeProfiler::value_to_type_kind(const Value* value) const {
+TypeProfile::TypeKind TypeProfiler::value_to_type_kind(const interpreter::Value* value) const {
     if (!value) return TypeProfile::TypeKind::NIL;
-    
-    // This would need access to Value's type() method
-    // For now, return based on Value's internal type
-    // In practice, this would call value->type()
+
+    // interpreter::Value is std::variant<std::monostate, int64_t, double,
+    //                                    std::string, bool, char>
+    if (std::holds_alternative<std::monostate>(*value)) {
+        return TypeProfile::TypeKind::NIL;
+    }
+    if (std::holds_alternative<int64_t>(*value)) {
+        return TypeProfile::TypeKind::INT;
+    }
+    if (std::holds_alternative<double>(*value)) {
+        return TypeProfile::TypeKind::FLOAT;
+    }
+    if (std::holds_alternative<std::string>(*value)) {
+        return TypeProfile::TypeKind::STRING;
+    }
+    if (std::holds_alternative<bool>(*value)) {
+        return TypeProfile::TypeKind::BOOL;
+    }
+    if (std::holds_alternative<char>(*value)) {
+        return TypeProfile::TypeKind::STRING;
+    }
+
     return TypeProfile::TypeKind::UNKNOWN;
 }
 
 void TypeProfiler::update_type_counts(VariableProfile& profile, TypeProfile::TypeKind kind) {
     profile.type_counts[kind]++;
-    profile.total_samples_++;
+    profile.total_samples++;
 }
 
 } // namespace claw

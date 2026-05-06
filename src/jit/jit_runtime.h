@@ -61,7 +61,7 @@ public:
     const std::vector<int64_t>& get_shape() const { return shape; }
     ElementType get_element_type() const { return element_type; }
     void* get_data() const { return data; }
-    size_t size() const;
+    [[maybe_unused]] size_t size() const;
     size_t get_element_size() const;
     
     // 元素访问
@@ -179,15 +179,15 @@ void tensor_set(void* tensor, int64_t* indices, int64_t indices_len, double valu
 void* alloc_array(int64_t size, int element_type);
 
 // 数组操作
-void array_push(void* array, double value);
+void array_push(void* array, int64_t value);
 int64_t array_len(void* array);
-double array_get(void* array, int64_t index);
-void array_set(void* array, int64_t index, double value);
+int64_t array_get(void* array, int64_t index);
+void array_set(void* array, int64_t index, int64_t value);
 
 // 元组操作
-void* alloc_tuple(double a, double b);
-double tuple_get(void* tuple, int index);
-void tuple_set(void* tuple, int index, double value);
+void* alloc_tuple(int64_t a, int64_t b);
+int64_t tuple_get(void* tuple, int index);
+void tuple_set(void* tuple, int index, int64_t value);
 
 // ============================================================================
 // 字符串操作
@@ -227,6 +227,8 @@ double to_float(int64_t value);
 
 void print(double value);
 void println(double value);
+void print_f64(double value);
+void println_f64(double value);
 void print_str(const char* str);
 void println_str(const char* str);
 
@@ -306,7 +308,7 @@ inline Tensor* create_int_tensor(const std::vector<int64_t>& shape) {
 }
 
 // 创建数组
-inline std::vector<runtime::Value>* create_array(size_t size) {
+inline std::vector<runtime::Value>* create_array([[maybe_unused]] size_t size) {
     return new std::vector<runtime::Value>();
 }
 

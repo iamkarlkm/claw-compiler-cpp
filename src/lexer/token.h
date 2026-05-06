@@ -280,10 +280,58 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::Op_range_eq: return "..=";
         case TokenType::Semicolon: return ";";
         case TokenType::Colon: return ":";
-        case TokenType::Kw_try: return "try";
-        case TokenType::Kw_catch: return "catch";
-        case TokenType::Kw_throw: return "throw";
-        
+        case TokenType::ScopeResolution: return "::";
+
+        // Operators (compound assignment, bitwise, misc)
+        case TokenType::Op_plus_eq: return "+=";
+        case TokenType::Op_minus_eq: return "-=";
+        case TokenType::Op_star_eq: return "*=";
+        case TokenType::Op_slash_eq: return "/=";
+        case TokenType::Op_amp_eq: return "&=";
+        case TokenType::Op_pipe_eq: return "|=";
+        case TokenType::Op_caret_eq: return "^=";
+        case TokenType::Op_plus_plus: return "++";
+        case TokenType::Op_minus_minus: return "--";
+        case TokenType::Op_percent: return "%";
+        case TokenType::Op_amp: return "&";
+        case TokenType::Op_pipe: return "|";
+        case TokenType::Op_caret: return "^";
+        case TokenType::Op_tilde: return "~";
+        case TokenType::Op_bang: return "!";
+        case TokenType::Op_question: return "?";
+
+        // Special tokens
+        case TokenType::InterpolatedString: return "interpolated_string";
+        case TokenType::RawString: return "raw_string";
+        case TokenType::ByteString: return "byte_string";
+        case TokenType::Comment: return "comment";
+        case TokenType::DocumentationComment: return "doc_comment";
+        case TokenType::Invalid: return "invalid";
+
+        // Keywords (remaining)
+        case TokenType::Kw_serial: return "serial";
+        case TokenType::Kw_process: return "process";
+        case TokenType::Kw_publish: return "publish";
+        case TokenType::Kw_subscribe: return "subscribe";
+        case TokenType::Kw_result: return "result";
+        case TokenType::Kw_type: return "type";
+        case TokenType::Kw_struct: return "struct";
+        case TokenType::Kw_enum: return "enum";
+        case TokenType::Kw_trait: return "trait";
+        case TokenType::Kw_impl: return "impl";
+        case TokenType::Kw_pub: return "pub";
+        case TokenType::Kw_mod: return "mod";
+        case TokenType::Kw_use: return "use";
+        case TokenType::Kw_as: return "as";
+        case TokenType::Kw_where: return "where";
+        case TokenType::Kw_loop: return "loop";
+        case TokenType::Kw_in: return "in";
+        case TokenType::Kw_move: return "move";
+        case TokenType::Kw_ref: return "ref";
+        case TokenType::Kw_const: return "const";
+        case TokenType::Kw_self: return "self";
+        case TokenType::Kw_super: return "super";
+
         default: return "unknown";
     }
 }

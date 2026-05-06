@@ -42,11 +42,11 @@ static RuntimeState g_runtime;
 
 Value::Value() : type(ValueType::NIL) {}
 
-Value::Value(int64_t i) : type(ValueType::INT), int_val(i) {}
-Value::Value(double f) : type(ValueType::FLOAT), float_val(f) {}
-Value::Value(bool b) : type(ValueType::BOOL), bool_val(b) {}
-Value::Value(const std::string& s) : type(ValueType::STRING), string_val(new std::string(s)) {}
-Value::Value(const char* s) : type(ValueType::STRING), string_val(new std::string(s)) {}
+Value::Value(int64_t i) : int_val(i), type(ValueType::INT) {}
+Value::Value(double f) : float_val(f), type(ValueType::FLOAT) {}
+Value::Value(bool b) : bool_val(b), type(ValueType::BOOL) {}
+Value::Value(const std::string& s) : string_val(new std::string(s)), type(ValueType::STRING) {}
+Value::Value(const char* s) : string_val(new std::string(s)), type(ValueType::STRING) {}
 
 Value::Value(const std::vector<Value>& arr) : type(ValueType::ARRAY) {
     array_val = new std::vector<Value>(arr);
@@ -56,7 +56,7 @@ Value::Value(const std::tuple<Value, Value>& t) : type(ValueType::TUPLE) {
     tuple_val = new std::tuple<Value, Value>(t);
 }
 
-Value::Value(void* p) : type(ValueType::POINTER), pointer_val(p) {}
+Value::Value(void* p) : pointer_val(p), type(ValueType::POINTER) {}
 
 Value::Value(const Tensor& t) : type(ValueType::TENSOR) {
     tensor_val = new Tensor(t);
@@ -189,7 +189,7 @@ ValueType Value::get_type() const {
 // Tensor 实现
 // ============================================================================
 
-Tensor::Tensor() : shape({0}), data(nullptr), element_type(ElementType::FLOAT32) {}
+Tensor::Tensor() : shape({0}), element_type(ElementType::FLOAT32), data(nullptr) {}
 
 Tensor::Tensor(const std::vector<int64_t>& s, ElementType et) 
     : shape(s), element_type(et) {
@@ -473,10 +473,10 @@ void* alloc_array(int64_t size, int element_type) {
 }
 
 // array_push(array, value)
-void array_push(void* arr_ptr, double value) {
+void array_push(void* arr_ptr, int64_t value) {
     auto* arr = static_cast<std::vector<Value>*>(arr_ptr);
     if (arr) {
-        arr->push_back(Value((int64_t)value));
+        arr->push_back(Value(value));
     }
 }
 
@@ -486,48 +486,64 @@ int64_t array_len(void* arr_ptr) {
     return arr ? static_cast<int64_t>(arr->size()) : 0;
 }
 
+// Helper: convert runtime::Value to int64_t for JIT stack
+static int64_t value_to_int64(const Value& v) {
+    switch (v.type) {
+        case ValueType::INT: return v.int_val;
+        case ValueType::FLOAT: return *reinterpret_cast<const int64_t*>(&v.float_val);
+        case ValueType::BOOL: return v.bool_val ? 1 : 0;
+        case ValueType::STRING: return reinterpret_cast<int64_t>(v.string_val);
+        case ValueType::ARRAY: return reinterpret_cast<int64_t>(v.array_val);
+        case ValueType::TUPLE: return reinterpret_cast<int64_t>(v.tuple_val);
+        case ValueType::POINTER: return reinterpret_cast<int64_t>(v.pointer_val);
+        case ValueType::TENSOR: return reinterpret_cast<int64_t>(v.tensor_val);
+        case ValueType::FUNCTION: return reinterpret_cast<int64_t>(v.closure_val);
+        default: return 0;
+    }
+}
+
 // array_get(array, index) -> value
-double array_get(void* arr_ptr, int64_t index) {
+int64_t array_get(void* arr_ptr, int64_t index) {
     auto* arr = static_cast<std::vector<Value>*>(arr_ptr);
     if (!arr || index < 0 || index >= static_cast<int64_t>(arr->size())) {
-        return 0.0;
+        return 0;
     }
-    return (*arr)[index].float_val;
+    return value_to_int64((*arr)[index]);
 }
 
 // array_set(array, index, value)
-void array_set(void* arr_ptr, int64_t index, double value) {
+void array_set(void* arr_ptr, int64_t index, int64_t value) {
     auto* arr = static_cast<std::vector<Value>*>(arr_ptr);
     if (arr && index >= 0 && index < static_cast<int64_t>(arr->size())) {
-        (*arr)[index] = Value((int64_t)value);
+        (*arr)[index] = Value(value);
     }
 }
 
 // alloc_tuple(a, b) -> tuple
-void* alloc_tuple(double a, double b) {
-    auto* t = new std::tuple<Value, Value>(Value((int64_t)a), Value((int64_t)b));
+void* alloc_tuple(int64_t a, int64_t b) {
+    auto* t = new std::tuple<Value, Value>(Value(a), Value(b));
     g_runtime.total_allocated += sizeof(std::tuple<Value, Value>);
     g_runtime.alloc_count++;
     return t;
 }
 
 // tuple_get(tuple, index) -> value
-double tuple_get(void* t_ptr, int index) {
+int64_t tuple_get(void* t_ptr, int index) {
     auto* t = static_cast<std::tuple<Value, Value>*>(t_ptr);
-    if (!t) return 0.0;
-    if (index == 0) return std::get<0>(*t).float_val;
-    if (index == 1) return std::get<1>(*t).float_val;
-    return 0.0;
+    if (!t) return 0;
+    if (index == 0) return value_to_int64(std::get<0>(*t));
+    if (index == 1) return value_to_int64(std::get<1>(*t));
+    return 0;
 }
 
 // tuple_set(tuple, index, value) - 存储元组元素
-void tuple_set(void* t_ptr, int index, double value) {
+void tuple_set(void* t_ptr, int index, int64_t value) {
     auto* t = static_cast<std::tuple<Value, Value>*>(t_ptr);
     if (!t) return;
     if (index == 0) {
-        std::get<0>(*t) = Value((int64_t)value);
+        std::get<0>(*t) = Value(value);
     } else if (index == 1) {
-        std::get<1>(*t) = Value((int64_t)value);
+        std::get<1>(*t) = Value(value);
     }
 }
 
@@ -608,6 +624,16 @@ void print(double value) {
 
 // println(value)
 void println(double value) {
+    std::cout << value << "\n";
+}
+
+// print_f64(value)
+void print_f64(double value) {
+    std::cout << value;
+}
+
+// println_f64(value)
+void println_f64(double value) {
     std::cout << value << "\n";
 }
 

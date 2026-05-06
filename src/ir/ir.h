@@ -125,6 +125,8 @@ enum class OpCode {
     Select, ExtractValue, InsertValue,
     // 内存批量操作
     Memcpy, Memset,
+    // 类型检查与转换
+    DynamicCast, Instanceof,
     // 特殊操作
     Print, Panic, Unreachable
 };
@@ -193,7 +195,7 @@ struct StoreInst : public Instruction {
 struct AllocaInst : public Instruction {
     int64_t count;  // 数组元素数量，1 表示标量
     AllocaInst(std::shared_ptr<Type> elem_ty, int64_t cnt, std::shared_ptr<Type> ptr_ty)
-        : Instruction(OpCode::Alloca, std::move(ptr_ty)), count(cnt) {}
+        : Instruction(OpCode::Alloca, std::move(ptr_ty)), count(cnt) { (void)elem_ty; }
     std::shared_ptr<Type> get_allocated_type() const { 
         if (auto* ptr = dynamic_cast<PointerType*>(type.get())) {
             return ptr->pointee;
@@ -357,6 +359,39 @@ struct MemsetInst : public Instruction {
     std::string to_string() const override;
 };
 
+
+// DynamicCast 指令 (运行时类型转换, 安全向下转型)
+struct DynamicCastInst : public Instruction {
+    std::shared_ptr<Value> value;        // 要转换的值
+    std::shared_ptr<Type> target_type;   // 目标类型
+    DynamicCastInst(std::shared_ptr<Value> val,
+                    std::shared_ptr<Type> target,
+                    std::shared_ptr<Type> result_type)
+        : Instruction(OpCode::DynamicCast, std::move(result_type)),
+          value(std::move(val)), target_type(std::move(target)) {
+        operands = {value};
+    }
+    std::string to_string() const override {
+        return name + " = DynamicCast " + value->name + " to " + target_type->to_string();
+    }
+};
+
+// Instanceof 指令 (运行时类型检查)
+struct InstanceofInst : public Instruction {
+    std::shared_ptr<Value> value;        // 要检查的值
+    std::shared_ptr<Type> check_type;    // 检查的目标类型
+    InstanceofInst(std::shared_ptr<Value> val,
+                   std::shared_ptr<Type> check,
+                   std::shared_ptr<Type> bool_type)
+        : Instruction(OpCode::Instanceof, std::move(bool_type)),
+          value(std::move(val)), check_type(std::move(check)) {
+        operands = {value};
+    }
+    std::string to_string() const override {
+        return name + " = Instanceof " + value->name + " : " + check_type->to_string();
+    }
+};
+
 // ============================================================================
 // Basic Block
 // ============================================================================
@@ -384,7 +419,7 @@ struct BasicBlock {
 // Function
 // ============================================================================
 
-struct Function {
+struct Function : public std::enable_shared_from_this<Function> {
     std::string name;
     std::shared_ptr<Type> return_type;
     std::vector<std::shared_ptr<Value>> arguments;  // 参数列表
@@ -575,7 +610,23 @@ public:
                         std::shared_ptr<Value> val,
                         std::shared_ptr<Value> size);
     
-    // 特殊操作
+    // 类型检查与转换指令
+    std::shared_ptr<Value> create_dynamic_cast(std::shared_ptr<Value> val,
+                                               std::shared_ptr<Type> target_type,
+                                               std::shared_ptr<Type> result_type) {
+        auto inst = std::make_shared<DynamicCastInst>(val, target_type, result_type);
+        inst->name = "dyncast_" + std::to_string(++name_counter);
+        current_block->add_instruction(inst);
+        auto v = std::make_shared<Value>(inst->name, result_type); v->defining_inst = inst; return v;
+    }
+    std::shared_ptr<Value> create_instanceof(std::shared_ptr<Value> val,
+                                             std::shared_ptr<Type> check_type,
+                                             std::shared_ptr<Type> bool_type) {
+        auto inst = std::make_shared<InstanceofInst>(val, check_type, bool_type);
+        inst->name = "instanceof_" + std::to_string(++name_counter);
+        current_block->add_instruction(inst);
+        auto v2 = std::make_shared<Value>(inst->name, bool_type); v2->defining_inst = inst; return v2;
+    }
     void create_panic(std::string message);
     void create_print(std::shared_ptr<Value> value);
     

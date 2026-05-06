@@ -11,54 +11,13 @@
 namespace claw {
 namespace repl {
 
-using Val = runtime::ClawValue;
+using Val = interpreter::Value;
 
 //=============================================================================
 // InputBuffer
 //=============================================================================
 
-void InputBuffer::append(const std::string& line) {
-    if (!buffer_.empty()) buffer_ += "\n";
-    buffer_ += line;
-    for (char c : line) {
-        switch (c) {
-        case '{': brace_count_++; break;
-        case '}': brace_count_--; break;
-        case '(': paren_count_++; break;
-        case ')': paren_count_--; break;
-        case '[': bracket_count_++; break;
-        case ']': bracket_count_--; break;
-        case '"': in_string_ = !in_string_; break;
-        }
-    }
-}
-
-bool InputBuffer::is_complete() const {
-    if (buffer_.empty()) return true;
-    if (brace_count_ > 0 || paren_count_ > 0 || bracket_count_ > 0) return false;
-    if (!buffer_.empty() && buffer_.back() == '\\') return false;
-    return true;
-}
-
-std::string InputBuffer::get_and_clear() {
-    std::string result = buffer_;
-    clear();
-    return result;
-}
-
-void InputBuffer::clear() {
-    buffer_.clear();
-    brace_count_ = 0;
-    paren_count_ = 0;
-    bracket_count_ = 0;
-    in_string_ = false;
-}
-
-bool InputBuffer::empty() const { return buffer_.empty(); }
-
-int InputBuffer::get_indent_level() const {
-    return std::max(0, brace_count_);
-}
+// InputBuffer methods moved to claw_repl_integrated.cpp
 
 //=============================================================================
 // CompletionEngine
@@ -103,7 +62,16 @@ void CompletionEngine::update_from_ast(ast::Program*) {
 //=============================================================================
 
 std::string ResultFormatter::format_value(const Val& value) {
-    return value.to_string();
+    return std::visit([](auto&& arg) -> std::string {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::monostate>) return "null";
+        else if constexpr (std::is_same_v<T, bool>) return arg ? "true" : "false";
+        else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(arg);
+        else if constexpr (std::is_same_v<T, double>) return std::to_string(arg);
+        else if constexpr (std::is_same_v<T, std::string>) return arg;
+        else if constexpr (std::is_same_v<T, char>) return std::string(1, arg);
+        else return "<unknown>";
+    }, value);
 }
 
 std::string ResultFormatter::format_error(const std::string& error) {
@@ -290,9 +258,20 @@ void REPL::show_history() {
 
 void REPL::show_info(const std::string& name) {
     if (name.empty()) { std::cout << "Usage: :info <name>\n"; return; }
-    Val* v = interp_->var_get(name);
-    if (v) {
-        std::cout << name << " : " << v->type_name() << " = " << v->to_string() << "\n";
+    auto* rv = interp_->scoped_get(name);
+    if (rv) {
+        std::cout << name << " : " << rv->type_name << " = ";
+        // Use std::visit to display the value
+        std::visit([](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, std::monostate>) std::cout << "null";
+            else if constexpr (std::is_same_v<T, bool>) std::cout << (arg ? "true" : "false");
+            else if constexpr (std::is_same_v<T, int64_t>) std::cout << arg;
+            else if constexpr (std::is_same_v<T, double>) std::cout << arg;
+            else if constexpr (std::is_same_v<T, std::string>) std::cout << arg;
+            else std::cout << "<complex value>";
+        }, rv->scalar);
+        std::cout << "\n";
     } else {
         std::cout << "'" << name << "' not found.\n";
     }
@@ -383,7 +362,6 @@ void REPL::show_completions(const std::string& partial) {
 }
 
 bool REPL::execute_code(const std::string& code) {
-    if (state_.debug_mode) std::cout << "[DEBUG] Executing: " << code << "\n";
 
     try {
         Lexer lexer(code, "repl");

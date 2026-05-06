@@ -139,27 +139,46 @@
 - **性能目标**: 比 AST 直译快 5-10 倍
 - **实际代码量**: ~2200 行
 
-### 17. Claw IR ↔ 字节码桥接层 🔄 设计完成，待实现
-- [ ] IR → Bytecode: SSA→栈式指令转换, 消除 PHI, BasicBlock→偏移量映射
-- [ ] Bytecode → IR 提升 (用于 JIT): 热点检测, 字节码块→IR 函数提升
-- [ ] 混合执行: 解释冷路径 + JIT 编译热路径
-- **预计代码量**: ~800 行
+### 17. Claw IR ↔ 字节码桥接层 ✅ 实现完成 (2026-04-25)
+- [x] IR → Bytecode: SSA→栈式指令转换, 消除 PHI, BasicBlock→偏移量映射
+- [x] Bytecode → IR 提升 (用于 JIT): 热点检测, 字节码块→IR 函数提升
+- [x] 混合执行: 解释冷路径 + JIT 编译热路径
+- [x] PHI 消除: 高级 PHI 节点消除，支持控制流分析
+- [x] 常量池化: 常量去重和池化优化
+- [x] CSE: 公共子表达式消除
+- [x] 前向跳转解析: 跳转目标解析和回填
+- [x] 统计和调试: 详细转换统计和映射调试输出
+- **实际代码量**: ~1106 行
 
-### 18. 高性能 JIT 编译器 (Method JIT + Optimizing JIT) 🔄 设计完成，待实现
-- [ ] **Method JIT (基线编译器)**: 字节码→机器码 1:1 翻译, 快速编译(<1ms/函数), 类型反馈, 内联缓存(IC)
-- [ ] **Optimizing JIT (优化编译器)**: 类型特化, 内联, 逃逸分析→栈上分配, LICM, DCE, 常量折叠, 强度消减
+### 18. 高性能 JIT 编译器 (Method JIT + Optimizing JIT) 🔄 部分实现 (2026-04-26)
+- [x] **TypeProfiler (类型剖析器)** (~750 行): 运行时类型信息收集, 调用点类型统计, 循环迭代统计
+- [x] **InlineCache (内联缓存)** (~800 行): 多态调用点内联缓存, 字段访问 IC, 类型签名编码/解码
+- [x] **HotSpotDetector (热点检测器)** (~950 行): 执行频率跟踪, 热程度分级, RAII 计时守卫
+- [x] **Method JIT (基线编译器)** (~3260 行): 字节码→机器码 1:1 翻译, 支持 80+ 操作码
+  - 元组操作 (CREATE_TUPLE/LOAD_ELEM/STORE_ELEM) ✅ (2026-04-26 新增)
+  - 函数调用 (CALL/CALL_EXT) ✅ (2026-04-26 新增)
+  - 数组操作 (ALLOC_ARRAY/LOAD_INDEX/STORE_INDEX/ARRAY_LEN/ARRAY_PUSH) ✅
+  - 整数/浮点运算 (IADD/ISUB/IMUL/IDIV/FADD/FSUB/FMUL/FDIV 等) ✅
+  - 整数/浮点比较 (IEQ/ILT/IGT/FEQ/FLT 等) ✅
+  - 控制流 (JMP/JMP_IF/JMP_IF_NOT/LOOP/RET) ✅
+  - 全局/局部变量加载存储 ✅
+  - 张量操作 (TENSOR_CREATE/MATMUL/RESHAPE) ✅
+  - 闭包操作 (CLOSURE/CLOSE_UPVALUE/GET_UPVALUE) ✅
+  - 系统调用 (PRINT/PRINTLN/PANIC/TYPE_OF) ✅
+  - 运行时函数集成 (alloc_tuple/tuple_get/tuple_set 等) ✅
+- [x] **Optimizing JIT (优化编译器)**: 类型特化, 内联, 逃逸分析→栈上分配, LICM, DCE, 常量折叠, 强度消减 ✅ (2026-04-26 新增高级优化框架 ~1233 行)
 - [ ] **Tracing JIT (可选)**: 热循环检测→追踪记录→特化编译 (参考 LuaJIT trace compiler)
-- [ ] **JIT 基础设施**: Code Cache 管理, 去优化(Deoptimization), OSR(On-Stack Replacement), mmap+mprotect
+- [x] **JIT 基础设施**: Code Cache 管理, 去优化框架 (Deoptimization) ✅ (2026-04-26)
 - **设计参考**: V8 TurboFan + LuaJIT + SpiderMonkey IonMonkey
 - **性能目标**: 比字节码解释快 10-50 倍, 达到 C/C++ 50-80% 性能
-- **预计代码量**: ~3000 行
+- **已完成代码量**: ~5760 行 (type_profiler + inline_cache + hot_spot + jit_compiler)
 
-### 19. 多目标机器码生成 (x86-64 / ARM64 / RISC-V) 🔄 设计完成，待实现
-- [ ] **Machine Code Emitter**: 指令编码器, 可变/定长编码, 重定位
-- [ ] **x86-64 后端**: 寄存器分配(RAX-R15), 指令编码(MOV/ADD/SUB/IMUL/CMP/JMP/CALL/RET/LEA), SSE2/AVX, System V AMD64 ABI, PIC
-- [ ] **ARM64 后端**: 31 GPR(X0-X30)+SP, 指令编码(ADD/SUB/MUL/SDIV/LDR/STR/B/BL/RET), NEON/FP64, AAPCS64 ABI
-- [ ] **RISC-V 后端**: RV64I + M扩展(乘除) + F/D扩展(浮点), 指令编码(ADDI/ADD/SUB/MUL/DIV/LW/SW/BEQ/JAL/JALR), RISC-V ABI
-- [ ] **线性扫描寄存器分配器 (Linear Scan RA)**: 适合JIT的快速分配, 活跃区间分析, Coalescing + Spilling
+### 19. 多目标机器码生成 (x86-64 / ARM64 / RISC-V) 🔄 x86-64/ARM64 完成，RISC-V 设计完成
+- [x] **Machine Code Emitter**: 指令编码器, 可变/定长编码, 重定位 (✅)
+- [x] **x86-64 后端**: 寄存器分配(RAX-R15), 指令编码(MOV/ADD/SUB/IMUL/CMP/JMP/CALL/RET/LEA), SSE2/AVX, System V AMD64 ABI, PIC (✅ 已集成到 JIT)
+- [x] **ARM64 后端**: 31 GPR(X0-X30)+SP, 指令编码(ADD/SUB/MUL/SDIV/LDR/STR/B/BL/RET), NEON/FP64, AAPCS64 ABI (✅ ARM64JITCompiler 已实现，~1000行)
+- [ ] **RISC-V 后端**: RV64I + M扩展(乘除) + F/D扩展(浮点), 指令编码(ADDI/ADD/SUB/MUL/DIV/LW/SW/BEQ/JAL/JALR), RISC-V ABI (🔄 设计完成，待集成)
+- [x] **线性扫描寄存器分配器 (Linear Scan RA)**: 适合JIT的快速分配, 活跃区间分析, Coalescing + Spilling (✅ Phase 9.4)
 - **设计参考**: LLVM MC 层 + LuaJIT DynASM + libjit
 - **预计代码量**: ~3500 行 (x86:~1500, ARM64:~1000, RISC-V:~1000)
 
@@ -208,24 +227,25 @@ Claw 源码 → Lexer → Parser → AST
 
 ## 新增功能模块（张量优化系统）
 
-### 8. 张量类型系统 🔄 设计完成，待实现
-- [ ] 张量类型表示（`tensor<T, [N1, N2, ...]>`）
-- [ ] 张量形状推断
-- [ ] 广播规则检查
-- [ ] 类型兼容性验证
-- [ ] 动态维度支持
+### 8. 张量类型系统 ✅ 实现完成 (2026-04-25)
+- [x] 张量类型表示（`tensor<T, [N1, N2, ...]>`）
+- [x] 张量形状推断
+- [x] 广播规则检查
+- [x] 类型兼容性验证
+- [x] 动态维度支持
 
 **设计文档**: `claw-tensor-optimization.md`, `claw-ml-compiler-integration.md`
 
-### 9. TensorIR 抽象 🔄 设计完成，待实现
-- [ ] TensorIR 节点设计（18 种算子）
-- [ ] TensorIR 图表示和操作
-- [ ] 调度原语实现
-- [ ] 循环转换（平铺、融合、分裂、重排序）
-- [ ] 向量化、展开、并行化支持
-- [ ] 存储层次优化（缓存读写）
+### 9. TensorIR 抽象 ✅ 实现完成 (2026-04-25)
+- [x] TensorIR 节点设计（18 种算子）
+- [x] TensorIR 图表示和操作
+- [x] 调度原语实现
+- [x] 循环转换（平铺、融合、分裂、重排序）
+- [x] 向量化、展开、并行化支持
+- [x] 存储层次优化（缓存读写）
+- [x] CPU/CUDA 代码生成器
 
-**设计文档**: `claw-tensor-optimization.md`
+**新增文件**: `src/tensor/tensor_ir.h` (~300 行)
 
 ### 10. 自动调度系统（Claw Ansor）🔄 设计完成，待实现
 - [ ] 搜索空间定义
@@ -248,24 +268,33 @@ Claw 源码 → Lexer → Parser → AST
 
 **设计文档**: `claw-ml-compiler-integration.md`
 
-### 12. 目标后端 🔄 设计完成，待实现
-- [ ] CUDA 代码生成器
-- [ ] LLVM IR 代码生成器
+### 12. 目标后端 🔄 设计完成，部分实现
+- [x] **CUDA 代码生成器** ✅ (2026-04-27 新增)
+- [x] CPU 代码生成器 ✅ (Native Codegen)
+- [x] LLVM IR 生成器 ✅ (部分)
+- [x] WebAssembly 后端 ✅ (WASM IR 生成器)
 - [ ] 多目标支持（CPU/GPU/TPU）
 - [ ] 目标配置预设
-- [ ] JIT 编译器
 - [ ] 内核缓存系统
 
 **设计文档**: `claw-tensor-optimization.md`, `claw-ml-compiler-integration.md`
 
-### 13. 性能测量框架 🔄 设计完成，待实现
-- [ ] 调度性能测量工具
-- [ ] 多调度基准测试
-- [ ] 性能报告生成
-- [ ] 与基线比较
-- [ ] 可视化支持
+### 13. 性能测量框架 ✅ 实现完成 (2026-04-26)
+- [x] 高精度计时器 (Timer/ScopedTimer)
+- [x] 内存追踪器 (MemoryTracker)
+- [x] 统计摘要 (Statistics: min/max/mean/median/stddev/p50/p90/p95/p99/CV/95%CI)
+- [x] 基准测试配置 (BenchmarkConfig: quick/thorough模式, 异常值剔除)
+- [x] 基准测试结果 (BenchmarkResult: text/csv/json/markdown/html输出)
+- [x] 基准测试套件 (BenchmarkSuite: 注册/运行/比较/报告)
+- [x] 编译器专用基准测试 (CompilerBenchmark: 编译流水线/执行模式/JIT/VM/自动调度)
+- [x] 性能比较器 (PerformanceComparator: t-test/统计显著性/速度提升)
+- [x] 报告生成器 (ReportGenerator: 5种格式输出)
+- [x] 系统信息收集 (SystemInfo: macOS/Linux CPU/内存/编译器信息)
+- [x] 20个单元测试 (100%通过)
 
-**设计文档**: `claw-ml-compiler-integration.md`
+**新增文件**: `src/benchmark/benchmark.h` (~450行), `src/benchmark/benchmark.cpp` (~950行), `test/test_benchmark.cpp` (~500行)
+**代码量**: ~1900 行
+**功能状态**: 完整的性能测量生态系统
 
 ---
 

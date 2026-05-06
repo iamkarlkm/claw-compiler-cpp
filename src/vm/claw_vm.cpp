@@ -92,6 +92,18 @@ std::string Value::type_name() const {
     }
 }
 
+// Convert bytecode::Value to vm::Value
+static Value convert_bytecode_value(const bytecode::Value& bv) {
+    switch (bv.type) {
+        case bytecode::ValueType::NIL: return Value::nil();
+        case bytecode::ValueType::BOOL: return Value::bool_v(bv.data.b);
+        case bytecode::ValueType::I64: return Value::int_v(bv.data.i64);
+        case bytecode::ValueType::F64: return Value::float_v(bv.data.f64);
+        case bytecode::ValueType::STRING: return Value::string_v(bv.str);
+        default: return Value::nil();
+    }
+}
+
 bool Value::equals(const Value& other) const {
     if (tag != other.tag) {
         // Allow int/float comparison
@@ -188,13 +200,13 @@ void VMRuntime::setup_builtins() {
         std::cout << rt.peek().to_string();
         return Value::nil();
     };
-    
+
     // Println function
     builtins["println"] = [](VMRuntime& rt) {
         std::cout << rt.peek().to_string() << std::endl;
         return Value::nil();
     };
-    
+
     // Len function
     builtins["len"] = [](VMRuntime& rt) {
         Value& v = rt.peek();
@@ -207,64 +219,59 @@ void VMRuntime::setup_builtins() {
         }
         return Value::nil();
     };
-    
+
     // Type function
     builtins["type"] = [](VMRuntime& rt) {
         return Value::string_v(rt.peek().type_name());
     };
-    
+
     // Int function
     builtins["int"] = [](VMRuntime& rt) {
-        return Value::int_v(rt.pop().as_int());
+        return Value::int_v(rt.peek().as_int());
     };
-    
+
     // Float function
     builtins["float"] = [](VMRuntime& rt) {
-        return Value::float_v(rt.pop().as_float());
+        return Value::float_v(rt.peek().as_float());
     };
-    
+
     // String function
     builtins["string"] = [](VMRuntime& rt) {
-        return Value::string_v(rt.pop().to_string());
+        return Value::string_v(rt.peek().to_string());
     };
-    
+
     // Bool function
     builtins["bool"] = [](VMRuntime& rt) {
-        return Value::bool_v(rt.pop().as_bool());
+        return Value::bool_v(rt.peek().as_bool());
     };
-    
+
     // Input function
     builtins["input"] = [](VMRuntime& rt) {
         std::string line;
         std::getline(std::cin, line);
         return Value::string_v(line);
     };
-    
+
     // Array function
     builtins["array"] = [](VMRuntime& rt) {
         auto arr = std::make_shared<ArrayValue>();
-        rt.pop();
         return Value{ValueTag::ARRAY, arr};
     };
-    
+
     // Range function (generator)
     builtins["range"] = [](VMRuntime& rt) {
-        int64_t end = rt.pop().as_int();
+        int64_t end = rt.peek().as_int();
         int64_t start = 0;
-        if (!rt.peek().is_nil()) {
-            start = rt.pop().as_int();
-            end = rt.pop().as_int();
-        }
         auto arr = std::make_shared<ArrayValue>();
         for (int64_t i = start; i < end; i++) {
             arr->elements.push_back(Value::int_v(i));
         }
         return Value{ValueTag::ARRAY, arr};
     };
-    
+
     // Panic function
     builtins["panic"] = [](VMRuntime& rt) -> Value {
-        throw std::runtime_error(rt.pop().to_string());
+        throw std::runtime_error(rt.peek().to_string());
         return Value::nil();
     };
 }
@@ -429,10 +436,33 @@ Value ClawVM::execute() {
         // Setup current function context
         current_function_idx = static_cast<uint32_t>(main_idx);
         current_function = &current_module.functions[current_function_idx];
-        
-        // Call main function with 0 arguments
-        op_call();
-        
+        ip = 0;
+
+        // Create a closure for main so op_ret() can restore current_function
+        auto main_fn = std::make_shared<FunctionValue>();
+        main_fn->func_id = main_idx;
+        main_fn->name = current_module.functions[main_idx].name;
+        main_fn->arity = static_cast<int32_t>(current_module.functions[main_idx].arity);
+        main_fn->local_count = static_cast<int32_t>(current_module.functions[main_idx].local_count);
+        main_fn->max_stack = static_cast<int32_t>(current_module.functions[main_idx].local_count + current_module.functions[main_idx].arity + 16);
+        auto main_closure = std::make_shared<ClosureValue>();
+        main_closure->function = main_fn;
+
+        // Push initial frame for main
+        CallFrame frame;
+        frame.closure = main_closure.get();
+        frame.ip = 0;
+        frame.base_stack = 0;
+        frame.slot_count = 256;
+        frame.local_count = main_fn->local_count;
+        runtime.call_frames.push_back(frame);
+        runtime.frame_count++;
+
+        // Reserve stack space for locals so expression stack doesn't overlap
+        if (current_function) {
+            runtime.stack_top = frame.base_stack + current_function->local_count;
+        }
+
         // Run dispatch loop
         while (running && dispatch()) {
             instructions_executed++;
@@ -561,7 +591,7 @@ bool ClawVM::dispatch() {
         running = false;
         return false;
     }
-    
+
     int32_t op = read_byte();
     
     // Use if-else chain instead of switch for OpCode enum class
@@ -683,19 +713,6 @@ bool ClawVM::dispatch() {
     // System
     if (op == static_cast<int32_t>(bytecode::OpCode::PRINT)) return op_print();
     if (op == static_cast<int32_t>(bytecode::OpCode::PRINTLN)) return op_println();
-    
-    // Iterators (NEW - 2026-04-26)
-    if (op == static_cast<int32_t>(bytecode::OpCode::EXT)) {
-        int32_t ext_op = read_byte();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_CREATE)) return op_iter_create();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_NEXT)) return op_iter_next();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_HAS_NEXT)) return op_iter_has_next();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_RESET)) return op_iter_reset();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ITER_GET_INDEX)) return op_iter_get_index();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::RANGE_CREATE)) return op_range_create();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ENUMERATE_CREATE)) return op_enumerate_create();
-        if (ext_op == static_cast<int32_t>(bytecode::ExtOpCode::ZIP_CREATE)) return op_zip_create();
-    }
     if (op == static_cast<int32_t>(bytecode::OpCode::PANIC)) return op_panic();
     if (op == static_cast<int32_t>(bytecode::OpCode::HALT)) { running = false; return false; }
     if (op == static_cast<int32_t>(bytecode::OpCode::INPUT)) return op_input();
@@ -706,6 +723,11 @@ bool ClawVM::dispatch() {
     return false;
 }
 
+bool ClawVM::op_halt() {
+    running = false;
+    return true;
+}
+
 // ============================================================================
 // Stack Operations
 // ============================================================================
@@ -713,16 +735,13 @@ bool ClawVM::dispatch() {
 bool ClawVM::op_nop() { return true; }
 
 bool ClawVM::op_push() {
-    int32_t type = read_byte();
-    switch (type) {
-        case 0: runtime.push(Value::nil()); break;
-        case 1: runtime.push(Value::bool_v(read_byte() != 0)); break;
-        case 2: runtime.push(Value::int_v(read_int())); break;
-        case 3: runtime.push(Value::float_v(read_double())); break;
-        case 4: runtime.push(Value::string_v(read_string())); break;
-        default: error("Unknown push type"); return false;
+    int32_t idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        runtime.push(convert_bytecode_value(current_module.constants.values[idx]));
+        return true;
     }
-    return true;
+    error("Invalid constant index");
+    return false;
 }
 
 bool ClawVM::op_pop() {
@@ -792,7 +811,7 @@ bool ClawVM::op_ineg() {
 }
 
 bool ClawVM::op_iinc() {
-    int32_t slot = read_byte();
+    int32_t slot = static_cast<int32_t>(current_function->code[ip - 1].operand);
     Value& v = runtime.slot(runtime.call_frames.back().base_stack + slot);
     v = Value::int_v(v.as_int() + 1);
     return true;
@@ -846,7 +865,7 @@ bool ClawVM::op_fneg() {
 }
 
 bool ClawVM::op_finc() {
-    int32_t slot = read_byte();
+    int32_t slot = static_cast<int32_t>(current_function->code[ip - 1].operand);
     Value& v = runtime.slot(runtime.call_frames.back().base_stack + slot);
     v = Value::float_v(v.as_float() + 1.0);
     return true;
@@ -1069,7 +1088,7 @@ bool ClawVM::op_s2f() {
 // ============================================================================
 
 bool ClawVM::op_load_local() {
-    int32_t slot = read_byte();
+    int32_t slot = static_cast<int32_t>(current_function->code[ip - 1].operand);
     int32_t base = runtime.call_frames.back().base_stack;
     Value v = runtime.stack[base + slot];
     runtime.push(v);
@@ -1077,7 +1096,7 @@ bool ClawVM::op_load_local() {
 }
 
 bool ClawVM::op_store_local() {
-    int32_t slot = read_byte();
+    int32_t slot = static_cast<int32_t>(current_function->code[ip - 1].operand);
     int32_t base = runtime.call_frames.back().base_stack;
     Value v = runtime.pop();
     runtime.stack[base + slot] = v;
@@ -1101,21 +1120,57 @@ bool ClawVM::op_load_local_1() {
 // ============================================================================
 
 bool ClawVM::op_load_global() {
-    int32_t idx = read_int();
-    Value v = runtime.get_global(idx);
-    runtime.push(v);
+    int32_t idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    std::string name;
+    if (idx >= 0 && idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        name = current_module.constants.values[idx].str;
+    }
+
+    int32_t gidx = runtime.get_global_idx(name);
+    if (gidx >= 0) {
+        runtime.push(runtime.get_global(gidx));
+        return true;
+    }
+
+    // Auto-resolve function names from module.functions
+    for (size_t i = 0; i < current_module.functions.size(); i++) {
+        if (current_module.functions[i].name == name) {
+            auto fn = std::make_shared<FunctionValue>();
+            fn->func_id = static_cast<int32_t>(i);
+            fn->name = name;
+            fn->arity = static_cast<int32_t>(current_module.functions[i].arity);
+            fn->local_count = static_cast<int32_t>(current_module.functions[i].local_count);
+            fn->max_stack = static_cast<int32_t>(current_module.functions[i].local_count + current_module.functions[i].arity + 16);
+
+            auto closure = std::make_shared<ClosureValue>();
+            closure->function = fn;
+            runtime.push(Value{ValueTag::CLOSURE, closure});
+            return true;
+        }
+    }
+
+    runtime.push(Value::nil());
     return true;
 }
 
 bool ClawVM::op_store_global() {
-    int32_t idx = read_int();
+    int32_t str_idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    std::string name;
+    if (str_idx >= 0 && str_idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        name = current_module.constants.values[str_idx].str;
+    }
+    int32_t gidx = runtime.define_global(name);
     Value v = runtime.pop();
-    runtime.set_global(idx, v);
+    runtime.set_global(gidx, v);
     return true;
 }
 
 bool ClawVM::op_define_global() {
-    std::string name = read_string();
+    int32_t str_idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    std::string name;
+    if (str_idx >= 0 && str_idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        name = current_module.constants.values[str_idx].str;
+    }
     int32_t idx = runtime.define_global(name);
     Value v = runtime.pop();
     runtime.set_global(idx, v);
@@ -1127,89 +1182,116 @@ bool ClawVM::op_define_global() {
 // ============================================================================
 
 bool ClawVM::op_jmp() {
-    int32_t offset = read_short();
-    ip += offset - 2;  // -2 because we already read 2 bytes
+    int32_t offset = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    ip += offset;
     return true;
 }
 
 bool ClawVM::op_jmp_if() {
-    int32_t offset = read_short();
+    int32_t offset = static_cast<int32_t>(current_function->code[ip - 1].operand);
     if (runtime.pop().as_bool()) {
-        ip += offset - 2;
+        ip += offset;
     }
     return true;
 }
 
 bool ClawVM::op_jmp_if_not() {
-    int32_t offset = read_short();
+    int32_t offset = static_cast<int32_t>(current_function->code[ip - 1].operand);
     if (!runtime.pop().as_bool()) {
-        ip += offset - 2;
+        ip += offset;
     }
     return true;
 }
 
 bool ClawVM::op_loop() {
-    int32_t offset = read_short();
+    int32_t offset = static_cast<int32_t>(current_function->code[ip - 1].operand);
     ip -= offset;
     return true;
 }
 
 bool ClawVM::op_call() {
-    int32_t arg_count = read_byte();
-    
-    // Get the closure (already on stack)
-    Value callee = runtime.peek(arg_count);
-    
+    int32_t arg_count = static_cast<int32_t>(current_function->code[ip - 1].operand);
+
+    // Get the closure (on top of stack, args are below it)
+    Value callee = runtime.pop();
+
     if (!callee.is_closure()) {
         error("Can only call functions");
         return false;
     }
-    
+
     auto closure = std::get<std::shared_ptr<ClosureValue>>(callee.data);
     auto& func = closure->function;
-    
+
+    // Save current IP in current frame
+    if (!runtime.call_frames.empty()) {
+        runtime.call_frames.back().ip = ip;
+    }
+
     // Create new call frame
-    if (runtime.frame_count >= MAX_CALL_FRAMES) {
+    if (static_cast<size_t>(runtime.frame_count) >= MAX_CALL_FRAMES) {
         error("Call stack overflow");
         return false;
     }
-    
+
     CallFrame frame;
     frame.closure = closure.get();
     frame.ip = 0;
-    frame.base_stack = runtime.stack_top - arg_count - 1;
-    frame.slot_count = func->max_stack;
-    
+    frame.base_stack = runtime.stack_top - arg_count;
+    frame.slot_count = func->max_stack > 0 ? func->max_stack : 256;
+    frame.local_count = func->local_count;
+
     runtime.call_frames.push_back(frame);
     runtime.frame_count++;
-    
-    // Set IP to start of function
+
+    // Reserve stack space for locals so expression stack doesn't overlap
+    runtime.stack_top = frame.base_stack + func->local_count;
+
+    // Update current function
+    if (func->func_id >= 0 && func->func_id < static_cast<int32_t>(current_module.functions.size())) {
+        current_function_idx = func->func_id;
+        current_function = &current_module.functions[current_function_idx];
+    } else {
+        error("Invalid function id in closure");
+        return false;
+    }
+
     ip = 0;
-    
+
     return true;
 }
 
 bool ClawVM::op_ret() {
     Value result = runtime.pop();
-    
+
     // Pop call frame
     if (runtime.frame_count > 0) {
         runtime.call_frames.pop_back();
         runtime.frame_count--;
     }
-    
-    // Remove local slots
-    int32_t base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
-    int32_t old_top = runtime.stack_top;
-    runtime.stack_top = base;
-    
+
+    // Remove local slots, but keep caller's locals reserved
+    int32_t caller_base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
+    int32_t caller_locals = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().local_count;
+    runtime.stack_top = caller_base + caller_locals;
+
     // Push result
     runtime.push(result);
-    
+
     if (runtime.frame_count == 0) {
         running = false;
+    } else {
+        // Restore IP and current function from caller frame
+        ip = runtime.call_frames.back().ip;
+        auto caller_closure = runtime.call_frames.back().closure;
+        if (caller_closure && caller_closure->function) {
+            current_function_idx = caller_closure->function->func_id;
+            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+                current_function = &current_module.functions[current_function_idx];
+            }
+        }
     }
-    
+
     return true;
 }
 
@@ -1218,28 +1300,52 @@ bool ClawVM::op_ret_null() {
         runtime.call_frames.pop_back();
         runtime.frame_count--;
     }
-    
-    int32_t base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
-    runtime.stack_top = base;
+
+    int32_t caller_base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
+    int32_t caller_locals = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().local_count;
+    runtime.stack_top = caller_base + caller_locals;
     runtime.push(Value::nil());
-    
+
     if (runtime.frame_count == 0) {
         running = false;
+    } else {
+        ip = runtime.call_frames.back().ip;
+        auto caller_closure = runtime.call_frames.back().closure;
+        if (caller_closure && caller_closure->function) {
+            current_function_idx = caller_closure->function->func_id;
+            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+                current_function = &current_module.functions[current_function_idx];
+            }
+        }
     }
-    
+
     return true;
 }
 
 bool ClawVM::op_call_ext() {
-    std::string name = read_string();
-    
+    int32_t packed = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    int32_t str_idx = packed & 0xFFFF;
+    int32_t arg_count = (packed >> 16) & 0xFFFF;
+
+    std::string name;
+    if (str_idx >= 0 && str_idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        name = current_module.constants.values[str_idx].str;
+    }
+
     auto it = runtime.builtins.find(name);
     if (it == runtime.builtins.end()) {
         error("Unknown builtin: " + name);
         return false;
     }
-    
+
     Value result = it->second(runtime);
+
+    // Pop arguments, then push result
+    if (arg_count > 0) {
+        for (int i = 0; i < arg_count; i++) {
+            runtime.pop();
+        }
+    }
     runtime.push(result);
     return true;
 }
@@ -1265,39 +1371,26 @@ bool ClawVM::op_define_func() {
 }
 
 bool ClawVM::op_closure() {
-    int32_t func_idx = read_int();
-    
+    int32_t func_idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+
     // Get function from module (by index into functions vector)
     if (func_idx < 0 || func_idx >= static_cast<int32_t>(current_module.functions.size())) {
         error("Invalid function index");
         return false;
     }
-    
+
     auto& func = current_module.functions[func_idx];
     std::shared_ptr<FunctionValue> fn = std::make_shared<FunctionValue>();
+    fn->func_id = func_idx;
     fn->name = func.name;
-    
+    fn->arity = static_cast<int32_t>(func.arity);
+    fn->local_count = static_cast<int32_t>(func.local_count);
+    fn->max_stack = static_cast<int32_t>(func.local_count + func.arity + 16);
+
     // Create closure with upvalues
     auto closure = std::make_shared<ClosureValue>();
     closure->function = fn;
-    
-    // Capture upvalues (need to be implemented)
-    for (int32_t i = 0; i < fn->upvalue_count; i++) {
-        int32_t is_local = read_byte();
-        int32_t index = read_byte();
-        
-        if (is_local) {
-            // Capture local variable
-            int32_t base = runtime.call_frames.back().base_stack;
-            Value* slot = &runtime.stack[base + index];
-            closure->upvalues.push_back(runtime.capture_upvalue(slot));
-        } else {
-            // Capture from outer closure
-            auto outer = runtime.call_frames.back().closure;
-            closure->upvalues.push_back(outer->upvalues[index]);
-        }
-    }
-    
+
     runtime.push(Value{ValueTag::CLOSURE, closure});
     return true;
 }
@@ -1311,7 +1404,7 @@ bool ClawVM::op_close_upvalue() {
 }
 
 bool ClawVM::op_get_upvalue() {
-    int32_t index = read_byte();
+    int32_t index = static_cast<int32_t>(current_function->code[ip - 1].operand);
     auto& closure = *runtime.call_frames.back().closure;
     Value& uv = closure.upvalues[index]->get();
     runtime.push(uv);
@@ -1319,7 +1412,7 @@ bool ClawVM::op_get_upvalue() {
 }
 
 bool ClawVM::op_set_upvalue() {
-    int32_t index = read_byte();
+    int32_t index = static_cast<int32_t>(current_function->code[ip - 1].operand);
     Value v = runtime.pop();
     auto& closure = *runtime.call_frames.back().closure;
     closure.upvalues[index]->get() = v;
@@ -1331,13 +1424,7 @@ bool ClawVM::op_set_upvalue() {
 // ============================================================================
 
 bool ClawVM::op_alloc_array() {
-    int32_t count = read_byte();
     auto arr = std::make_shared<ArrayValue>();
-    arr->elements.reserve(count);
-    for (int32_t i = 0; i < count; i++) {
-        arr->elements.push_back(runtime.pop());
-    }
-    std::reverse(arr->elements.begin(), arr->elements.end());
     runtime.push(Value{ValueTag::ARRAY, arr});
     return true;
 }
@@ -1460,6 +1547,9 @@ bool ClawVM::op_iter_create() {
         iter->kind = "array";
         iter->size = static_cast<int64_t>(s.size());
         iter->index = 0;
+    } else if (iterable.is_iterator()) {
+        runtime.push(iterable);
+        return true;
     } else {
         error("Cannot create iterator from this type");
         return false;
@@ -1682,15 +1772,17 @@ bool ClawVM::op_alloc_obj() {
 }
 
 bool ClawVM::op_load_field() {
-    std::string field = read_string();
+    Value field_val = runtime.pop();
     Value obj = runtime.pop();
+    std::string field = field_val.as_string();
     // Simplified: just return nil for now
     runtime.push(Value::nil());
     return true;
 }
 
 bool ClawVM::op_store_field() {
-    std::string field = read_string();
+    Value field_val = runtime.pop();
+    std::string field = field_val.as_string();
     Value val = runtime.pop();
     Value obj = runtime.pop();
     // Simplified: ignore for now
@@ -1709,7 +1801,7 @@ bool ClawVM::op_obj_type() {
 // ============================================================================
 
 bool ClawVM::op_create_tuple() {
-    int32_t count = read_byte();
+    int32_t count = static_cast<int32_t>(current_function->code[ip - 1].operand);
     auto tup = std::make_shared<TupleValue>();
     tup->elements.reserve(count);
     for (int32_t i = 0; i < count; i++) {
@@ -1902,8 +1994,8 @@ bool ClawVM::op_type_of() {
 bool ClawVM::op_ext() {
     // Extension opcode - for stdlib function calls
     // Format: EXT <opcode>
-    int opcode = read_byte();
-    
+    int opcode = static_cast<int>(current_function->code[ip - 1].operand);
+
     auto& stack = runtime.stack;
     
     switch (opcode) {

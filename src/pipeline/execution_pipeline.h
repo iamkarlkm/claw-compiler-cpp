@@ -13,9 +13,13 @@
 #include "../parser/parser.h"
 #include "../common/common.h"
 #include "../bytecode/bytecode.h"
+#include "../interpreter/interpreter.h"
 
 namespace claw {
 namespace pipeline {
+
+// 导入 interpreter::Value 类型
+using Value = interpreter::Value;
 
 // ============================================================================
 // 执行模式

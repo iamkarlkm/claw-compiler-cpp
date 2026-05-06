@@ -80,7 +80,10 @@ private:
     std::unique_ptr<ast::Statement> parse_subscribe_statement();
     std::unique_ptr<ast::Statement> parse_try_statement();
     std::unique_ptr<ast::Statement> parse_throw_statement();
-    
+    std::unique_ptr<ast::Statement> parse_struct_statement();
+    std::unique_ptr<ast::Statement> parse_use_statement();
+    std::unique_ptr<ast::Statement> parse_module_statement();
+
     // Helper methods
     std::unique_ptr<ast::Statement> parse_block_statement();
     SourceSpan span_from(const Token& start, const Token& end) const;
@@ -186,6 +189,9 @@ inline SourceSpan Parser::span_from(const Token& start, const Token& end) const 
 }
 
 inline SourceSpan Parser::span_from(const Token& start) const {
+    if (current == 0) {
+        return SourceSpan(start.span.start, start.span.end);
+    }
     return span_from(start, tokens[current - 1]);
 }
 
@@ -257,7 +263,17 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
     if (check(TokenType::Kw_let) || check(TokenType::Kw_const)) {
         return parse_statement();
     }
-    
+
+    // Check for use statement
+    if (check(TokenType::Kw_use)) {
+        return parse_use_statement();
+    }
+
+    // Check for module declaration
+    if (check(TokenType::Kw_mod)) {
+        return parse_module_statement();
+    }
+
     // Otherwise parse as statement
     return parse_statement();
 }
@@ -598,14 +614,65 @@ inline std::unique_ptr<ast::Statement> Parser::parse_let_statement() {
     if (!match(TokenType::Kw_let)) {
         return nullptr;
     }
-    
+
     auto let = std::make_unique<ast::LetStmt>("", span_from(previous()));
-    
+
     // Skip optional mut modifier
     if (check(TokenType::Kw_mut)) {
         advance(); // consume 'mut'
     }
-    
+
+    // Tuple destructuring: let (a, b) = expr
+    if (check(TokenType::LParen)) {
+        advance(); // consume '('
+
+        std::vector<std::string> names;
+        while (!check(TokenType::RParen) && !is_at_end()) {
+            if (!check(TokenType::Identifier)) {
+                if (reporter) {
+                    reporter->error("Expected variable name in destructuring pattern", span_from(peek()), "P014");
+                }
+                return nullptr;
+            }
+            advance(); // consume identifier
+            names.push_back(previous().text);
+
+            if (check(TokenType::Comma)) {
+                advance(); // consume ','
+            } else if (!check(TokenType::RParen)) {
+                if (reporter) {
+                    reporter->error("Expected ',' or ')' in destructuring pattern", span_from(peek()), "P015");
+                }
+                return nullptr;
+            }
+        }
+
+        if (!check(TokenType::RParen)) {
+            if (reporter) {
+                reporter->error("Expected ')' to close destructuring pattern", span_from(peek()), "P016");
+            }
+            return nullptr;
+        }
+        advance(); // consume ')'
+
+        // Parse '= expr'
+        if (!check(TokenType::Op_eq_assign)) {
+            if (reporter) {
+                reporter->error("Expected '=' after destructuring pattern", span_from(peek()), "P017");
+            }
+            return nullptr;
+        }
+        advance(); // consume '='
+        let->set_initializer(parse_expression());
+
+        // Store all names in tuple_names_ (name_ stays empty for destructuring)
+        for (const auto& name : names) {
+            let->add_tuple_name(name);
+        }
+
+        return let;
+    }
+
     // Get variable name
     if (!check(TokenType::Identifier)) {
         if (reporter) {
@@ -615,21 +682,21 @@ inline std::unique_ptr<ast::Statement> Parser::parse_let_statement() {
     }
     advance(); // consume variable name
     let->set_name(previous().text);
-    
+
     // Parse type annotation
     if (check(TokenType::Colon)) {
         advance(); // consume ':'
         let->set_type(parse_type());
     }
-    
+
     // Parse initializer
     if (check(TokenType::Op_eq_assign)) {
         advance(); // consume '='
         let->set_initializer(parse_expression());
     }
-    
+
     // Note: semicolon is handled by the caller (parse_declaration or parse_statement)
-    
+
     return let;
 }
 
@@ -979,6 +1046,175 @@ inline std::unique_ptr<ast::Statement> Parser::parse_throw_statement() {
     }
     
     return throw_stmt;
+}
+
+// Parse struct declaration
+inline std::unique_ptr<ast::Statement> Parser::parse_struct_statement() {
+    if (!match(TokenType::Kw_struct)) {
+        return nullptr;
+    }
+
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected struct name after 'struct'", span_from(peek()), "P060");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string struct_name = previous().text;
+
+    auto struct_stmt = std::make_unique<ast::StructStmt>(struct_name, span_from(previous()));
+
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after struct name", span_from(peek()), "P061");
+        }
+        return struct_stmt;
+    }
+    advance(); // consume '{'
+
+    while (!check(TokenType::RBrace) && !is_at_end()) {
+        if (check(TokenType::Identifier)) {
+            advance();
+            std::string field_name = previous().text;
+
+            std::string field_type;
+            if (check(TokenType::Colon)) {
+                advance(); // consume ':'
+                if (check(TokenType::Identifier) || check_any({
+                    TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                    TokenType::Type_u64, TokenType::Type_usize,
+                    TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                    TokenType::Type_i64, TokenType::Type_isize,
+                    TokenType::Type_f32, TokenType::Type_f64,
+                    TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                    advance();
+                    field_type = previous().text;
+                }
+            }
+
+            ast::StructField field;
+            field.name = field_name;
+            field.type = field_type;
+            field.span = span_from(previous());
+            struct_stmt->add_field(field);
+        }
+
+        if (check(TokenType::Comma)) {
+            advance();
+        }
+    }
+
+    if (!check(TokenType::RBrace)) {
+        if (reporter) {
+            reporter->error("Expected '}' after struct fields", span_from(peek()), "P062");
+        }
+    } else {
+        advance(); // consume '}'
+    }
+
+    return struct_stmt;
+}
+
+// Parse use statement
+// use path::to::item [as alias];
+inline std::unique_ptr<ast::Statement> Parser::parse_use_statement() {
+    if (!match(TokenType::Kw_use)) {
+        return nullptr;
+    }
+
+    auto use_stmt = std::make_unique<ast::ImportStmt>(span_from(previous()));
+
+    // Parse path components: ident (:: ident)*
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected identifier after 'use'", span_from(peek()), "P070");
+        }
+        return use_stmt;
+    }
+    advance();
+    use_stmt->add_import_path(previous().text);
+
+    while (check(TokenType::ScopeResolution)) {
+        advance(); // consume '::'
+        if (!check(TokenType::Identifier)) {
+            if (reporter) {
+                reporter->error("Expected identifier after '::'", span_from(peek()), "P071");
+            }
+            break;
+        }
+        advance();
+        use_stmt->add_import_path(previous().text);
+    }
+
+    // Optional alias
+    if (check(TokenType::Kw_as)) {
+        advance(); // consume 'as'
+        if (!check(TokenType::Identifier)) {
+            if (reporter) {
+                reporter->error("Expected identifier after 'as'", span_from(peek()), "P072");
+            }
+        } else {
+            advance();
+            use_stmt->set_alias(previous().text);
+        }
+    }
+
+    // Consume optional semicolon
+    if (check(TokenType::Semicolon)) {
+        advance();
+    }
+
+    return use_stmt;
+}
+
+// Parse module declaration
+// mod name { ... }
+inline std::unique_ptr<ast::Statement> Parser::parse_module_statement() {
+    if (!match(TokenType::Kw_mod)) {
+        return nullptr;
+    }
+
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected module name after 'mod'", span_from(peek()), "P080");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string mod_name = previous().text;
+
+    auto mod_stmt = std::make_unique<ast::ModuleStmt>(mod_name, span_from(previous()));
+
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after module name", span_from(peek()), "P081");
+        }
+        return mod_stmt;
+    }
+    advance(); // consume '{'
+
+    std::vector<std::unique_ptr<ast::Statement>> body;
+    while (!check(TokenType::RBrace) && !is_at_end()) {
+        auto decl = parse_declaration();
+        if (decl) {
+            body.push_back(std::move(decl));
+        } else {
+            // Skip unknown token to avoid infinite loop
+            if (!is_at_end()) advance();
+        }
+    }
+
+    if (!check(TokenType::RBrace)) {
+        if (reporter) {
+            reporter->error("Expected '}' after module body", span_from(peek()), "P082");
+        }
+    } else {
+        advance(); // consume '}'
+    }
+
+    mod_stmt->set_body(std::move(body));
+    return mod_stmt;
 }
 
 // Parse break statement
@@ -1362,7 +1598,22 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
     if (check(TokenType::Kw_throw)) {
         return parse_throw_statement();
     }
-    
+
+    // Struct declaration
+    if (check(TokenType::Kw_struct)) {
+        return parse_struct_statement();
+    }
+
+    // Use statement
+    if (check(TokenType::Kw_use)) {
+        return parse_use_statement();
+    }
+
+    // Module declaration
+    if (check(TokenType::Kw_mod)) {
+        return parse_module_statement();
+    }
+
     // Block
     if (check(TokenType::LBrace)) {
         return parse_block();
@@ -1771,12 +2022,12 @@ inline std::unique_ptr<ast::Expression> Parser::parse_range() {
     auto left = parse_term();
     
     // Check for range operator '..'
-    if (check(TokenType::Dot) && peek().type == TokenType::Dot) {
-        advance(); advance(); // consume '..'
+    if (check(TokenType::Op_range)) {
+        advance(); // consume '..'
         auto right = parse_term();
-        
+
         return std::make_unique<ast::BinaryExpr>(
-            TokenType::Dot, std::move(left), std::move(right),
+            TokenType::Op_range, std::move(left), std::move(right),
             span_from(previous())
         );
     }
@@ -1860,12 +2111,6 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
                 advance(); // consume ']'
             }
         } else if (check(TokenType::Dot)) {
-            // Check if this is '..' (range operator)
-            if (peek().type == TokenType::Dot) {
-                // Don't consume '.', let parse_range() handle '..'
-                break;
-            }
-
             // Member access or tuple index (tuple.0, tuple.1, etc.)
             advance(); // consume '.'
             
@@ -2023,13 +2268,75 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return std::make_unique<ast::ArrayExpr>(std::move(elements), span_from(previous()));
     }
     
+    // Lambda expression: fn(a: i64, b: i64) -> i64 { a + b }
+    if (check(TokenType::Kw_fn)) {
+        advance(); // consume 'fn'
+        auto lambda = std::make_unique<ast::LambdaExpr>(span_from(previous()));
+
+        // Parse parameters
+        std::vector<std::pair<std::string, std::string>> params;
+        if (check(TokenType::LParen)) {
+            advance(); // consume '('
+            while (!check(TokenType::RParen) && !is_at_end()) {
+                if (check(TokenType::Identifier)) {
+                    advance();
+                    std::string param_name = previous().text;
+                    std::string param_type;
+                    if (check(TokenType::Colon)) {
+                        advance(); // consume ':'
+                        if (check(TokenType::Identifier) || check_any({
+                            TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                            TokenType::Type_u64, TokenType::Type_usize,
+                            TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                            TokenType::Type_i64, TokenType::Type_isize,
+                            TokenType::Type_f32, TokenType::Type_f64,
+                            TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                            advance();
+                            param_type = previous().text;
+                        }
+                    }
+                    params.emplace_back(param_name, param_type);
+                }
+                if (check(TokenType::Comma)) {
+                    advance();
+                }
+            }
+            if (check(TokenType::RParen)) {
+                advance(); // consume ')'
+            }
+        }
+        lambda->set_params(std::move(params));
+
+        // Parse optional return type
+        if (check(TokenType::Op_arrow)) {
+            advance(); // consume '->'
+            if (check(TokenType::Identifier) || check_any({
+                TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                TokenType::Type_u64, TokenType::Type_usize,
+                TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                TokenType::Type_i64, TokenType::Type_isize,
+                TokenType::Type_f32, TokenType::Type_f64,
+                TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                advance();
+                lambda->set_return_type(previous().text);
+            }
+        }
+
+        // Parse body
+        if (check(TokenType::LBrace)) {
+            lambda->set_body(parse_block());
+        }
+
+        return lambda;
+    }
+
     // Identifier
     if (check(TokenType::Identifier)) {
         advance();  // consume identifier first
         auto name = previous().text;
         return std::make_unique<ast::IdentifierExpr>(name, span_from(previous()));
     }
-    
+
     // Parenthesized expression - also handles tuples like (1, 2)
     if (check(TokenType::LParen)) {
         advance();

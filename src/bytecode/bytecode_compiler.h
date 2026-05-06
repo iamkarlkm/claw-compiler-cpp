@@ -66,6 +66,7 @@ private:
         std::vector<JumpPatch> pendingJumps;
         int scopeDepth = 0;
         bool isClosure = false;
+        int nextSlot = 0;  // Flat slot counter across all scopes in function
     };
     
     // 编译方法

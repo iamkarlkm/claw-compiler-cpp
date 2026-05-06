@@ -13,19 +13,12 @@ IRGenerator::IRGenerator() {
 // 主转换入口
 // ============================================================================
 
-std::shared_ptr<ir::Module> IRGenerator::generate(std::shared_ptr<ast::Module> ast) {
-    if (!ast) return nullptr;
+std::shared_ptr<ir::Module> IRGenerator::generate(ast::Program* program) {
+    if (!program) return nullptr;
     
-    // 遍历所有语句并生成 IR
-    for (auto& stmt : ast->statements) {
-        if (auto fn = std::dynamic_pointer_cast<ast::FunctionDecl>(stmt)) {
-            generate_function_decl(fn);
-        } else if (auto let_stmt = std::dynamic_pointer_cast<ast::LetStmt>(stmt)) {
-            generate_let(let_stmt);
-        } else if (auto expr_stmt = std::dynamic_pointer_cast<ast::ExpressionStmt>(stmt)) {
-            generate_expr_stmt(expr_stmt);
-        }
-        // TODO: 其他顶层语句类型
+    // 遍历所有顶层声明并生成 IR
+    for (const auto& stmt : program->get_declarations()) {
+        generate_statement(stmt.get());
     }
     
     return builder->module;
@@ -69,224 +62,360 @@ std::shared_ptr<ir::Value> IRGenerator::lookup_variable(const std::string& name)
 }
 
 // ============================================================================
+// AST Type → IR Type 映射 (string-based)
+// ============================================================================
+
+std::shared_ptr<ir::Type> IRGenerator::map_ast_type(const std::string& type_name) {
+    if (type_name.empty()) {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Void);
+    }
+    
+    if (type_name == "int" || type_name == "i32") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
+    } else if (type_name == "i64" || type_name == "long") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int64);
+    } else if (type_name == "i16") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int16);
+    } else if (type_name == "i8") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int8);
+    } else if (type_name == "u8" || type_name == "byte") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::UInt8);
+    } else if (type_name == "u16") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::UInt16);
+    } else if (type_name == "u32") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::UInt32);
+    } else if (type_name == "u64") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::UInt64);
+    } else if (type_name == "float" || type_name == "f32") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Float32);
+    } else if (type_name == "double" || type_name == "f64") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Float64);
+    } else if (type_name == "bool") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Bool);
+    } else if (type_name == "string") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::String);
+    } else if (type_name == "void") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Void);
+    } else if (type_name == "char") {
+        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int8);
+    }
+    
+    // 默认返回 i32
+    return builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
+}
+
+// ============================================================================
 // 表达式转换
 // ============================================================================
 
-std::shared_ptr<ir::Value> IRGenerator::generate_expression(
-    std::shared_ptr<ast::Expression> expr) {
+std::shared_ptr<ir::Value> IRGenerator::generate_expression(ast::Expression* expr) {
     if (!expr) return nullptr;
     
-    // 字面量
-    if (auto lit = std::dynamic_pointer_cast<ast::LiteralExpr>(expr)) {
-        return generate_literal(lit);
+    switch (expr->get_kind()) {
+        case ast::Expression::Kind::Literal:
+            return generate_literal(static_cast<ast::LiteralExpr*>(expr));
+        case ast::Expression::Kind::Identifier:
+            return generate_identifier(static_cast<ast::IdentifierExpr*>(expr));
+        case ast::Expression::Kind::Binary:
+            return generate_binary_expr(static_cast<ast::BinaryExpr*>(expr));
+        case ast::Expression::Kind::Unary:
+            return generate_unary_expr(static_cast<ast::UnaryExpr*>(expr));
+        case ast::Expression::Kind::Call:
+            return generate_call(static_cast<ast::CallExpr*>(expr));
+        case ast::Expression::Kind::Index:
+            return generate_index(static_cast<ast::IndexExpr*>(expr));
+        case ast::Expression::Kind::Member:
+            return generate_member(static_cast<ast::MemberExpr*>(expr));
+        case ast::Expression::Kind::Array:
+            return generate_array_literal(static_cast<ast::ArrayExpr*>(expr));
+        case ast::Expression::Kind::Tuple:
+            return generate_tuple_literal(static_cast<ast::TupleExpr*>(expr));
+        case ast::Expression::Kind::Lambda:
+            return generate_lambda(static_cast<ast::LambdaExpr*>(expr));
+        default:
+            // Slice, Cast, Range, Ref, MutRef, Borrow etc.
+            std::cerr << "Warning: unhandled expression kind: "
+                      << static_cast<int>(expr->get_kind()) << std::endl;
+            return nullptr;
     }
-    
-    // 标识符
-    if (auto id = std::dynamic_pointer_cast<ast::IdentifierExpr>(expr)) {
-        return generate_identifier(id);
-    }
-    
-    // 二元表达式
-    if (auto bin = std::dynamic_pointer_cast<ast::BinaryExpr>(expr)) {
-        return generate_binary_expr(bin);
-    }
-    
-    // 一元表达式
-    if (auto un = std::dynamic_pointer_cast<ast::UnaryExpr>(expr)) {
-        return generate_unary_expr(un);
-    }
-    
-    // 函数调用
-    if (auto call = std::dynamic_pointer_cast<ast::CallExpr>(expr)) {
-        return generate_call(call);
-    }
-    
-    // 下标表达式
-    if (auto idx = std::dynamic_pointer_cast<ast::IndexExpr>(expr)) {
-        return generate_index(idx);
-    }
-    
-    // TODO: 其他表达式类型
-    
-    return nullptr;
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_literal(
-    std::shared_ptr<ast::LiteralExpr> lit) {
+std::shared_ptr<ir::Value> IRGenerator::generate_literal(ast::LiteralExpr* lit) {
     if (!lit) return nullptr;
     
-    switch (lit->literal_type) {
-        case ast::LiteralType::Integer:
-            return builder->create_constant(lit->int_value);
-        case ast::LiteralType::Float:
-            return builder->create_constant(lit->float_value);
-        case ast::LiteralType::String:
-            return builder->create_constant(lit->string_value);
-        case ast::LiteralType::Boolean:
-            return builder->create_constant(lit->bool_value);
-        case ast::LiteralType::Bytes:
-            // TODO: 字节字面量
-            break;
-    }
+    const auto& val = lit->get_value();
     
-    return nullptr;
+    return std::visit([this](auto&& v) -> std::shared_ptr<ir::Value> {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, int64_t>) {
+            return builder->create_constant(v);
+        } else if constexpr (std::is_same_v<T, double>) {
+            return builder->create_constant(v);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            return builder->create_constant(v);
+        } else if constexpr (std::is_same_v<T, bool>) {
+            return builder->create_constant(v);
+        } else if constexpr (std::is_same_v<T, char>) {
+            return builder->create_constant(static_cast<int64_t>(v));
+        } else {
+            // monostate (null)
+            return builder->create_constant(int64_t(0));
+        }
+    }, val);
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_identifier(
-    std::shared_ptr<ast::IdentifierExpr> id) {
+std::shared_ptr<ir::Value> IRGenerator::generate_identifier(ast::IdentifierExpr* id) {
     if (!id) return nullptr;
     
-    auto value = lookup_variable(id->name);
+    auto value = lookup_variable(id->get_name());
     if (!value) {
-        std::cerr << "Warning: undefined variable: " << id->name << std::endl;
+        std::cerr << "Warning: undefined variable: " << id->get_name() << std::endl;
         return nullptr;
     }
     
     // 如果是指针类型，需要加载
     if (dynamic_cast<ir::PointerType*>(value->type.get())) {
-        return builder->create_load(value, id->name);
+        return builder->create_load(value, id->get_name());
     }
     
     return value;
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_binary_expr(
-    std::shared_ptr<ast::BinaryExpr> bin) {
+std::shared_ptr<ir::Value> IRGenerator::generate_binary_expr(ast::BinaryExpr* bin) {
     if (!bin) return nullptr;
     
-    auto lhs = generate_expression(bin->lhs);
-    auto rhs = generate_expression(bin->rhs);
+    auto lhs = generate_expression(bin->get_left());
+    auto rhs = generate_expression(bin->get_right());
     
     if (!lhs || !rhs) return nullptr;
     
+    TokenType op = bin->get_operator();
+    
     // 比较运算
-    if (bin->is_comparison) {
-        auto cmp_op = map_comparison_op(bin->op);
+    if (op == TokenType::Op_eq || op == TokenType::Op_neq ||
+        op == TokenType::Op_lt  || op == TokenType::Op_gt  ||
+        op == TokenType::Op_lte || op == TokenType::Op_gte) {
+        auto cmp_op = map_comparison_op(op);
         return builder->create_cmp(cmp_op, lhs, rhs);
     }
     
-    // 算术/逻辑运算
-    auto op = map_binary_op(bin->op);
-    return builder->create_binary_op(op, lhs, rhs);
+    // 逻辑运算
+    if (op == TokenType::Op_and || op == TokenType::Op_or) {
+        auto ir_op = map_binary_op(op);
+        return builder->create_binary_op(ir_op, lhs, rhs);
+    }
+    
+    // 算术/位运算
+    auto ir_op = map_binary_op(op);
+    return builder->create_binary_op(ir_op, lhs, rhs);
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_unary_expr(
-    std::shared_ptr<ast::UnaryExpr> un) {
+std::shared_ptr<ir::Value> IRGenerator::generate_unary_expr(ast::UnaryExpr* un) {
     if (!un) return nullptr;
     
-    auto operand = generate_expression(un->operand);
+    auto operand = generate_expression(un->get_operand());
     if (!operand) return nullptr;
     
-    auto op = map_unary_op(un->op);
+    auto op = map_unary_op(un->get_operator());
     return builder->create_unary_op(op, operand);
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_call(
-    std::shared_ptr<ast::CallExpr> call) {
+std::shared_ptr<ir::Value> IRGenerator::generate_call(ast::CallExpr* call) {
     if (!call) return nullptr;
     
     std::vector<std::shared_ptr<ir::Value>> args;
-    for (auto& arg : call->arguments) {
-        auto arg_val = generate_expression(arg);
+    for (const auto& arg : call->get_arguments()) {
+        auto arg_val = generate_expression(arg.get());
         if (arg_val) args.push_back(arg_val);
     }
     
-    return builder->create_call(call->function_name, args);
+    // 获取被调用函数名
+    std::string callee_name;
+    if (auto* callee_id = dynamic_cast<ast::IdentifierExpr*>(call->get_callee())) {
+        callee_name = callee_id->get_name();
+    } else if (auto* callee_member = dynamic_cast<ast::MemberExpr*>(call->get_callee())) {
+        // method call: obj.method(args) — generate as "obj_method"
+        // For now, use a simplified representation
+        callee_name = callee_member->get_member();
+    } else {
+        callee_name = "__unknown_call";
+    }
+    
+    return builder->create_call(callee_name, args);
 }
 
-std::shared_ptr<ir::Value> IRGenerator::generate_index(
-    std::shared_ptr<ast::IndexExpr> idx) {
+std::shared_ptr<ir::Value> IRGenerator::generate_index(ast::IndexExpr* idx) {
     if (!idx) return nullptr;
     
-    auto base = generate_expression(idx->base);
+    auto base = generate_expression(idx->get_object());
     if (!base) return nullptr;
     
-    // 生成下标计算
-    auto index = generate_expression(idx->index);
+    auto index = generate_expression(idx->get_index());
     if (!index) return nullptr;
     
     // 简化实现：假设 base 是指针，计算地址
-    // 实际需要考虑元素大小
     // TODO: 实现正确的 GEP
-    
-    // 暂时返回 base（简化处理）
     return base;
 }
+
+std::shared_ptr<ir::Value> IRGenerator::generate_member(ast::MemberExpr* member) {
+    if (!member) return nullptr;
+    
+    auto obj = generate_expression(member->get_object());
+    if (!obj) return nullptr;
+    
+    // 简化处理：成员访问暂不实现完整 GEP
+    // TODO: 实现 struct field access
+    std::cerr << "Warning: member access not fully implemented: " 
+              << member->get_member() << std::endl;
+    return obj;
+}
+
+// generate_array_literal/generate_tuple_literal/generate_lambda moved to ir_generator_enhanced.cpp
 
 // ============================================================================
 // 语句转换
 // ============================================================================
 
-void IRGenerator::generate_statement(std::shared_ptr<ast::Statement> stmt) {
+void IRGenerator::generate_statement(ast::Statement* stmt) {
     if (!stmt) return;
     
-    if (auto fn = std::dynamic_pointer_cast<ast::FunctionDecl>(stmt)) {
-        generate_function_decl(fn);
-    } else if (auto let_stmt = std::dynamic_pointer_cast<ast::LetStmt>(stmt)) {
-        generate_let(let_stmt);
-    } else if (auto assign = std::dynamic_pointer_cast<ast::AssignStmt>(stmt)) {
-        generate_assign(assign);
-    } else if (auto ret = std::dynamic_pointer_cast<ast::ReturnStmt>(stmt)) {
-        generate_return(ret);
-    } else if (auto if_stmt = std::dynamic_pointer_cast<ast::IfStmt>(stmt)) {
-        generate_if(if_stmt);
-    } else if (auto block = std::dynamic_pointer_cast<ast::BlockStmt>(stmt)) {
-        generate_block(block);
-    } else if (auto expr_stmt = std::dynamic_pointer_cast<ast::ExpressionStmt>(stmt)) {
-        generate_expr_stmt(expr_stmt);
-    } else if (auto match = std::dynamic_pointer_cast<ast::MatchStmt>(stmt)) {
-        generate_match(match);
-    } else if (auto for_stmt = std::dynamic_pointer_cast<ast::ForStmt>(stmt)) {
-        generate_for(for_stmt);
-    } else if (auto while_stmt = std::dynamic_pointer_cast<ast::WhileStmt>(stmt)) {
-        generate_while(while_stmt);
-    } else if (auto loop_stmt = std::dynamic_pointer_cast<ast::LoopStmt>(stmt)) {
-        generate_loop(loop_stmt);
-    } else if (auto break_stmt = std::dynamic_pointer_cast<ast::BreakStmt>(stmt)) {
-        generate_break();
-    } else if (auto cont_stmt = std::dynamic_pointer_cast<ast::ContinueStmt>(stmt)) {
-        generate_continue();
-    } else if (auto publish = std::dynamic_pointer_cast<ast::PublishStmt>(stmt)) {
-        generate_publish(publish);
-    } else if (auto sub = std::dynamic_pointer_cast<ast::SubscribeStmt>(stmt)) {
-        generate_subscribe(sub);
+    switch (stmt->get_kind()) {
+        case ast::Statement::Kind::Function:
+            generate_function_decl(static_cast<ast::FunctionStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Let:
+            generate_let(static_cast<ast::LetStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Const: {
+            // Treat const like let
+            auto* const_stmt = static_cast<ast::ConstStmt*>(stmt);
+            if (const_stmt->get_initializer()) {
+                auto value = generate_expression(const_stmt->get_initializer());
+                if (value) {
+                    std::shared_ptr<ir::Type> var_type = value->type;
+                    if (!const_stmt->get_type().empty()) {
+                        var_type = map_ast_type(const_stmt->get_type());
+                    }
+                    auto alloca = builder->create_alloca(var_type, 1, const_stmt->get_name());
+                    builder->create_store(value, alloca);
+                    declare_variable(const_stmt->get_name(), alloca);
+                }
+            }
+            break;
+        }
+        case ast::Statement::Kind::Assign:
+            generate_assign(static_cast<ast::AssignStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Return:
+            generate_return(static_cast<ast::ReturnStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::If:
+            generate_if(static_cast<ast::IfStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Block:
+            generate_block(static_cast<ast::BlockStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Expression:
+            generate_expr_stmt(static_cast<ast::ExprStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Match:
+            generate_match(static_cast<ast::MatchStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::For:
+            generate_for(static_cast<ast::ForStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::While:
+            generate_while(static_cast<ast::WhileStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Break:
+            generate_break();
+            break;
+        case ast::Statement::Kind::Continue:
+            generate_continue();
+            break;
+        case ast::Statement::Kind::Publish:
+            generate_publish(static_cast<ast::PublishStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Subscribe:
+            generate_subscribe(static_cast<ast::SubscribeStmt*>(stmt));
+            break;
+        case ast::Statement::Kind::Try: {
+            // Simplified: just generate the try body
+            auto* try_stmt = static_cast<ast::TryStmt*>(stmt);
+            if (try_stmt->get_body()) {
+                generate_statement(try_stmt->get_body());
+            }
+            break;
+        }
+        case ast::Statement::Kind::Throw: {
+            auto* throw_stmt = static_cast<ast::ThrowStmt*>(stmt);
+            if (throw_stmt->get_value()) {
+                generate_expression(throw_stmt->get_value());
+            }
+            builder->create_panic("throw");
+            break;
+        }
+        case ast::Statement::Kind::Import:
+        case ast::Statement::Kind::Export:
+        case ast::Statement::Kind::Module:
+        case ast::Statement::Kind::Struct:
+        case ast::Statement::Kind::Enum:
+        case ast::Statement::Kind::Trait:
+        case ast::Statement::Kind::Impl:
+        case ast::Statement::Kind::TypeAlias:
+        case ast::Statement::Kind::SerialProcess:
+            // TODO: implement these statement types
+            break;
+        default:
+            break;
     }
 }
 
-void IRGenerator::generate_function_decl(std::shared_ptr<ast::FunctionDecl> decl) {
+void IRGenerator::generate_function_decl(ast::FunctionStmt* decl) {
     if (!decl) return;
     
     // 创建函数类型
-    auto ret_type = map_ast_type(decl->return_type);
-    auto func = builder->create_function(decl->name, ret_type);
+    auto ret_type = map_ast_type(decl->get_return_type());
+    auto func = builder->create_function(decl->get_name(), ret_type);
     
     // 保存函数映射
-    functions[decl->name] = func;
+    functions[decl->get_name()] = func;
     
     // 设置当前函数
     current_function = func;
     
     // 创建入口块
     entry_block = builder->create_block("entry");
+    current_block = entry_block;
     builder->set_insert_point(entry_block);
     
     // 处理参数
     enter_scope();
-    for (size_t i = 0; i < decl->params.size(); ++i) {
-        auto& param = decl->params[i];
-        auto param_type = map_ast_type(param.type);
+    for (const auto& param : decl->get_params()) {
+        const std::string& param_name = param.first;
+        const std::string& param_type_name = param.second;
+        auto param_type = map_ast_type(param_type_name);
         
         // 为参数创建 alloca
-        auto alloca = builder->create_alloca(param_type, 1, param.name);
-        declare_variable(param.name, alloca);
+        auto alloca = builder->create_alloca(param_type, 1, param_name);
+        declare_variable(param_name, alloca);
         
         // 将参数存储到 alloca
         // TODO: 正确处理参数传递
     }
     
     // 生成函数体
-    if (decl->body) {
-        generate_block(decl->body);
+    if (decl->get_body()) {
+        // Body is an ASTNode; if it's a BlockStmt, use generate_block
+        if (auto* body_block = dynamic_cast<ast::BlockStmt*>(decl->get_body())) {
+            generate_block(body_block);
+        } else {
+            // Body might be a single statement
+            if (auto* body_stmt = dynamic_cast<ast::Statement*>(decl->get_body())) {
+                generate_statement(body_stmt);
+            }
+        }
     }
     
     // 如果没有返回指令，添加 void return
@@ -297,145 +426,136 @@ void IRGenerator::generate_function_decl(std::shared_ptr<ast::FunctionDecl> decl
     exit_scope();
 }
 
-void IRGenerator::generate_return(std::shared_ptr<ast::ReturnStmt> ret) {
+void IRGenerator::generate_return(ast::ReturnStmt* ret) {
     if (!ret) return;
     
     std::shared_ptr<ir::Value> ret_val = nullptr;
-    if (ret->value) {
-        ret_val = generate_expression(ret->value);
+    if (ret->get_value()) {
+        ret_val = generate_expression(ret->get_value());
     }
     
     builder->create_ret(ret_val);
 }
 
-void IRGenerator::generate_let(std::shared_ptr<ast::LetStmt> let) {
+void IRGenerator::generate_let(ast::LetStmt* let) {
     if (!let) return;
     
-    auto value = generate_expression(let->value);
+    auto value = generate_expression(let->get_initializer());
     if (!value) return;
     
     // 确定类型
     std::shared_ptr<ir::Type> var_type = value->type;
-    if (let->type) {
-        var_type = map_ast_type(let->type);
+    if (!let->get_type().empty()) {
+        var_type = map_ast_type(let->get_type());
     }
     
     // 创建局部变量 (alloca)
-    auto alloca = builder->create_alloca(var_type, 1, let->name);
+    auto alloca = builder->create_alloca(var_type, 1, let->get_name());
     
     // 存储初始值
     builder->create_store(value, alloca);
     
     // 声明变量
-    declare_variable(let->name, alloca);
+    declare_variable(let->get_name(), alloca);
 }
 
-void IRGenerator::generate_assign(std::shared_ptr<ast::AssignStmt> assign) {
+void IRGenerator::generate_assign(ast::AssignStmt* assign) {
     if (!assign) return;
     
-    auto value = generate_expression(assign->value);
+    auto value = generate_expression(assign->get_value());
     if (!value) return;
     
     // 查找目标变量
-    auto target = lookup_variable(assign->target->name);
-    if (!target) {
-        std::cerr << "Error: assignment to undefined variable: " 
-                  << assign->target->name << std::endl;
-        return;
+    // target is an Expression — typically an IdentifierExpr
+    auto* target_expr = assign->get_target();
+    if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(target_expr)) {
+        auto target = lookup_variable(ident->get_name());
+        if (!target) {
+            std::cerr << "Error: assignment to undefined variable: " 
+                      << ident->get_name() << std::endl;
+            return;
+        }
+        builder->create_store(value, target);
+    } else if (auto* idx_expr = dynamic_cast<ast::IndexExpr*>(target_expr)) {
+        // Index assignment: arr[i] = value
+        auto base = generate_expression(idx_expr->get_object());
+        auto index = generate_expression(idx_expr->get_index());
+        // TODO: implement indexed store
+        std::cerr << "Warning: indexed assignment not fully implemented" << std::endl;
+    } else if (dynamic_cast<ast::MemberExpr*>(target_expr)) {
+        // Member assignment: obj.field = value
+        // TODO: implement member store
+        std::cerr << "Warning: member assignment not fully implemented" << std::endl;
     }
-    
-    // 存储值
-    builder->create_store(value, target);
 }
 
-void IRGenerator::generate_if(std::shared_ptr<ast::IfStmt> if_stmt) {
+void IRGenerator::generate_if(ast::IfStmt* if_stmt) {
     if (!if_stmt) return;
     
-    auto cond = generate_expression(if_stmt->condition);
-    if (!cond) return;
+    const auto& conditions = if_stmt->get_conditions();
+    const auto& bodies = if_stmt->get_bodies();
+    auto* else_body = if_stmt->get_else_body();
     
-    // 创建基本块
-    auto then_block = create_block("if.then");
-    auto else_block = create_block("if.else");
+    if (conditions.empty()) return;
+    
     auto merge_block = create_block("if.end");
     
-    // 条件分支
-    builder->create_cond_br(cond, then_block, else_block);
+    // Handle if / else if / else chain
+    for (size_t i = 0; i < conditions.size(); ++i) {
+        auto cond = generate_expression(conditions[i].get());
+        if (!cond) {
+            builder->create_br(merge_block);
+            builder->set_insert_point(merge_block);
+            return;
+        }
+        
+        auto then_block = create_block("if.then." + std::to_string(i));
+        auto next_block = (i < conditions.size() - 1 || else_body)
+            ? create_block("if.next." + std::to_string(i))
+            : merge_block;
+        
+        builder->create_cond_br(cond, then_block, next_block);
+        
+        // Generate then body
+        builder->set_insert_point(then_block);
+        enter_scope();
+        if (auto* body_stmt = dynamic_cast<ast::BlockStmt*>(bodies[i].get())) {
+            generate_block(body_stmt);
+        } else if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+            generate_statement(stmt);
+        }
+        if (!current_block->terminator) {
+            builder->create_br(merge_block);
+        }
+        exit_scope();
+        
+        builder->set_insert_point(next_block);
+    }
     
-    // 生成 then 分支
-    builder->set_insert_point(then_block);
-    if (if_stmt->then_branch) {
-        generate_block(if_stmt->then_branch);
-    }
-    if (!current_block->terminator) {
-        builder->create_br(merge_block);
-    }
-    
-    // 生成 else 分支
-    builder->set_insert_point(else_block);
-    if (if_stmt->else_branch) {
-        generate_block(if_stmt->else_branch);
-    }
-    if (!current_block->terminator) {
-        builder->create_br(merge_block);
+    // Generate else body
+    if (else_body) {
+        enter_scope();
+        if (auto* else_block = dynamic_cast<ast::BlockStmt*>(else_body)) {
+            generate_block(else_block);
+        } else if (auto* stmt = dynamic_cast<ast::Statement*>(else_body)) {
+            generate_statement(stmt);
+        }
+        if (!current_block->terminator) {
+            builder->create_br(merge_block);
+        }
+        exit_scope();
     }
     
-    // 设置合并点
     builder->set_insert_point(merge_block);
 }
 
-void IRGenerator::generate_loop(std::shared_ptr<ast::LoopStmt> loop) {
-    if (!loop) return;
-    
-    // 创建基本块
-    auto cond_block = create_block("loop.cond");
-    auto body_block = create_block("loop.body");
-    auto after_block = create_block("loop.end");
-    
-    // 保存循环上下文
-    LoopContext ctx{cond_block, body_block, after_block};
-    loop_stack.push_back(ctx);
-    
-    // 跳转到条件块
-    builder->create_br(cond_block);
-    
-    // 生成条件
-    builder->set_insert_point(cond_block);
-    if (loop->condition) {
-        auto cond = generate_expression(loop->condition);
-        builder->create_cond_br(cond, body_block, after_block);
-    } else {
-        // 无限循环
-        builder->create_br(body_block);
-    }
-    
-    // 生成循环体
-    builder->set_insert_point(body_block);
-    enter_scope();
-    if (loop->body) {
-        generate_block(loop->body);
-    }
-    if (!current_block->terminator) {
-        builder->create_br(cond_block);
-    }
-    exit_scope();
-    
-    // 设置 after 块
-    builder->set_insert_point(after_block);
-    
-    loop_stack.pop_back();
-}
-
-void IRGenerator::generate_for(std::shared_ptr<ast::ForStmt> for_loop) {
+void IRGenerator::generate_for(ast::ForStmt* for_loop) {
     if (!for_loop) return;
     
     // for var in iterable { body }
-    // 支持 range: 0..n 或 0..=n (inclusive)
-    // 支持数组/张量迭代
-    
     std::string loop_var = for_loop->get_variable();
-    auto iterable = for_loop->get_iterable();
-    auto body = for_loop->get_body();
+    auto* iterable = for_loop->get_iterable();
+    auto* body = for_loop->get_body();
     
     if (!iterable || !body) return;
     
@@ -448,26 +568,22 @@ void IRGenerator::generate_for(std::shared_ptr<ast::ForStmt> for_loop) {
     auto iter_val = generate_expression(iterable);
     if (!iter_val) return;
     
-    // 判断迭代类型：范围 (BinaryExpr) 或其他
-    if (auto bin_expr = std::dynamic_pointer_cast<ast::BinaryExpr>(
-            std::const_pointer_cast<ast::Expression>(
-                std::shared_ptr<ast::Expression>(iterable, iterable.get())))) {
-        // 范围表达式: start..end 或 start..=end
-        if (bin_expr->op == ast::BinaryOp::Range || 
-            bin_expr->op == ast::BinaryOp::RangeInclusive) {
-            
-            auto start_val = generate_expression(bin_expr->left);
-            auto end_val = generate_expression(bin_expr->right);
+    // 判断迭代类型：范围 (BinaryExpr with Op_range/Op_range_eq) 或其他
+    if (auto* bin_expr = dynamic_cast<ast::BinaryExpr*>(iterable)) {
+        TokenType op = bin_expr->get_operator();
+        if (op == TokenType::Op_range || op == TokenType::Op_range_eq) {
+            // 范围表达式: start..end 或 start..=end
+            auto start_val = generate_expression(bin_expr->get_left());
+            auto end_val = generate_expression(bin_expr->get_right());
             
             if (!start_val || !end_val) return;
             
-            // 创建循环计数器 (使用 i32)
+            // 创建循环计数器
             auto i32_type = builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
             auto counter = builder->create_alloca(i32_type, 1, loop_var + ".ptr");
             
             // 存储起始值
-            auto start_i32 = builder->create_cast(start_val, i32_type, ir::OpCode::SIToFP);
-            builder->create_store(counter, start_i32);
+            builder->create_store(start_val, counter);
             
             // 保存循环上下文
             LoopContext ctx{cond_block, body_block, after_block};
@@ -478,13 +594,12 @@ void IRGenerator::generate_for(std::shared_ptr<ast::ForStmt> for_loop) {
             
             // 生成条件块
             builder->set_insert_point(cond_block);
-            auto count_val = builder->create_load(counter, i32_type);
-            auto end_i32 = builder->create_cast(end_val, i32_type, ir::OpCode::SIToFP);
+            auto count_val = builder->create_load(counter, loop_var + ".current");
             
             // 比较: counter < end (或 <= end for inclusive)
-            auto cmp_op = (bin_expr->op == ast::BinaryOp::RangeInclusive) 
+            auto cmp_op = (op == TokenType::Op_range_eq) 
                 ? ir::OpCode::Le : ir::OpCode::Lt;
-            auto cond = builder->create_binary(cmp_op, count_val, end_i32);
+            auto cond = builder->create_cmp(cmp_op, count_val, end_val);
             builder->create_cond_br(cond, body_block, after_block);
             
             // 生成循环体
@@ -492,22 +607,20 @@ void IRGenerator::generate_for(std::shared_ptr<ast::ForStmt> for_loop) {
             enter_scope();
             
             // 加载当前计数值并声明循环变量
-            auto curr_val = builder->create_load(counter, i32_type);
+            auto curr_val = builder->create_load(counter, loop_var);
             declare_variable(loop_var, curr_val);
             
             // 生成循环体语句
-            if (auto block_stmt = std::dynamic_pointer_cast<ast::BlockStmt>(
-                    std::const_pointer_cast<ast::ASTNode>(
-                        std::shared_ptr<ast::ASTNode>(body, body.get())))) {
+            if (auto* block_stmt = dynamic_cast<ast::BlockStmt*>(body)) {
                 generate_block(block_stmt);
             }
             
             // 递增计数器
             if (!current_block->terminator) {
-                auto count_val2 = builder->create_load(counter, i32_type);
-                auto one = builder->create_constant(int64_t(1), i32_type);
-                auto next = builder->create_binary(ir::OpCode::Add, count_val2, one);
-                builder->create_store(counter, next);
+                auto count_val2 = builder->create_load(counter, loop_var + ".next");
+                auto one = builder->create_constant(int64_t(1));
+                auto next = builder->create_add(count_val2, one);
+                builder->create_store(next, counter);
                 builder->create_br(cond_block);
             }
             exit_scope();
@@ -527,12 +640,12 @@ void IRGenerator::generate_for(std::shared_ptr<ast::ForStmt> for_loop) {
     builder->set_insert_point(after_block);
 }
 
-void IRGenerator::generate_while(std::shared_ptr<ast::WhileStmt> while_loop) {
+void IRGenerator::generate_while(ast::WhileStmt* while_loop) {
     if (!while_loop) return;
     
     // while condition { body }
-    auto condition = while_loop->get_condition();
-    auto body = while_loop->get_body();
+    auto* condition = while_loop->get_condition();
+    auto* body = while_loop->get_body();
     
     if (!condition || !body) return;
     
@@ -552,10 +665,7 @@ void IRGenerator::generate_while(std::shared_ptr<ast::WhileStmt> while_loop) {
     builder->set_insert_point(cond_block);
     auto cond = generate_expression(condition);
     if (cond) {
-        // 转换为 i1 进行条件分支
-        auto i1_type = builder->get_primitive_type(ir::PrimitiveTypeKind::Bool);
-        auto cond_bool = builder->create_cast(cond, i1_type, ir::OpCode::Trunc);
-        builder->create_cond_br(cond_bool, body_block, after_block);
+        builder->create_cond_br(cond, body_block, after_block);
     } else {
         builder->create_br(after_block);
     }
@@ -564,9 +674,7 @@ void IRGenerator::generate_while(std::shared_ptr<ast::WhileStmt> while_loop) {
     builder->set_insert_point(body_block);
     enter_scope();
     
-    if (auto block_stmt = std::dynamic_pointer_cast<ast::BlockStmt>(
-            std::const_pointer_cast<ast::ASTNode>(
-                std::shared_ptr<ast::ASTNode>(body, body.get())))) {
+    if (auto* block_stmt = dynamic_cast<ast::BlockStmt*>(body)) {
         generate_block(block_stmt);
     }
     
@@ -596,27 +704,27 @@ void IRGenerator::generate_continue() {
     builder->create_br(loop_stack.back().condition_block);
 }
 
-void IRGenerator::generate_block(std::shared_ptr<ast::BlockStmt> block) {
+void IRGenerator::generate_block(ast::BlockStmt* block) {
     if (!block) return;
     
     enter_scope();
-    for (auto& stmt : block->statements) {
-        generate_statement(stmt);
+    for (const auto& stmt : block->get_statements()) {
+        generate_statement(stmt.get());
         if (current_block && current_block->terminator) break;
     }
     exit_scope();
 }
 
-void IRGenerator::generate_expr_stmt(std::shared_ptr<ast::ExpressionStmt> expr_stmt) {
+void IRGenerator::generate_expr_stmt(ast::ExprStmt* expr_stmt) {
     if (!expr_stmt) return;
-    generate_expression(expr_stmt->expression);
+    generate_expression(expr_stmt->get_expr());
 }
 
-void IRGenerator::generate_match(std::shared_ptr<ast::MatchStmt> match) {
+void IRGenerator::generate_match(ast::MatchStmt* match) {
     if (!match) return;
     
     // match expr { pattern1 => body1, pattern2 => body2, _ => default }
-    auto match_expr = match->get_expr();
+    auto* match_expr = match->get_expr();
     const auto& patterns = match->get_patterns();
     const auto& bodies = match->get_bodies();
     
@@ -636,7 +744,7 @@ void IRGenerator::generate_match(std::shared_ptr<ast::MatchStmt> match) {
         // 检查是否是通配符模式 (_)
         bool is_wildcard = false;
         if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(patterns[i].get())) {
-            if (ident->name == "_") {
+            if (ident->get_name() == "_") {
                 is_wildcard = true;
             }
         }
@@ -660,12 +768,12 @@ void IRGenerator::generate_match(std::shared_ptr<ast::MatchStmt> match) {
     builder->set_insert_point(current_cond_block);
     
     for (size_t i = 0; i < patterns.size(); ++i) {
-        auto pattern_val = generate_expression(patterns[i]);
+        auto pattern_val = generate_expression(patterns[i].get());
         
         // 比较: expr == pattern
-        auto cmp = builder->create_binary(ir::OpCode::Eq, expr_val, pattern_val);
+        auto cmp = builder->create_cmp(ir::OpCode::Eq, expr_val, pattern_val);
         
-        // 决定目标块：如果是最后一个非通配符case，跳转到default/after
+        // 决定目标块
         std::shared_ptr<ir::BasicBlock> next_target;
         if (i < patterns.size() - 1) {
             next_target = case_blocks[i + 1];
@@ -679,10 +787,10 @@ void IRGenerator::generate_match(std::shared_ptr<ast::MatchStmt> match) {
         builder->set_insert_point(case_blocks[i]);
         enter_scope();
         
-        if (auto block_stmt = std::dynamic_pointer_cast<ast::BlockStmt>(
-                std::const_pointer_cast<ast::ASTNode>(
-                    std::shared_ptr<ast::ASTNode>(bodies[i], bodies[i].get())))) {
+        if (auto* block_stmt = dynamic_cast<ast::BlockStmt*>(bodies[i].get())) {
             generate_block(block_stmt);
+        } else if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+            generate_statement(stmt);
         }
         
         if (!current_block->terminator) {
@@ -699,87 +807,40 @@ void IRGenerator::generate_match(std::shared_ptr<ast::MatchStmt> match) {
 // 类型和操作码映射
 // ============================================================================
 
-std::shared_ptr<ir::Type> IRGenerator::map_ast_type(
-    const std::shared_ptr<ast::Type>& ast_type) {
-    if (!ast_type) {
-        return builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
-    }
-    
-    // 基础类型映射
-    if (auto prim = std::dynamic_pointer_cast<ast::PrimitiveType>(ast_type)) {
-        if (prim->name == "int" || prim->name == "i32") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
-        } else if (prim->name == "i64" || prim->name == "long") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Int64);
-        } else if (prim->name == "float" || prim->name == "f32") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Float32);
-        } else if (prim->name == "double" || prim->name == "f64") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Float64);
-        } else if (prim->name == "bool") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Bool);
-        } else if (prim->name == "string") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::String);
-        } else if (prim->name == "void") {
-            return builder->get_primitive_type(ir::PrimitiveTypeKind::Void);
-        }
-    }
-    
-    // 数组类型
-    if (auto arr = std::dynamic_pointer_cast<ast::ArrayType>(ast_type)) {
-        auto elem_type = map_ast_type(arr->element_type);
-        return builder->get_array_type(elem_type, arr->size);
-    }
-    
-    // 函数类型
-    if (auto fn = std::dynamic_pointer_cast<ast::FunctionType>(ast_type)) {
-        auto ret_type = map_ast_type(fn->return_type);
-        std::vector<std::shared_ptr<ir::Type>> param_types;
-        for (auto& p : fn->param_types) {
-            param_types.push_back(map_ast_type(p));
-        }
-        return builder->get_function_type(ret_type, param_types);
-    }
-    
-    // 默认返回 i32
-    return builder->get_primitive_type(ir::PrimitiveTypeKind::Int32);
-}
-
-ir::OpCode IRGenerator::map_binary_op(ast::BinaryOp op) {
+ir::OpCode IRGenerator::map_binary_op(TokenType op) {
     switch (op) {
-        case ast::BinaryOp::Add: return ir::OpCode::Add;
-        case ast::BinaryOp::Sub: return ir::OpCode::Sub;
-        case ast::BinaryOp::Mul: return ir::OpCode::Mul;
-        case ast::BinaryOp::Div: return ir::OpCode::Div;
-        case ast::BinaryOp::Mod: return ir::OpCode::Mod;
-        case ast::BinaryOp::And: return ir::OpCode::And;
-        case ast::BinaryOp::Or: return ir::OpCode::Or;
-        case ast::BinaryOp::BitAnd: return ir::OpCode::BitAnd;
-        case ast::BinaryOp::BitOr: return ir::OpCode::BitOr;
-        case ast::BinaryOp::BitXor: return ir::OpCode::BitXor;
-        case ast::BinaryOp::Shl: return ir::OpCode::Shl;
-        case ast::BinaryOp::Shr: return ir::OpCode::Shr;
-        default: return ir::OpCode::Add;
+        case TokenType::Op_plus:    return ir::OpCode::Add;
+        case TokenType::Op_minus:   return ir::OpCode::Sub;
+        case TokenType::Op_star:    return ir::OpCode::Mul;
+        case TokenType::Op_slash:   return ir::OpCode::Div;
+        case TokenType::Op_percent: return ir::OpCode::Mod;
+        case TokenType::Op_amp:     return ir::OpCode::BitAnd;
+        case TokenType::Op_pipe:    return ir::OpCode::BitOr;
+        case TokenType::Op_caret:   return ir::OpCode::BitXor;
+        case TokenType::Op_and:     return ir::OpCode::And;
+        case TokenType::Op_or:      return ir::OpCode::Or;
+        default:                    return ir::OpCode::Add;
     }
 }
 
-ir::OpCode IRGenerator::map_unary_op(ast::UnaryOp op) {
+ir::OpCode IRGenerator::map_unary_op(TokenType op) {
     switch (op) {
-        case ast::UnaryOp::Neg: return ir::OpCode::Sub;
-        case ast::UnaryOp::Not: return ir::OpCode::Not;
-        case ast::UnaryOp::BitNot: return ir::OpCode::BitNot;
-        default: return ir::OpCode::Not;
+        case TokenType::Op_minus: return ir::OpCode::Sub;
+        case TokenType::Op_bang:  return ir::OpCode::Not;
+        case TokenType::Op_tilde: return ir::OpCode::BitNot;
+        default:                  return ir::OpCode::Not;
     }
 }
 
-ir::OpCode IRGenerator::map_comparison_op(ast::BinaryOp op) {
+ir::OpCode IRGenerator::map_comparison_op(TokenType op) {
     switch (op) {
-        case ast::BinaryOp::Eq: return ir::OpCode::Eq;
-        case ast::BinaryOp::Ne: return ir::OpCode::Ne;
-        case ast::BinaryOp::Lt: return ir::OpCode::Lt;
-        case ast::BinaryOp::Le: return ir::OpCode::Le;
-        case ast::BinaryOp::Gt: return ir::OpCode::Gt;
-        case ast::BinaryOp::Ge: return ir::OpCode::Ge;
-        default: return ir::OpCode::Eq;
+        case TokenType::Op_eq:  return ir::OpCode::Eq;
+        case TokenType::Op_neq: return ir::OpCode::Ne;
+        case TokenType::Op_lt:  return ir::OpCode::Lt;
+        case TokenType::Op_lte: return ir::OpCode::Le;
+        case TokenType::Op_gt:  return ir::OpCode::Gt;
+        case TokenType::Op_gte: return ir::OpCode::Ge;
+        default:                return ir::OpCode::Eq;
     }
 }
 
@@ -791,7 +852,7 @@ std::shared_ptr<ir::BasicBlock> IRGenerator::create_block(const std::string& nam
 // 事件系统支持
 // ============================================================================
 
-void IRGenerator::generate_publish(std::shared_ptr<ast::PublishStmt> publish) {
+void IRGenerator::generate_publish(ast::PublishStmt* publish) {
     if (!publish) return;
     
     // publish event_name(arg1, arg2, ...)
@@ -800,8 +861,8 @@ void IRGenerator::generate_publish(std::shared_ptr<ast::PublishStmt> publish) {
     
     // 生成参数值
     std::vector<std::shared_ptr<ir::Value>> arg_vals;
-    for (auto& arg : args) {
-        auto val = generate_expression(arg);
+    for (const auto& arg : args) {
+        auto val = generate_expression(arg.get());
         if (val) arg_vals.push_back(val);
     }
     
@@ -810,27 +871,28 @@ void IRGenerator::generate_publish(std::shared_ptr<ast::PublishStmt> publish) {
     builder->create_call(func_name, arg_vals);
 }
 
-void IRGenerator::generate_subscribe(std::shared_ptr<ast::SubscribeStmt> sub) {
+void IRGenerator::generate_subscribe(ast::SubscribeStmt* sub) {
     if (!sub) return;
     
     // subscribe event_name { handler }
     std::string event_name = sub->get_event_name();
-    auto handler = sub->get_handler();
+    auto* handler = sub->get_handler();
     
     if (!handler) return;
     
     // 生成事件处理函数
     auto handler_func = generate_function_handler(handler, event_name);
     
-    // 创建订阅调用
+    // 创建订阅调用 — passing function name as string
     std::string func_name = "__claw_event_subscribe_" + event_name;
     std::vector<std::shared_ptr<ir::Value>> args;
-    args.push_back(handler_func);
+    // Pass handler name as a string constant
+    args.push_back(builder->create_constant(handler_func->name));
     builder->create_call(func_name, args);
 }
 
 std::shared_ptr<ir::Function> IRGenerator::generate_function_handler(
-    std::shared_ptr<ast::FunctionStmt> handler, 
+    ast::FunctionStmt* handler, 
     const std::string& event_name) {
     if (!handler) return nullptr;
     
@@ -843,13 +905,15 @@ std::shared_ptr<ir::Function> IRGenerator::generate_function_handler(
     builder->set_insert_point(entry);
     
     // 生成处理函数体
-    if (handler->body) {
-        generate_block(handler->body);
+    if (handler->get_body()) {
+        if (auto* body_block = dynamic_cast<ast::BlockStmt*>(handler->get_body())) {
+            generate_block(body_block);
+        }
     }
     
     // 确保有返回
     if (!current_block || !current_block->terminator) {
-        builder->create_ret(nullptr);
+        builder->create_ret_void();
     }
     
     return func;

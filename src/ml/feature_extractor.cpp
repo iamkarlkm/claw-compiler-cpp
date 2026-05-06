@@ -66,8 +66,8 @@ CompositeFeatures AdvancedFeatureExtractor::extract_from_ir_function(
 
     for (auto& bb : func->blocks) {
         for (auto& inst : bb->instructions) {
-            total_flops += estimate_instruction_flops(inst);
-            total_mem += estimate_instruction_memory(inst);
+            total_flops += estimate_instruction_flops(*inst);
+            total_mem += estimate_instruction_memory(*inst);
             num_instructions++;
         }
     }
@@ -95,7 +95,7 @@ std::vector<CompositeFeatures> AdvancedFeatureExtractor::extract_from_ir_module(
     std::vector<CompositeFeatures> results;
     if (!module) return results;
 
-    for (auto& [name, func] : module->functions) {
+    for (auto& func : module->functions) {
         results.push_back(extract_from_ir_function(func));
     }
 
@@ -226,8 +226,8 @@ GraphFeatures AdvancedFeatureExtractor::extract_graph_features(
     }
 
     // 3. DAG 深度 (关键路径长度)
-    gf.critical_path = compute_critical_path(ddg);
-    gf.dag_depth = static_cast<int>(gf.critical_path.size());
+    auto crit_path = compute_critical_path(ddg);
+    gf.dag_depth = static_cast<int>(crit_path.size());
     gf.critical_path_ops = gf.dag_depth;
 
     // 4. 并行特征
@@ -244,8 +244,8 @@ GraphFeatures AdvancedFeatureExtractor::extract_graph_features(
     int64_t total_mem = 0;
     for (auto& bb : func->blocks) {
         for (auto& inst : bb->instructions) {
-            total_flops += estimate_instruction_flops(inst);
-            total_mem += estimate_instruction_memory(inst);
+            total_flops += estimate_instruction_flops(*inst);
+            total_mem += estimate_instruction_memory(*inst);
         }
     }
     gf.compute_to_memory_ratio = (total_mem > 0) ?
@@ -278,7 +278,7 @@ LoopNestFeatures AdvancedFeatureExtractor::extract_loop_features(
 
         // 检查是否有回边 (条件跳转到前面的块)
         for (auto& inst : bb->instructions) {
-            if (inst.opcode == ir::OpCode::BR || inst.opcode == ir::OpCode::LOOP) {
+            if (inst->opcode == ir::OpCode::Br || inst->opcode == ir::OpCode::CondBr) {
                 // 简化: 假设有回跳就是循环
                 loop_count++;
             }
@@ -370,8 +370,8 @@ MemoryFeatures AdvancedFeatureExtractor::extract_memory_features(
     int64_t loads = 0, stores = 0;
     for (auto& bb : func->blocks) {
         for (auto& inst : bb->instructions) {
-            if (inst.opcode == ir::OpCode::LOAD) loads++;
-            else if (inst.opcode == ir::OpCode::STORE) stores++;
+            if (inst->opcode == ir::OpCode::Load) loads++;
+            else if (inst->opcode == ir::OpCode::Store) stores++;
         }
     }
     mf.read_write_ratio = (stores > 0) ? static_cast<double>(loads) / stores : 10.0;
@@ -386,7 +386,7 @@ MemoryFeatures AdvancedFeatureExtractor::extract_memory_features(
     int64_t total_flops = 0;
     for (auto& bb : func->blocks) {
         for (auto& inst : bb->instructions) {
-            total_flops += estimate_instruction_flops(inst);
+            total_flops += estimate_instruction_flops(*inst);
         }
     }
     arith_intensity = (mf.total_data_size > 0) ?
@@ -445,7 +445,7 @@ AdvancedFeatureExtractor::analyze_data_dependencies(
 
             // 分析 use-def 链
             // LOAD: 读取变量 → 依赖变量的最后定义
-            if (inst.opcode == ir::OpCode::LOAD) {
+            if (inst->opcode == ir::OpCode::Load) {
                 std::string var_name = "var_" + std::to_string(inst_idx);
                 if (last_def.count(var_name)) {
                     ddg.deps[inst_id].push_back(last_def[var_name]);
@@ -454,14 +454,14 @@ AdvancedFeatureExtractor::analyze_data_dependencies(
             }
 
             // STORE: 写入变量 → 更新最后定义
-            if (inst.opcode == ir::OpCode::STORE) {
+            if (inst->opcode == ir::OpCode::Store) {
                 std::string var_name = "var_" + std::to_string(inst_idx);
                 last_def[var_name] = inst_id;
             }
 
             // 算术操作: 依赖操作数
-            if (inst.opcode == ir::OpCode::ADD || inst.opcode == ir::OpCode::SUB ||
-                inst.opcode == ir::OpCode::MUL || inst.opcode == ir::OpCode::DIV) {
+            if (inst->opcode == ir::OpCode::Add || inst->opcode == ir::OpCode::Sub ||
+                inst->opcode == ir::OpCode::Mul || inst->opcode == ir::OpCode::Div) {
                 // 假设操作数来自最近的 load
                 for (auto& [var, def] : last_def) {
                     ddg.deps[inst_id].push_back(def);
@@ -559,7 +559,7 @@ AdvancedFeatureExtractor::analyze_memory_access(
 
     for (auto& bb : func->blocks) {
         for (auto& inst : bb->instructions) {
-            if (inst.opcode == ir::OpCode::LOAD || inst.opcode == ir::OpCode::STORE) {
+            if (inst->opcode == ir::OpCode::Load || inst->opcode == ir::OpCode::Store) {
                 pattern.total_accesses++;
                 accessed_vars.insert("v" + std::to_string(pattern.total_accesses));
 
@@ -591,42 +591,42 @@ int64_t AdvancedFeatureExtractor::estimate_instruction_flops(const ir::Instructi
 {
     switch (inst.opcode) {
         // 整数算术: 1 FLOP
-        case ir::OpCode::ADD:
-        case ir::OpCode::SUB:
-        case ir::OpCode::MUL:
-        case ir::OpCode::DIV:
-        case ir::OpCode::MOD:
+        case ir::OpCode::Add:
+        case ir::OpCode::Sub:
+        case ir::OpCode::Mul:
+        case ir::OpCode::Div:
+        case ir::OpCode::Mod:
             return 1;
 
         // 比较: 1 FLOP
-        case ir::OpCode::EQ:
-        case ir::OpCode::NE:
-        case ir::OpCode::LT:
-        case ir::OpCode::LE:
-        case ir::OpCode::GT:
-        case ir::OpCode::GE:
+        case ir::OpCode::Eq:
+        case ir::OpCode::Ne:
+        case ir::OpCode::Lt:
+        case ir::OpCode::Le:
+        case ir::OpCode::Gt:
+        case ir::OpCode::Ge:
             return 1;
 
         // 位运算: 0.5 FLOP (通常更快)
-        case ir::OpCode::AND:
-        case ir::OpCode::OR:
-        case ir::OpCode::XOR:
-        case ir::OpCode::SHL:
-        case ir::OpCode::SHR:
+        case ir::OpCode::And:
+        case ir::OpCode::Or:
+        case ir::OpCode::BitXor:
+        case ir::OpCode::Shl:
+        case ir::OpCode::Shr:
             return 1;
 
         // 内存操作: 0 FLOP (但消耗带宽)
-        case ir::OpCode::LOAD:
-        case ir::OpCode::STORE:
-        case ir::OpCode::ALLOCA:
-        case ir::OpCode::GEP:
+        case ir::OpCode::Load:
+        case ir::OpCode::Store:
+        case ir::OpCode::Alloca:
+        case ir::OpCode::GetElementPtr:
             return 0;
 
         // 控制流: 0 FLOP
-        case ir::OpCode::BR:
-        case ir::OpCode::RET:
-        case ir::OpCode::CALL:
-        case ir::OpCode::JMP:
+        case ir::OpCode::Br:
+        case ir::OpCode::CondBr:
+        case ir::OpCode::Ret:
+        case ir::OpCode::Call:
             return 0;
 
         default:
@@ -637,15 +637,15 @@ int64_t AdvancedFeatureExtractor::estimate_instruction_flops(const ir::Instructi
 int64_t AdvancedFeatureExtractor::estimate_instruction_memory(const ir::Instruction& inst)
 {
     switch (inst.opcode) {
-        case ir::OpCode::LOAD:
+        case ir::OpCode::Load:
             return 8;  // 读取 8 字节
-        case ir::OpCode::STORE:
+        case ir::OpCode::Store:
             return 8;  // 写入 8 字节
-        case ir::OpCode::ALLOCA:
+        case ir::OpCode::Alloca:
             return 64; // 栈分配估算
-        case ir::OpCode::CALL:
+        case ir::OpCode::Call:
             return 32; // 函数调用开销估算
-        case ir::OpCode::GEP:
+        case ir::OpCode::GetElementPtr:
             return 4;  // 地址计算
         default:
             return 0;  // 算术操作不直接访问内存
@@ -655,15 +655,15 @@ int64_t AdvancedFeatureExtractor::estimate_instruction_memory(const ir::Instruct
 OpKind AdvancedFeatureExtractor::map_opcode_to_opkind(ir::OpCode opcode)
 {
     switch (opcode) {
-        case ir::OpCode::ADD: return OpKind::ADD;
-        case ir::OpCode::SUB: return OpKind::SUB;
-        case ir::OpCode::MUL: return OpKind::MUL;
-        case ir::OpCode::DIV: return OpKind::DIV;
-        case ir::OpCode::MOD: return OpKind::MOD;
-        case ir::OpCode::LOAD: return OpKind::LOAD;
-        case ir::OpCode::STORE: return OpKind::STORE;
-        case ir::OpCode::CALL: return OpKind::CALL;
-        case ir::OpCode::BR: return OpKind::CONDITION;
+        case ir::OpCode::Add: return OpKind::ADD;
+        case ir::OpCode::Sub: return OpKind::SUB;
+        case ir::OpCode::Mul: return OpKind::MUL;
+        case ir::OpCode::Div: return OpKind::DIV;
+        case ir::OpCode::Mod: return OpKind::MOD;
+        case ir::OpCode::Load: return OpKind::LOAD;
+        case ir::OpCode::Store: return OpKind::STORE;
+        case ir::OpCode::Call: return OpKind::CALL;
+        case ir::OpCode::Br: return OpKind::CONDITION;
         default: return OpKind::UNKNOWN;
     }
 }
@@ -885,137 +885,6 @@ std::string AdvancedFeatureExtractor::feature_report(const CompositeFeatures& fe
     oss << "=============================================\n";
 
     return oss.str();
-}
-
-} // namespace ml
-} // namespace claw硬件目标调整缓存参数
-    switch (target) {
-        case HardwareTarget::CPU:
-            cache_params_.l1_size = 32768;
-            cache_params_.l2_size = 262144;
-            cache_params_.l3_size = 8388608;
-            break;
-        case HardwareTarget::CPU_SIMD:
-            cache_params_.l1_size = 32768;
-            cache_params_.l2_size = 524288;  // AVX-512 CPU 通常有更大 L2
-            cache_params_.l3_size = 16777216;
-            break;
-        case HardwareTarget::GPU_NVIDIA:
-            cache_params_.l1_size = 65536;    // SM 共享内存
-            cache_params_.l2_size = 4194304;  // L2 缓存
-            cache_params_.l3_size = 0;        // 无 L3
-            cache_params_.dram_bandwidth_gbps = 900.0;  // HBM2
-            break;
-        case HardwareTarget::GPU_AMD:
-            cache_params_.l1_size = 65536;
-            cache_params_.l2_size = 4194304;
-            cache_params_.l3_size = 0;
-            cache_params_.dram_bandwidth_gbps = 1024.0; // HBM3
-            break;
-        case HardwareTarget::TPU:
-            cache_params_.l1_size = 0;       // TPU 无传统缓存
-            cache_params_.l2_size = 0;
-            cache_params_.l3_size = 0;
-            cache_params_.dram_bandwidth_gbps = 600.0;
-            break;
-        default:
-            break;
-    }
-}
-
-// ============================================================================
-// 特征归一化
-// ============================================================================
-
-std::vector<double> AdvancedFeatureExtractor::normalize_features(
-    const std::vector<double>& features)
-{
-    std::vector<double> normalized;
-    normalized.reserve(features.size());
-
-    for (auto& f : features) {
-        // log1p 归一化: 处理大范围数值
-        // 对负值保持原样 (可能是比率或标志)
-        if (f >= 0) {
-            normalized.push_back(std::log1p(f));
-        } else {
-            normalized.push_back(f);
-        }
-    }
-
-    return normalized;
-}
-
-// ============================================================================
-// 特征报告
-// ============================================================================
-
-std::string AdvancedFeatureExtractor::feature_report(const CompositeFeatures& features)
-{
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(4);
-
-    ss << "=== Feature Extraction Report ===\n\n";
-
-    // Op 特征
-    ss << "--- Op Features ---\n";
-    ss << "  op_name:            " << features.op_features.op_name << "\n";
-    ss << "  num_inputs:         " << features.op_features.num_inputs << "\n";
-    ss << "  num_outputs:        " << features.op_features.num_outputs << "\n";
-    ss << "  flop_count:         " << features.op_features.flop_count << "\n";
-    ss << "  memory_bytes:       " << features.op_features.memory_bytes << "\n";
-    ss << "  arithmetic_intensity: " << features.op_features.arithmetic_intensity << "\n";
-
-    // 图特征
-    ss << "\n--- Graph Features ---\n";
-    ss << "  num_nodes:          " << features.graph_features.num_nodes << "\n";
-    ss << "  num_edges:          " << features.graph_features.num_edges << "\n";
-    ss << "  dag_depth:          " << features.graph_features.dag_depth << "\n";
-    ss << "  max_fan_in:         " << features.graph_features.max_fan_in << "\n";
-    ss << "  max_fan_out:        " << features.graph_features.max_fan_out << "\n";
-    ss << "  parallelism_ratio:  " << features.graph_features.parallelism_ratio << "\n";
-    ss << "  connectivity:       " << features.graph_features.connectivity << "\n";
-
-    // 循环特征
-    ss << "\n--- Loop Features ---\n";
-    ss << "  nest_depth:         " << features.loop_features.nest_depth << "\n";
-    ss << "  total_iterations:   " << features.loop_features.total_iterations << "\n";
-    ss << "  num_parallel_levels: " << features.loop_features.num_parallel_levels << "\n";
-    ss << "  has_tiling:         " << (features.loop_features.has_tiling_opportunity ? "yes" : "no") << "\n";
-    ss << "  est_cache_miss:     " << features.loop_features.estimated_cache_miss_rate << "\n";
-    ss << "  access_pattern:     " << features.loop_features.access_pattern_score << "\n";
-
-    // 内存特征
-    ss << "\n--- Memory Features ---\n";
-    ss << "  total_data_size:    " << features.memory_features.total_data_size << " bytes\n";
-    ss << "  l1_fit_ratio:       " << features.memory_features.l1_fit_ratio << "\n";
-    ss << "  l2_fit_ratio:       " << features.memory_features.l2_fit_ratio << "\n";
-    ss << "  l3_fit_ratio:       " << features.memory_features.l3_fit_ratio << "\n";
-    ss << "  primary_cache:      L" << features.memory_features.primary_cache_level << "\n";
-    ss << "  memory_bound:       " << features.memory_features.memory_bound_score << "\n";
-    ss << "  est_latency:        " << features.memory_features.estimated_memory_latency_ms << " ms\n";
-
-    // 调度特征
-    ss << "\n--- Schedule Features ---\n";
-    ss << "  num_tile:           " << features.num_tile_decisions << "\n";
-    ss << "  num_fuse:           " << features.num_fuse_decisions << "\n";
-    ss << "  num_parallel:       " << features.num_parallel_decisions << "\n";
-    ss << "  num_vectorize:      " << features.num_vectorize_decisions << "\n";
-    ss << "  num_unroll:         " << features.num_unroll_decisions << "\n";
-    ss << "  complexity:         " << features.schedule_complexity << "\n";
-
-    // 特征维度
-    ss << "\n--- Summary ---\n";
-    auto vec = features.to_vector();
-    ss << "  feature_dim:        " << vec.size() << "\n";
-
-    auto norm = normalize_features(vec);
-    double norm_min = *std::min_element(norm.begin(), norm.end());
-    double norm_max = *std::max_element(norm.begin(), norm.end());
-    ss << "  normalized_range:   [" << norm_min << ", " << norm_max << "]\n";
-
-    ss << "\n=== End Report ===\n";
-    return ss.str();
 }
 
 } // namespace ml

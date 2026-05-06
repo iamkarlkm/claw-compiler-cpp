@@ -13,8 +13,10 @@ namespace type {
 // =============================================================================
 
 TypePtr Type::unit() { return TypeCache::instance().get_unit(); }
+TypePtr Type::boolean() { return TypeCache::instance().get_bool(); }
 TypePtr Type::int64() { return TypeCache::instance().get_int64(); }
 TypePtr Type::float64() { return TypeCache::instance().get_float64(); }
+TypePtr Type::string() { return TypeCache::instance().get_string(); }
 TypePtr Type::unknown() { return TypeCache::instance().get_unknown(); }
 
 // Virtual method stubs
@@ -537,7 +539,7 @@ TypePtr PrimitiveType::clone() const {
 bool ArrayType::equals(const TypePtr& other) const {
     if (!other || !other->is_array()) return false;
     return element_type->equals(other->type_args.empty() ? nullptr : other->type_args[0])
-           && size == other->type_args.size();
+           && static_cast<size_t>(size) == other->type_args.size();
 }
 
 std::string ArrayType::to_string() const {

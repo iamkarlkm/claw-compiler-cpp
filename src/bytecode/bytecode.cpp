@@ -401,7 +401,7 @@ std::string Disassembler::disassemble_function(const Function& func, uint32_t in
     return result;
 }
 
-std::string Disassembler::disassemble_instruction(const Instruction& inst, size_t offset) {
+std::string Disassembler::disassemble_instruction(const Instruction& inst, [[maybe_unused]] size_t offset) {
     std::string result = op_code_to_string(inst.op);
 
     switch (inst.op) {

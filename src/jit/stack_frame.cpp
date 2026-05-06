@@ -79,7 +79,7 @@ std::string format_stack_frame(const FrameInfo& frame) {
 // Generate complete function prologue with stack allocation
 std::vector<uint8_t> generate_function_prologue(
     const StackFrameLayout& layout,
-    bool use_frame_pointer,
+    [[maybe_unused]] bool use_frame_pointer,
     bool enable_stack_check
 ) {
     std::vector<uint8_t> code;
@@ -156,7 +156,7 @@ std::vector<uint8_t> generate_function_prologue(
 }
 
 // Generate complete function epilogue
-std::vector<uint8_t> generate_function_epilogue(bool has_return_value) {
+std::vector<uint8_t> generate_function_epilogue([[maybe_unused]] bool has_return_value) {
     std::vector<uint8_t> code;
     
     // Restore callee-saved registers in reverse order
@@ -292,7 +292,7 @@ bool validate_stack_alignment(void* sp, size_t alignment) {
 }
 
 // Check if stack frame is valid
-bool validate_stack_frame(void* fp, void* sp, size_t expected_size) {
+bool validate_stack_frame(void* fp, void* sp, [[maybe_unused]] size_t expected_size) {
     // Frame pointer should be greater than stack pointer
     if (fp <= sp) return false;
     

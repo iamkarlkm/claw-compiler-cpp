@@ -56,6 +56,8 @@ private:
     void scan_less_than();
     void scan_greater_than();
     void scan_slash();
+    void scan_star();
+    void scan_colon();
     void scan_ampersand();
     void scan_pipe();
     void scan_caret();
@@ -98,7 +100,7 @@ public:
 // Implementation
 
 inline Lexer::Lexer(const std::string& source, const std::string& filename)
-    : source(source), filename(filename), line(1), column(1) {}
+    : source(source), current(0), start(0), line(1), column(1), filename(filename) {}
 
 inline Lexer::~Lexer() {}
 
@@ -217,9 +219,9 @@ inline void Lexer::scan_token() {
         case '{': tokens.emplace_back(TokenType::LBrace, make_span()); break;
         case '}': tokens.emplace_back(TokenType::RBrace, make_span()); break;
         case ',': tokens.emplace_back(TokenType::Comma, make_span()); break;
-        case '.': 
+        case '.':
             // Check for range operators: .. or ..=
-            if (peek_next() == '.') {
+            if (peek() == '.') {
                 advance(); // consume second '.'
                 if (peek() == '=') {
                     advance();
@@ -234,9 +236,9 @@ inline void Lexer::scan_token() {
         case ';': tokens.emplace_back(TokenType::Semicolon, make_span()); break;
         case '~': tokens.emplace_back(TokenType::Op_tilde, make_span()); break;
         case '?': tokens.emplace_back(TokenType::Op_question, make_span()); break;
-        case '*': tokens.emplace_back(TokenType::Op_star, make_span()); break;
+        case '*': scan_star(); break;
         case '%': tokens.emplace_back(TokenType::Op_percent, make_span()); break;
-        case ':': tokens.emplace_back(TokenType::Colon, make_span()); break;
+        case ':': scan_colon(); break;
         
         // Multi-character operators
         case '/': scan_slash(); break;
@@ -507,6 +509,7 @@ inline void Lexer::scan_comment() {
         advance(); // consume *
         
         bool nested = false;
+        (void)nested;
         int depth = 1;
         
         while (!is_at_end()) {
@@ -588,6 +591,22 @@ inline void Lexer::scan_caret() {
         tokens.emplace_back(TokenType::Op_caret_eq, make_span());
     } else {
         tokens.emplace_back(TokenType::Op_caret, make_span());
+    }
+}
+
+inline void Lexer::scan_star() {
+    if (match('=')) {
+        tokens.emplace_back(TokenType::Op_star_eq, make_span());
+    } else {
+        tokens.emplace_back(TokenType::Op_star, make_span());
+    }
+}
+
+inline void Lexer::scan_colon() {
+    if (match(':')) {
+        tokens.emplace_back(TokenType::ScopeResolution, make_span());
+    } else {
+        tokens.emplace_back(TokenType::Colon, make_span());
     }
 }
 
