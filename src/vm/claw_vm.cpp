@@ -71,6 +71,10 @@ std::string Value::to_string() const {
             return "closure " + cl->function->name;
         }
         case ValueTag::USERDATA: return "userdata";
+        case ValueTag::OBJECT: {
+            auto obj = std::get<std::shared_ptr<ObjectValue>>(data);
+            return obj->type_name;
+        }
         default: return "<unknown>";
     }
 }
@@ -88,6 +92,7 @@ std::string Value::type_name() const {
         case ValueTag::FUNCTION: return "function";
         case ValueTag::CLOSURE: return "closure";
         case ValueTag::USERDATA: return "userdata";
+        case ValueTag::OBJECT: return "object";
         default: return "unknown";
     }
 }
@@ -125,6 +130,16 @@ bool Value::equals(const Value& other) const {
             if (a1->elements.size() != a2->elements.size()) return false;
             for (size_t i = 0; i < a1->elements.size(); i++) {
                 if (!a1->elements[i].equals(a2->elements[i])) return false;
+            }
+            return true;
+        }
+        case ValueTag::OBJECT: {
+            auto o1 = std::get<std::shared_ptr<ObjectValue>>(data);
+            auto o2 = std::get<std::shared_ptr<ObjectValue>>(other.data);
+            if (o1->fields.size() != o2->fields.size()) return false;
+            for (const auto& [k, v] : o1->fields) {
+                auto it = o2->fields.find(k);
+                if (it == o2->fields.end() || !v.equals(it->second)) return false;
             }
             return true;
         }
@@ -254,7 +269,7 @@ void VMRuntime::setup_builtins() {
 
     // Array function
     builtins["array"] = [](VMRuntime& rt) {
-        auto arr = std::make_shared<ArrayValue>();
+        auto arr = rt.array_pool.acquire();
         return Value{ValueTag::ARRAY, arr};
     };
 
@@ -262,7 +277,7 @@ void VMRuntime::setup_builtins() {
     builtins["range"] = [](VMRuntime& rt) {
         int64_t end = rt.peek().as_int();
         int64_t start = 0;
-        auto arr = std::make_shared<ArrayValue>();
+        auto arr = rt.array_pool.acquire();
         for (int64_t i = start; i < end; i++) {
             arr->elements.push_back(Value::int_v(i));
         }
@@ -300,8 +315,19 @@ void GarbageCollector::mark_value(Value& val) {
         case ValueTag::USERDATA:
             mark_userdata(std::get<std::shared_ptr<UserDataValue>>(val.data).get());
             break;
+        case ValueTag::OBJECT:
+            mark_object(std::get<std::shared_ptr<ObjectValue>>(val.data).get());
+            break;
         default:
             break;
+    }
+}
+
+void GarbageCollector::mark_object(ObjectValue* obj) {
+    if (!obj || obj->marked) return;
+    obj->marked = true;
+    for (auto& [name, val] : obj->fields) {
+        mark_value(val);
     }
 }
 
@@ -1424,7 +1450,7 @@ bool ClawVM::op_set_upvalue() {
 // ============================================================================
 
 bool ClawVM::op_alloc_array() {
-    auto arr = std::make_shared<ArrayValue>();
+    auto arr = runtime.array_pool.acquire();
     runtime.push(Value{ValueTag::ARRAY, arr});
     return true;
 }
@@ -1535,7 +1561,7 @@ bool ClawVM::op_iter_create() {
     // Stack: [array] -> [iterator]
     Value iterable = runtime.pop();
     
-    auto iter = std::make_shared<IteratorValue>();
+    auto iter = runtime.iterator_pool.acquire();
     
     if (iterable.is_array()) {
         auto arr = std::get<std::shared_ptr<ArrayValue>>(iterable.data);
@@ -1766,8 +1792,8 @@ bool ClawVM::op_zip_create() {
 // ============================================================================
 
 bool ClawVM::op_alloc_obj() {
-    auto ud = std::make_shared<UserDataValue>();
-    runtime.push(Value{ValueTag::USERDATA, ud});
+    auto obj = std::make_shared<ObjectValue>();
+    runtime.push(Value::object_v(obj));
     return true;
 }
 
@@ -1775,7 +1801,14 @@ bool ClawVM::op_load_field() {
     Value field_val = runtime.pop();
     Value obj = runtime.pop();
     std::string field = field_val.as_string();
-    // Simplified: just return nil for now
+    if (obj.is_object()) {
+        auto o = std::get<std::shared_ptr<ObjectValue>>(obj.data);
+        auto it = o->fields.find(field);
+        if (it != o->fields.end()) {
+            runtime.push(it->second);
+            return true;
+        }
+    }
     runtime.push(Value::nil());
     return true;
 }
@@ -1785,14 +1818,22 @@ bool ClawVM::op_store_field() {
     std::string field = field_val.as_string();
     Value val = runtime.pop();
     Value obj = runtime.pop();
-    // Simplified: ignore for now
-    runtime.push(val);
+    if (obj.is_object()) {
+        auto o = std::get<std::shared_ptr<ObjectValue>>(obj.data);
+        o->fields[field] = val;
+    }
+    runtime.push(obj);
     return true;
 }
 
 bool ClawVM::op_obj_type() {
     Value obj = runtime.pop();
-    runtime.push(Value::string_v(obj.type_name()));
+    if (obj.is_object()) {
+        auto o = std::get<std::shared_ptr<ObjectValue>>(obj.data);
+        runtime.push(Value::string_v(o->type_name));
+    } else {
+        runtime.push(Value::string_v(obj.type_name()));
+    }
     return true;
 }
 
@@ -1802,7 +1843,7 @@ bool ClawVM::op_obj_type() {
 
 bool ClawVM::op_create_tuple() {
     int32_t count = static_cast<int32_t>(current_function->code[ip - 1].operand);
-    auto tup = std::make_shared<TupleValue>();
+    auto tup = runtime.tuple_pool.acquire();
     tup->elements.reserve(count);
     for (int32_t i = 0; i < count; i++) {
         tup->elements.push_back(runtime.pop());
@@ -2311,7 +2352,7 @@ bool ClawVM::op_ext() {
                 start = end + delim.length();
             }
             result.push_back(Value::string_v(s.substr(start)));
-            auto arr = std::make_shared<ArrayValue>();
+            auto arr = runtime.array_pool.acquire();
             arr->elements = result;
             stack.back() = Value::array_v(arr);
             return true;
@@ -2617,7 +2658,7 @@ bool ClawVM::op_ext() {
                         }
                         if (!found) unique_vals.push_back(elem);
                     }
-                    auto new_arr = std::make_shared<ArrayValue>();
+                    auto new_arr = runtime.array_pool.acquire();
                     new_arr->elements = unique_vals;
                     stack.back() = Value::array_v(new_arr);
                 }
@@ -2642,7 +2683,7 @@ bool ClawVM::op_ext() {
                     for (const auto& v : arr2->elements) result.push_back(v);
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements = result;
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2668,7 +2709,7 @@ bool ClawVM::op_ext() {
                     }
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements = result;
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2692,7 +2733,7 @@ bool ClawVM::op_ext() {
                     }
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements = result;
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2706,7 +2747,7 @@ bool ClawVM::op_ext() {
             for (int64_t i = 0; i < n; ++i) {
                 result.push_back(val);
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements = result;
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2816,7 +2857,7 @@ bool ClawVM::op_ext() {
                     }
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements.resize(total, Value::float_v(0.0));
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2833,7 +2874,7 @@ bool ClawVM::op_ext() {
                     }
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements.resize(total, Value::float_v(0.0));
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2850,7 +2891,7 @@ bool ClawVM::op_ext() {
                     }
                 }
             }
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             new_arr->elements.resize(total, Value::float_v(1.0));
             stack.back() = Value::array_v(new_arr);
             return true;
@@ -2870,7 +2911,7 @@ bool ClawVM::op_ext() {
             static std::random_device rd;
             static std::mt19937 gen(rd());
             std::normal_distribution<double> dist(0.0, 1.0);
-            auto new_arr = std::make_shared<ArrayValue>();
+            auto new_arr = runtime.array_pool.acquire();
             for (int64_t i = 0; i < total; ++i) {
                 new_arr->elements.push_back(Value::float_v(dist(gen)));
             }

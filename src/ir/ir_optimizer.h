@@ -207,7 +207,7 @@ private:
     // 判断指令是否是循环不变量
     bool is_loop_invariant(const Instruction& inst,
                           const std::unordered_set<BasicBlock*>& loop_blocks,
-                          const std::unordered_set<Value*>& defined_in_loop);
+                          const std::unordered_set<Instruction*>& defined_in_loop);
 
     // 判断指令是否安全可外提
     bool is_safe_to_hoist(const Instruction& inst);

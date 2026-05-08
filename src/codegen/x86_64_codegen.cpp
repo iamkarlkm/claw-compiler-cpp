@@ -347,7 +347,7 @@ void X86_64CodeGenerator::emitNOP() {
 void X86_64CodeGenerator::emitMOV_RR(X86Reg dst, X86Reg src) {
     emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
     emitByte(0x89);  // MOV r/m64, r64
-    emitModRM(3, regCode(dst), regCode(src));
+    emitModRM(3, regCode(src), regCode(dst));
 }
 
 void X86_64CodeGenerator::emitMOV_RI(X86Reg dst, int64_t imm) {

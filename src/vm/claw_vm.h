@@ -22,6 +22,7 @@
 #include <limits>
 
 #include "bytecode/bytecode.h"
+#include "common/object_pool.h"
 
 namespace claw {
 
@@ -54,6 +55,7 @@ enum class ValueTag {
     FUNCTION,
     CLOSURE,
     USERDATA,
+    OBJECT,    // Struct/object with named fields
     ITERATOR  // NEW - Iterator type
 };
 
@@ -64,6 +66,7 @@ struct TensorValue;
 struct FunctionValue;
 struct ClosureValue;
 struct UserDataValue;
+struct ObjectValue;
 
 // Iterator value structure (NEW - 2026-04-26)
 struct IteratorValue {
@@ -133,6 +136,7 @@ using ValueData = std::variant<
     std::shared_ptr<FunctionValue>, // FUNCTION
     std::shared_ptr<ClosureValue>,  // CLOSURE
     std::shared_ptr<UserDataValue>, // USERDATA
+    std::shared_ptr<ObjectValue>,   // OBJECT
     std::shared_ptr<IteratorValue>  // ITERATOR
 >;
 
@@ -157,7 +161,8 @@ struct Value {
     static Value tuple_v(std::shared_ptr<TupleValue> t) { Value v; v.tag = ValueTag::TUPLE; v.data = t; return v; }
     static Value tensor_v(std::shared_ptr<TensorValue> t) { Value v; v.tag = ValueTag::TENSOR; v.data = t; return v; }
     static Value iterator_v(std::shared_ptr<IteratorValue> iter) { Value v; v.tag = ValueTag::ITERATOR; v.data = iter; return v; }
-    
+    static Value object_v(std::shared_ptr<ObjectValue> obj) { Value v; v.tag = ValueTag::OBJECT; v.data = obj; return v; }
+
     // Type checking
     bool is_nil() const { return tag == ValueTag::NIL; }
     bool is_bool() const { return tag == ValueTag::BOOL; }
@@ -171,6 +176,7 @@ struct Value {
     bool is_function() const { return tag == ValueTag::FUNCTION; }
     bool is_closure() const { return tag == ValueTag::CLOSURE; }
     bool is_callable() const { return is_function() || is_closure(); }
+    bool is_object() const { return tag == ValueTag::OBJECT; }
     bool is_iterator() const { return tag == ValueTag::ITERATOR; }
     
     // Value extraction
@@ -318,12 +324,18 @@ struct UserDataValue {
     void* data = nullptr;
     std::function<void(void*)> destructor;
     bool marked = false;
-    
+
     ~UserDataValue() {
         if (destructor && data) {
             destructor(data);
         }
     }
+};
+
+struct ObjectValue {
+    std::string type_name;
+    std::map<std::string, Value> fields;
+    bool marked = false;
 };
 
 // ============================================================================
@@ -362,9 +374,15 @@ struct VMRuntime {
     
     // Built-in functions
     std::map<std::string, std::function<Value(VMRuntime&)>> builtins;
-    
-    VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE) 
-        : stack(stack_size), globals(MAX_GLOBALS) {
+
+    // Object pools for fast allocation of hot types
+    ObjectPool<ArrayValue> array_pool;
+    ObjectPool<TupleValue> tuple_pool;
+    ObjectPool<IteratorValue> iterator_pool;
+
+    VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE)
+        : stack(stack_size), globals(MAX_GLOBALS),
+          array_pool(4), tuple_pool(2), iterator_pool(2) {
         setup_builtins();
     }
     
@@ -421,6 +439,7 @@ public:
     static void mark_function(FunctionValue* fn);
     static void mark_closure(ClosureValue* cl);
     static void mark_userdata(UserDataValue* ud);
+    static void mark_object(ObjectValue* obj);
     
     static void collect(VMRuntime& runtime);
     static void sweep(VMRuntime& runtime);

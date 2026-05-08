@@ -61,6 +61,23 @@ public:
     const std::string& get_error() const { return error_; }
 
     // ============================================================================
+    // AOT Support
+    // ============================================================================
+
+    struct ExternalCall {
+        size_t code_offset;
+        std::string symbol_name;
+    };
+
+    struct CompiledFunction {
+        std::string name;
+        std::vector<uint8_t> code;
+        std::vector<ExternalCall> external_calls;
+    };
+
+    const std::vector<CompiledFunction>& get_compiled_functions() const { return compiled_functions_; }
+
+    // ============================================================================
     // Runtime Support
     // ============================================================================
     
@@ -98,6 +115,11 @@ private:
     };
     CompileState compile_state_;
 
+    // AOT compilation state
+    const bytecode::Module* current_module_ = nullptr;
+    std::vector<ExternalCall> current_external_calls_;
+    std::vector<CompiledFunction> compiled_functions_;
+
     // ============================================================================
     // Instruction Compilation
     // ============================================================================
@@ -107,9 +129,15 @@ private:
     
     // Compile arithmetic operations
     bool compile_arithmetic(const bytecode::Instruction& inst);
-    
+
+    // Compile float arithmetic operations
+    bool compile_float_arithmetic(const bytecode::Instruction& inst);
+
     // Compile comparison operations
     bool compile_comparison(const bytecode::Instruction& inst);
+
+    // Compile float comparison operations
+    bool compile_float_comparison(const bytecode::Instruction& inst);
     
     // Compile logical operations
     bool compile_logical(const bytecode::Instruction& inst);

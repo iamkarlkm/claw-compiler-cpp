@@ -691,6 +691,23 @@ std::vector<LICMPass::LoopInfo> LICMPass::identify_loops(Function& fn) {
                             li.loop_blocks.push_back(fn.blocks[k]);
                         }
 
+                        // preheader = header 的前驱中不在循环内的块
+                        for (auto& pred : br->target->predecessors) {
+                            if (auto pred_ptr = pred.lock()) {
+                                bool in_loop = false;
+                                for (auto& lb : li.loop_blocks) {
+                                    if (lb.get() == pred_ptr.get()) {
+                                        in_loop = true;
+                                        break;
+                                    }
+                                }
+                                if (!in_loop) {
+                                    li.preheader = pred_ptr;
+                                    break;
+                                }
+                            }
+                        }
+
                         loops.push_back(li);
                     }
                 }
@@ -703,7 +720,7 @@ std::vector<LICMPass::LoopInfo> LICMPass::identify_loops(Function& fn) {
 
 bool LICMPass::is_loop_invariant(const Instruction& inst,
                                   const std::unordered_set<BasicBlock*>& loop_blocks,
-                                  const std::unordered_set<Value*>& defined_in_loop) {
+                                  const std::unordered_set<Instruction*>& defined_in_loop) {
     // 有副作用的指令不能外提
     if (inst.opcode == OpCode::Store || inst.opcode == OpCode::Call ||
         inst.opcode == OpCode::Load || inst.opcode == OpCode::Panic ||
@@ -717,7 +734,8 @@ bool LICMPass::is_loop_invariant(const Instruction& inst,
     // 所有操作数都不在循环内定义
     for (auto& op : inst.operands) {
         if (!op) continue;
-        if (defined_in_loop.find(op.get()) != defined_in_loop.end()) {
+        auto def = op->defining_inst.lock();
+        if (def && defined_in_loop.find(def.get()) != defined_in_loop.end()) {
             return false;
         }
     }
@@ -754,16 +772,14 @@ bool LICMPass::run(Function& fn, PassStats& stats) {
     for (auto& loop : loops) {
         if (!loop.preheader) continue;
 
-        // 构建循环内定义的值集合
+        // 构建循环内定义的指令集合
         std::unordered_set<BasicBlock*> loop_block_set;
-        std::unordered_set<Value*> defined_in_loop;
+        std::unordered_set<Instruction*> defined_in_loop;
 
         for (auto& lb : loop.loop_blocks) {
             loop_block_set.insert(lb.get());
             for (auto& inst : lb->instructions) {
-                auto result = std::make_shared<Value>(inst->name, inst->type);
-                result->defining_inst = inst;
-                defined_in_loop.insert(result.get());
+                defined_in_loop.insert(inst.get());
             }
         }
 
@@ -1295,18 +1311,8 @@ PassStats PassManager::run_to_fixedpoint(Function& fn, int max_iterations) {
 }
 
 void PassManager::print_summary() const {
-    std::cout << "=== IR Optimization Summary ===\n"
-              << "  Constants folded:    " << total_stats_.constants_folded << "\n"
-              << "  Instructions simplified: " << total_stats_.instructions_simplified << "\n"
-              << "  Instructions removed:    " << total_stats_.instructions_removed << "\n"
-              << "  CSE eliminated:      " << total_stats_.cse_eliminated << "\n"
-              << "  Strength reduced:    " << total_stats_.strength_reduced << "\n"
-              << "  LICM hoisted:        " << total_stats_.licm_hoisted << "\n"
-              << "  Functions inlined:   " << total_stats_.functions_inlined << "\n"
-              << "  Dead stores removed: " << total_stats_.dead_stores_removed << "\n"
-              << "  PHI nodes simplified: " << total_stats_.phi_nodes_simplified << "\n"
-              << "  Blocks merged:       " << total_stats_.blocks_merged << "\n"
-              << "==============================\n";
+    // Optimization summary suppressed to reduce debug output
+    (void)total_stats_;
 }
 
 // ============================================================================

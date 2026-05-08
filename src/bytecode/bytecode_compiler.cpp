@@ -35,6 +35,13 @@ std::shared_ptr<BytecodeModule> BytecodeCompiler::compile(const ast::Program& mo
 void BytecodeCompiler::compileModule(const ast::Program& module) {
     const auto& decls = module.get_declarations();
 
+    // 第零遍: 注册所有 struct/enum 定义
+    for (const auto& stmt : decls) {
+        if (stmt->get_kind() == ast::Statement::Kind::Struct) {
+            compileStructStmt(static_cast<const ast::StructStmt&>(*stmt));
+        }
+    }
+
     // 第一遍: 编译所有函数定义
     for (const auto& stmt : decls) {
         if (stmt->get_kind() == ast::Statement::Kind::Function) {
@@ -177,6 +184,9 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
         case ast::Statement::Kind::Subscribe:
             compileSubscribeStmt(static_cast<const ast::SubscribeStmt&>(stmt));
             break;
+        case ast::Statement::Kind::Struct:
+            compileStructStmt(static_cast<const ast::StructStmt&>(stmt));
+            break;
         default:
             errorf("Unknown statement type: %d", (int)stmt.get_kind());
     }
@@ -317,40 +327,99 @@ void BytecodeCompiler::compileIfStmt(const ast::IfStmt& stmt) {
 void BytecodeCompiler::compileMatchStmt(const ast::MatchStmt& stmt) {
     auto* expr = stmt.get_expr();
     if (expr) compileExpression(*expr);
-    
+
     const auto& patterns = stmt.get_patterns();
     const auto& bodies = stmt.get_bodies();
-    
-    if (patterns.empty()) return;
-    
-    // For now, handle the first case only (simplified implementation)
-    // Full match compilation would generate a jump table
-    if (patterns[0]) {
-        emitOp(bytecode::OpCode::DUP);
-        compileExpression(*patterns[0]);
-        emitOp(bytecode::OpCode::IEQ);
+
+    if (patterns.empty()) {
+        emitOp(bytecode::OpCode::POP);
+        return;
     }
-    
-    // Jump to next case if no match
-    int nextCaseIdx = ctx_->currentFunction->code.size();
-    emitOp(bytecode::OpCode::JMP_IF_NOT);
-    ctx_->pendingJumps.push_back({nextCaseIdx, 0, true});
-    
-    // Compile case body
-    if (!bodies.empty() && bodies[0]) {
-        if (auto* block = dynamic_cast<const ast::BlockStmt*>(bodies[0].get())) {
+
+    std::vector<int> endJumps;
+
+    for (size_t i = 0; i < patterns.size(); ++i) {
+        if (!patterns[i]) continue;
+
+        // Wildcard: _ => always match
+        if (patterns[i]->get_kind() == ast::Expression::Kind::Identifier) {
+            auto* ident = static_cast<const ast::IdentifierExpr*>(patterns[i].get());
+            if (ident->get_name() == "_") {
+                // Pop scrutinee, compile body
+                emitOp(bytecode::OpCode::POP);
+                if (i < bodies.size() && bodies[i]) {
+                    enterScope();
+                    if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+                        compileStatement(*stmt);
+                    } else if (auto* expr = dynamic_cast<ast::Expression*>(bodies[i].get())) {
+                        compileExpression(*expr);
+                        emitOp(bytecode::OpCode::POP);
+                    }
+                    exitScope();
+                }
+                endJumps.push_back(-1); // no jump needed for last case
+                break;
+            }
+            // Bind pattern: v => store scrutinee in v, compile body
+            emitOp(bytecode::OpCode::DUP);
+            int slot = allocateLocal(ident->get_name());
+            emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
+            emitOp(bytecode::OpCode::POP); // remove original scrutinee
+            if (i < bodies.size() && bodies[i]) {
+                enterScope();
+                if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+                    compileStatement(*stmt);
+                } else if (auto* expr = dynamic_cast<ast::Expression*>(bodies[i].get())) {
+                    compileExpression(*expr);
+                    emitOp(bytecode::OpCode::POP);
+                }
+                exitScope();
+            }
+            int endJump = ctx_->currentFunction->code.size();
+            emitOp(bytecode::OpCode::JMP);
+            endJumps.push_back(endJump);
+            break;
+        }
+
+        // Literal pattern: compare and jump
+        emitOp(bytecode::OpCode::DUP);
+        compileExpression(*patterns[i]);
+        emitOp(bytecode::OpCode::IEQ);
+
+        int nextCaseIdx = ctx_->currentFunction->code.size();
+        emitOp(bytecode::OpCode::JMP_IF_NOT);
+        ctx_->pendingJumps.push_back({nextCaseIdx, 0, true});
+
+        // Matched: pop scrutinee, compile body
+        emitOp(bytecode::OpCode::POP);
+        if (i < bodies.size() && bodies[i]) {
             enterScope();
-            compileBlockStmt(*block);
-            exitScope();
-        } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(bodies[0].get())) {
-            enterScope();
-            compileStatement(*stmtNode);
+            if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+                compileStatement(*stmt);
+            } else if (auto* expr = dynamic_cast<ast::Expression*>(bodies[i].get())) {
+                compileExpression(*expr);
+                emitOp(bytecode::OpCode::POP);
+            }
             exitScope();
         }
+
+        int endJump = ctx_->currentFunction->code.size();
+        emitOp(bytecode::OpCode::JMP);
+        endJumps.push_back(endJump);
+
+        // Patch next-case jump to here
+        patchJump(nextCaseIdx, ctx_->currentFunction->code.size());
     }
-    
-    // Patch jump to next case
-    patchJump(nextCaseIdx, ctx_->currentFunction->code.size());
+
+    // Default / no match: pop scrutinee
+    emitOp(bytecode::OpCode::POP);
+
+    // Patch all end jumps
+    for (int jumpIdx : endJumps) {
+        if (jumpIdx >= 0) {
+            patchJump(jumpIdx, ctx_->currentFunction->code.size());
+        }
+    }
 }
 
 void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
@@ -496,8 +565,72 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
         }
     }
 
-    // TODO: support array and string iteration
-    error("For-loop iterable type not yet supported in bytecode compiler");
+    // Array/string iteration
+    compileExpression(*iterable);
+    int arrSlot = allocateLocal("__arr");
+    emitOp1(bytecode::OpCode::STORE_LOCAL, arrSlot);
+
+    // len = arr.len()
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, arrSlot);
+    emitOp(bytecode::OpCode::ARRAY_LEN);
+    int lenSlot = allocateLocal("__len");
+    emitOp1(bytecode::OpCode::STORE_LOCAL, lenSlot);
+
+    // idx = 0
+    emitConst(0);
+    int idxSlot = allocateLocal("__idx");
+    emitOp1(bytecode::OpCode::STORE_LOCAL, idxSlot);
+
+    int loopStartIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+    // if idx >= len, exit
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, idxSlot);
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, lenSlot);
+    emitOp(bytecode::OpCode::IGE);
+
+    int exitJumpIdx = static_cast<int>(ctx_->currentFunction->code.size());
+    emitOp(bytecode::OpCode::JMP_IF);
+    ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
+
+    // var = arr[idx]
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, arrSlot);
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, idxSlot);
+    emitOp(bytecode::OpCode::LOAD_INDEX);
+    int varSlot = allocateLocal(stmt.get_variable());
+    emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+    // body
+    enterScope();
+    if (body) {
+        if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
+            compileBlockStmt(*block);
+        } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(body)) {
+            compileStatement(*stmtNode);
+        }
+    }
+    exitScope();
+
+    int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+    // idx = idx + 1
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, idxSlot);
+    emitConst(1);
+    emitOp(bytecode::OpCode::IADD);
+    emitOp1(bytecode::OpCode::STORE_LOCAL, idxSlot);
+
+    int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+    emitOp1(bytecode::OpCode::JMP, backOffset);
+
+    patchJump(exitJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+
+    if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+    }
+
+    if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().continueJumpIdx, continueTargetIdx);
+    }
+
     ctx_->loopStack.pop_back();
 }
 
@@ -640,6 +773,14 @@ void BytecodeCompiler::compileSubscribeStmt(const ast::SubscribeStmt& stmt) {
     emitOp(bytecode::OpCode::EXT);
 }
 
+void BytecodeCompiler::compileStructStmt(const ast::StructStmt& stmt) {
+    std::vector<std::string> field_names;
+    for (const auto& field : stmt.get_fields()) {
+        field_names.push_back(field.name);
+    }
+    structRegistry_[stmt.get_name()] = field_names;
+}
+
 // ========== 表达式编译 ==========
 
 void BytecodeCompiler::compileExpression(const Expr& expr) {
@@ -767,6 +908,19 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
             emitOp2(bytecode::OpCode::CALL_EXT, str_idx, arg_count);
             return;
         }
+        // Struct constructor: Point(10, 20)
+        auto sit = structRegistry_.find(name);
+        if (sit != structRegistry_.end()) {
+            const auto& field_names = sit->second;
+            emitOp(bytecode::OpCode::ALLOC_OBJ);
+            const auto& args = expr.get_arguments();
+            for (size_t i = 0; i < args.size() && i < field_names.size(); ++i) {
+                compileExpression(*args[i]);
+                emitConst(field_names[i]);
+                emitOp(bytecode::OpCode::STORE_FIELD);
+            }
+            return;
+        }
     }
 
     for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
@@ -804,12 +958,76 @@ void BytecodeCompiler::compileTupleExpr(const ast::TupleExpr& expr) {
 }
 
 void BytecodeCompiler::compileLambdaExpr(const ast::LambdaExpr& expr) {
-    (void)expr;
     bytecode::Function lambdaFunc;
-    lambdaFunc.name = "";
-    lambdaFunc.arity = 0;
+    lambdaFunc.name = "<lambda>";
+    lambdaFunc.arity = static_cast<uint32_t>(expr.get_params().size());
+
+    // Save old context
+    auto prevCtx = std::move(ctx_);
+    ctx_ = std::make_unique<CompilationContext>();
+    ctx_->currentFunction = std::make_shared<bytecode::Function>(lambdaFunc);
+    ctx_->isClosure = true;
+    ctx_->scopeStack.emplace_back();
+    ctx_->nextSlot = 0;
+
+    // Allocate parameter slots
+    int slot = 0;
+    for (const auto& param : expr.get_params()) {
+        ctx_->scopeStack.back()[param.first] = slot++;
+    }
+    ctx_->nextSlot = slot;
+
+    // Compile body
+    auto* body = expr.get_body();
+    if (body) {
+        if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
+            const auto& stmts = block->get_statements();
+            for (size_t i = 0; i < stmts.size(); ++i) {
+                if (i + 1 == stmts.size() && stmts[i]->get_kind() == ast::Statement::Kind::Expression) {
+                    auto* exprStmt = static_cast<const ast::ExprStmt*>(stmts[i].get());
+                    auto* e = exprStmt->get_expr();
+                    if (e) {
+                        compileExpression(*e);
+                        emitOp(bytecode::OpCode::RET);
+                    }
+                } else {
+                    compileStatement(*stmts[i]);
+                }
+            }
+        } else if (auto* stmt = dynamic_cast<const ast::Statement*>(body)) {
+            if (stmt->get_kind() == ast::Statement::Kind::Expression) {
+                auto* exprStmt = static_cast<const ast::ExprStmt*>(stmt);
+                auto* e = exprStmt->get_expr();
+                if (e) {
+                    compileExpression(*e);
+                    emitOp(bytecode::OpCode::RET);
+                }
+            } else {
+                compileStatement(*stmt);
+            }
+        } else if (auto* expr_node = dynamic_cast<const ast::Expression*>(body)) {
+            compileExpression(*expr_node);
+            emitOp(bytecode::OpCode::RET);
+        }
+    }
+
+    // Ensure return
+    if (ctx_->currentFunction->code.empty() ||
+        ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
+        emitOp(bytecode::OpCode::RET_NULL);
+    }
+
+    ctx_->currentFunction->local_count = std::max(
+        ctx_->currentFunction->local_count,
+        static_cast<uint32_t>(ctx_->nextSlot)
+    );
+
     int func_idx = static_cast<int>(module_->functions.size());
-    module_->functions.push_back(lambdaFunc);
+    module_->functions.push_back(*ctx_->currentFunction);
+
+    // Restore old context
+    ctx_ = std::move(prevCtx);
+
     emitOp1(bytecode::OpCode::CLOSURE, func_idx);
 }
 

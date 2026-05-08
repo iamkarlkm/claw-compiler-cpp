@@ -81,6 +81,9 @@ private:
     std::unique_ptr<ast::Statement> parse_try_statement();
     std::unique_ptr<ast::Statement> parse_throw_statement();
     std::unique_ptr<ast::Statement> parse_struct_statement();
+    std::unique_ptr<ast::Statement> parse_enum_statement();
+    std::unique_ptr<ast::Statement> parse_impl_statement();
+    std::unique_ptr<ast::Statement> parse_trait_statement();
     std::unique_ptr<ast::Statement> parse_use_statement();
     std::unique_ptr<ast::Statement> parse_module_statement();
 
@@ -198,7 +201,7 @@ inline SourceSpan Parser::span_from(const Token& start) const {
 // Main parsing entry point
 inline std::unique_ptr<ast::Program> Parser::parse() {
     auto program = std::make_unique<ast::Program>();
-    
+
     while (!is_at_end()) {
         // Try parsing without exception
         auto decl = parse_declaration();
@@ -258,7 +261,27 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
     if (check(TokenType::Kw_name)) {
         return parse_name_statement();
     }
-    
+
+    // Check for struct declaration
+    if (check(TokenType::Kw_struct)) {
+        return parse_struct_statement();
+    }
+
+    // Check for enum declaration
+    if (check(TokenType::Kw_enum)) {
+        return parse_enum_statement();
+    }
+
+    // Check for trait declaration
+    if (check(TokenType::Kw_trait)) {
+        return parse_trait_statement();
+    }
+
+    // Check for impl block
+    if (check(TokenType::Kw_impl)) {
+        return parse_impl_statement();
+    }
+
     // Check for let statement
     if (check(TokenType::Kw_let) || check(TokenType::Kw_const)) {
         return parse_statement();
@@ -1604,6 +1627,21 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
         return parse_struct_statement();
     }
 
+    // Enum declaration
+    if (check(TokenType::Kw_enum)) {
+        return parse_enum_statement();
+    }
+
+    // Trait declaration
+    if (check(TokenType::Kw_trait)) {
+        return parse_trait_statement();
+    }
+
+    // Impl block
+    if (check(TokenType::Kw_impl)) {
+        return parse_impl_statement();
+    }
+
     // Use statement
     if (check(TokenType::Kw_use)) {
         return parse_use_statement();
@@ -2392,6 +2430,335 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
     }
     
     return std::make_unique<ast::IdentifierExpr>("<error>", span_from(peek()));
+}
+
+// Parse enum declaration
+inline std::unique_ptr<ast::Statement> Parser::parse_enum_statement() {
+    if (!match(TokenType::Kw_enum)) {
+        return nullptr;
+    }
+
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected enum name after 'enum'", span_from(peek()), "P070");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string enum_name = previous().text;
+
+    auto enum_stmt = std::make_unique<ast::EnumStmt>(enum_name, span_from(previous()));
+
+    // Optional type parameters: enum Option<T>
+    if (check(TokenType::Op_lt)) {
+        advance(); // consume '<'
+        std::vector<std::string> type_params;
+        while (!check(TokenType::Op_gt) && !is_at_end()) {
+            if (check(TokenType::Identifier)) {
+                advance();
+                type_params.push_back(previous().text);
+            }
+            if (check(TokenType::Comma)) advance();
+            else break;
+        }
+        if (check(TokenType::Op_gt)) advance();
+        enum_stmt->set_type_params(type_params);
+    }
+
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after enum name", span_from(peek()), "P071");
+        }
+        return enum_stmt;
+    }
+    advance(); // consume '{'
+
+    while (!check(TokenType::RBrace) && !is_at_end()) {
+        if (check(TokenType::Identifier)) {
+            advance();
+            std::string variant_name = previous().text;
+            ast::EnumVariant variant;
+            variant.name = variant_name;
+            variant.span = span_from(previous());
+
+            // Optional associated types: Variant(Type)
+            if (check(TokenType::LParen)) {
+                advance(); // consume '('
+                while (!check(TokenType::RParen) && !is_at_end()) {
+                    if (check(TokenType::Identifier) || check_any({
+                        TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                        TokenType::Type_u64, TokenType::Type_usize,
+                        TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                        TokenType::Type_i64, TokenType::Type_isize,
+                        TokenType::Type_f32, TokenType::Type_f64,
+                        TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                        advance();
+                        variant.associated_types.push_back(previous().text);
+                    }
+                    if (check(TokenType::Comma)) advance();
+                    else break;
+                }
+                if (check(TokenType::RParen)) advance();
+            }
+
+            enum_stmt->add_variant(variant);
+        }
+
+        if (check(TokenType::Comma)) {
+            advance();
+        } else if (!check(TokenType::RBrace)) {
+            break;
+        }
+    }
+
+    if (!check(TokenType::RBrace)) {
+        if (reporter) {
+            reporter->error("Expected '}' after enum variants", span_from(peek()), "P072");
+        }
+    } else {
+        advance(); // consume '}'
+    }
+
+    return enum_stmt;
+}
+
+// Parse trait declaration
+inline std::unique_ptr<ast::Statement> Parser::parse_trait_statement() {
+    if (!match(TokenType::Kw_trait)) {
+        return nullptr;
+    }
+
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected trait name after 'trait'", span_from(peek()), "P073");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string trait_name = previous().text;
+
+    auto trait_stmt = std::make_unique<ast::TraitStmt>(trait_name, span_from(previous()));
+
+    // Optional type parameters
+    if (check(TokenType::Op_lt)) {
+        advance();
+        std::vector<std::string> type_params;
+        while (!check(TokenType::Op_gt) && !is_at_end()) {
+            if (check(TokenType::Identifier)) {
+                advance();
+                type_params.push_back(previous().text);
+            }
+            if (check(TokenType::Comma)) advance();
+            else break;
+        }
+        if (check(TokenType::Op_gt)) advance();
+        trait_stmt->set_type_params(type_params);
+    }
+
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after trait name", span_from(peek()), "P074");
+        }
+        return trait_stmt;
+    }
+    advance(); // consume '{'
+
+    while (!check(TokenType::RBrace) && !is_at_end()) {
+        if (check(TokenType::Kw_fn)) {
+            advance(); // consume 'fn'
+            if (!check(TokenType::Identifier)) {
+                if (reporter) reporter->error("Expected method name", span_from(peek()), "P075");
+                break;
+            }
+            advance();
+            ast::TraitMethod method;
+            method.name = previous().text;
+            method.span = span_from(previous());
+
+            if (!check(TokenType::LParen)) {
+                if (reporter) reporter->error("Expected '(' after method name", span_from(peek()), "P076");
+                break;
+            }
+            advance(); // consume '('
+
+            while (!check(TokenType::RParen) && !is_at_end()) {
+                if (check(TokenType::Identifier)) {
+                    advance();
+                    std::string param_name = previous().text;
+                    std::string param_type;
+                    if (check(TokenType::Colon)) {
+                        advance();
+                        if (check(TokenType::Identifier) || check_any({
+                            TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                            TokenType::Type_u64, TokenType::Type_usize,
+                            TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                            TokenType::Type_i64, TokenType::Type_isize,
+                            TokenType::Type_f32, TokenType::Type_f64,
+                            TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                            advance();
+                            param_type = previous().text;
+                        }
+                    }
+                    method.params.emplace_back(param_name, param_type);
+                }
+                if (check(TokenType::Comma)) advance();
+                else break;
+            }
+            if (check(TokenType::RParen)) advance();
+
+            if (check(TokenType::Op_arrow)) {
+                advance(); // consume '->'
+                if (check(TokenType::Identifier) || check_any({
+                    TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                    TokenType::Type_u64, TokenType::Type_usize,
+                    TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                    TokenType::Type_i64, TokenType::Type_isize,
+                    TokenType::Type_f32, TokenType::Type_f64,
+                    TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                    advance();
+                    method.return_type = previous().text;
+                }
+            }
+
+            // Optional default implementation
+            if (check(TokenType::LBrace)) {
+                auto block = parse_block();
+                method.default_body.reset(static_cast<ast::BlockStmt*>(block.release()));
+                method.has_default_impl = true;
+            } else if (check(TokenType::Semicolon)) {
+                advance();
+            }
+
+            trait_stmt->add_method(method);
+        } else {
+            advance(); // skip unexpected
+        }
+    }
+
+    if (!check(TokenType::RBrace)) {
+        if (reporter) {
+            reporter->error("Expected '}' after trait body", span_from(peek()), "P077");
+        }
+    } else {
+        advance();
+    }
+
+    return trait_stmt;
+}
+
+// Parse impl block
+inline std::unique_ptr<ast::Statement> Parser::parse_impl_statement() {
+    if (!match(TokenType::Kw_impl)) {
+        return nullptr;
+    }
+
+    std::string first_name;
+    if (check(TokenType::Identifier)) {
+        advance();
+        first_name = previous().text;
+    } else {
+        if (reporter) {
+            reporter->error("Expected type or trait name after 'impl'", span_from(peek()), "P080");
+        }
+        return nullptr;
+    }
+
+    auto impl_stmt = std::make_unique<ast::ImplStmt>(first_name, span_from(previous()));
+
+    // Check for "impl TraitName for TypeName"
+    if (check(TokenType::Kw_for)) {
+        advance(); // consume 'for'
+        if (check(TokenType::Identifier)) {
+            advance();
+            impl_stmt->set_trait_name(first_name);
+            impl_stmt->set_target_type(previous().text);
+        } else {
+            if (reporter) reporter->error("Expected type name after 'for'", span_from(peek()), "P081");
+        }
+    }
+
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after impl target", span_from(peek()), "P082");
+        }
+        return impl_stmt;
+    }
+    advance(); // consume '{'
+
+    while (!check(TokenType::RBrace) && !is_at_end()) {
+        if (check(TokenType::Kw_fn)) {
+            advance(); // consume 'fn'
+            if (!check(TokenType::Identifier)) {
+                if (reporter) reporter->error("Expected method name", span_from(peek()), "P083");
+                break;
+            }
+            advance();
+            ast::ImplMethod method;
+            method.name = previous().text;
+            method.span = span_from(previous());
+
+            if (!check(TokenType::LParen)) {
+                if (reporter) reporter->error("Expected '(' after method name", span_from(peek()), "P084");
+                break;
+            }
+            advance(); // consume '('
+
+            while (!check(TokenType::RParen) && !is_at_end()) {
+                if (check(TokenType::Identifier)) {
+                    advance();
+                    std::string param_name = previous().text;
+                    std::string param_type;
+                    if (check(TokenType::Colon)) {
+                        advance();
+                        if (check(TokenType::Identifier) || check_any({
+                            TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                            TokenType::Type_u64, TokenType::Type_usize,
+                            TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                            TokenType::Type_i64, TokenType::Type_isize,
+                            TokenType::Type_f32, TokenType::Type_f64,
+                            TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                            advance();
+                            param_type = previous().text;
+                        }
+                    }
+                    method.params.emplace_back(param_name, param_type);
+                }
+                if (check(TokenType::Comma)) advance();
+                else break;
+            }
+            if (check(TokenType::RParen)) advance();
+
+            if (check(TokenType::Op_arrow)) {
+                advance(); // consume '->'
+                if (check(TokenType::Identifier) || check_any({
+                    TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                    TokenType::Type_u64, TokenType::Type_usize,
+                    TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                    TokenType::Type_i64, TokenType::Type_isize,
+                    TokenType::Type_f32, TokenType::Type_f64,
+                    TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                    advance();
+                    method.return_type = previous().text;
+                }
+            }
+
+            auto block = parse_block();
+            method.body.reset(static_cast<ast::BlockStmt*>(block.release()));
+            impl_stmt->add_method(method);
+        } else {
+            advance(); // skip unexpected
+        }
+    }
+
+    if (!check(TokenType::RBrace)) {
+        if (reporter) {
+            reporter->error("Expected '}' after impl body", span_from(peek()), "P085");
+        }
+    } else {
+        advance();
+    }
+
+    return impl_stmt;
 }
 
 } // namespace claw

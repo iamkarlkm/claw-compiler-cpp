@@ -131,9 +131,15 @@ struct RuntimeValue {
     // For structs
     std::map<std::string, RuntimeValue> struct_fields;
 
+    // For enums: variant name + optional payload (stored in scalar)
+    std::string enum_name;
+    std::string enum_variant_name;
+    bool is_enum_variant = false;
+
     bool is_array() const { return size > 1 || !array.empty(); }
     bool is_tensor() const { return tensor != nullptr; }
     bool is_struct() const { return !struct_fields.empty(); }
+    bool is_enum() const { return is_enum_variant; }
 
     // Get value at index (1-based in Claw)
     Value& at(int64_t idx) {
@@ -781,6 +787,15 @@ public:
     // Struct registry: name -> list of (field_name, field_type)
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> struct_registry;
 
+    // Enum registry: name -> list of variants
+    std::map<std::string, std::vector<claw::ast::EnumVariant>> enum_registry;
+
+    // Trait registry: name -> TraitStmt (stored as raw pointer for lookup; AST owned by program)
+    std::map<std::string, claw::ast::TraitStmt*> trait_registry;
+
+    // Impl registry: target_type -> list of methods
+    std::map<std::string, std::vector<claw::ast::ImplMethod>> impl_registry;
+
     // Lambda registry: name -> LambdaExpr*
     std::map<std::string, claw::ast::LambdaExpr*> lambda_table;
     int lambda_counter = 0;
@@ -1071,6 +1086,18 @@ public:
                 execute_struct(static_cast<claw::ast::StructStmt*>(stmt));
                 break;
             }
+            case claw::ast::Statement::Kind::Enum: {
+                execute_enum(static_cast<claw::ast::EnumStmt*>(stmt));
+                break;
+            }
+            case claw::ast::Statement::Kind::Trait: {
+                execute_trait(static_cast<claw::ast::TraitStmt*>(stmt));
+                break;
+            }
+            case claw::ast::Statement::Kind::Impl: {
+                execute_impl(static_cast<claw::ast::ImplStmt*>(stmt));
+                break;
+            }
             case claw::ast::Statement::Kind::Import: {
                 execute_import(static_cast<claw::ast::ImportStmt*>(stmt));
                 break;
@@ -1153,6 +1180,24 @@ public:
                         }
                         scoped_set(name, val);
                         return;
+                    }
+                    // Check for enum variant constructor: Some(42)
+                    for (const auto& [enum_name, variants] : enum_registry) {
+                        for (const auto& variant : variants) {
+                            if (variant.name == ident->get_name()) {
+                                RuntimeValue enum_val;
+                                enum_val.type_name = enum_name;
+                                enum_val.enum_name = enum_name;
+                                enum_val.enum_variant_name = variant.name;
+                                enum_val.is_enum_variant = true;
+                                const auto& args = call->get_arguments();
+                                if (!args.empty()) {
+                                    enum_val.scalar = evaluate(args[0].get());
+                                }
+                                scoped_set(name, enum_val);
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -1418,7 +1463,19 @@ public:
 
     // Execute match statement
     void execute_match(claw::ast::MatchStmt* match_stmt) {
-        Value match_val = evaluate(match_stmt->get_expr());
+        // Try to get RuntimeValue directly if match expr is an identifier
+        RuntimeValue* match_rv = nullptr;
+        Value match_val;
+        if (match_stmt->get_expr()->get_kind() == claw::ast::Expression::Kind::Identifier) {
+            auto* ident = static_cast<claw::ast::IdentifierExpr*>(match_stmt->get_expr());
+            match_rv = scoped_get(ident->get_name());
+        }
+        if (match_rv) {
+            match_val = match_rv->is_enum() ? Value(match_rv->enum_variant_name) : match_rv->scalar;
+        } else {
+            match_val = evaluate(match_stmt->get_expr());
+        }
+
         const auto& patterns = match_stmt->get_patterns();
         const auto& bodies = match_stmt->get_bodies();
 
@@ -1436,10 +1493,29 @@ public:
                 } else {
                     // Bind pattern: create variable with pattern name bound to match value
                     RuntimeValue rv;
-                    rv.type_name = "i64";
+                    rv.type_name = "auto";
                     rv.scalar = match_val;
                     scoped_set(ident->get_name(), rv);
                     matched = true;
+                }
+            } else if (pattern->get_kind() == claw::ast::Expression::Kind::Call) {
+                // Enum variant pattern: Some(v) or None()
+                auto* call = static_cast<claw::ast::CallExpr*>(pattern);
+                if (call->get_callee()->get_kind() == claw::ast::Expression::Kind::Identifier) {
+                    auto* ident = static_cast<claw::ast::IdentifierExpr*>(call->get_callee());
+                    std::string variant_name = ident->get_name();
+                    if (match_rv && match_rv->is_enum() && match_rv->enum_variant_name == variant_name) {
+                        matched = true;
+                        // Bind pattern arguments to payload
+                        const auto& args = call->get_arguments();
+                        if (!args.empty() && args[0]->get_kind() == claw::ast::Expression::Kind::Identifier) {
+                            auto* bind_ident = static_cast<claw::ast::IdentifierExpr*>(args[0].get());
+                            RuntimeValue bind_val;
+                            bind_val.type_name = "auto";
+                            bind_val.scalar = match_rv->scalar;
+                            scoped_set(bind_ident->get_name(), bind_val);
+                        }
+                    }
                 }
             } else {
                 // Literal pattern: compare values
@@ -1469,6 +1545,29 @@ public:
             fields.emplace_back(f.name, f.type);
         }
         struct_registry[struct_stmt->get_name()] = std::move(fields);
+    }
+
+    // Execute enum declaration
+    void execute_enum(claw::ast::EnumStmt* enum_stmt) {
+        if (!enum_stmt) return;
+        enum_registry[enum_stmt->get_name()] = enum_stmt->get_variants();
+    }
+
+    // Execute trait declaration
+    void execute_trait(claw::ast::TraitStmt* trait_stmt) {
+        if (!trait_stmt) return;
+        trait_registry[trait_stmt->get_name()] = trait_stmt;
+    }
+
+    // Execute impl block
+    void execute_impl(claw::ast::ImplStmt* impl_stmt) {
+        if (!impl_stmt) return;
+        std::string key = impl_stmt->is_trait_impl()
+            ? impl_stmt->get_trait_name() + " for " + impl_stmt->get_target_type()
+            : impl_stmt->get_target_type();
+        for (const auto& method : impl_stmt->get_methods()) {
+            impl_registry[key].push_back(method);
+        }
     }
 
     // Execute import/use statement
@@ -1598,6 +1697,9 @@ public:
                 auto* ident = static_cast<claw::ast::IdentifierExpr*>(expr);
                 RuntimeValue* var = scoped_get(ident->get_name());
                 if (var) {
+                    if (var->is_enum()) {
+                        return Value(var->enum_variant_name);
+                    }
                     return var->at(1);  // Return scalar (index 1)
                 }
                 return Value();

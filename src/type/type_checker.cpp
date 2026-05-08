@@ -2,6 +2,7 @@
 // Completes the TypeChecker framework from type_system.h
 
 #include "type/type_system.h"
+#include "ast/ast.h"
 #include <algorithm>
 #include <cmath>
 
@@ -394,64 +395,481 @@ Unifier::Substitution Unifier::compose(const Substitution& a, const Substitution
 }
 
 // =============================================================================
-// TypeChecker Implementation (Stub - requires AST integration)
+// TypeChecker Implementation
 // =============================================================================
 
 TypeChecker::TypeChecker() {}
 
-// Placeholder implementations - full versions require AST headers
+// Variable scopes
+static std::vector<std::unordered_map<std::string, TypePtr>> var_scopes;
+static std::unordered_map<std::string, std::vector<std::pair<std::string, TypePtr>>> struct_fields;
+static std::unordered_map<std::string, std::vector<std::string>> enum_variants;
+static std::unordered_map<std::string, TypePtr> function_sigs;
+
+static void push_scope() { var_scopes.emplace_back(); }
+static void pop_scope() { if (!var_scopes.empty()) var_scopes.pop_back(); }
+static void define_var(const std::string& name, TypePtr type) {
+    if (!var_scopes.empty()) var_scopes.back()[name] = type;
+}
+static TypePtr lookup_var(const std::string& name) {
+    for (auto it = var_scopes.rbegin(); it != var_scopes.rend(); ++it) {
+        auto jt = it->find(name);
+        if (jt != it->end()) return jt->second;
+    }
+    return nullptr;
+}
+
+static TypePtr parse_type_name(const std::string& name) {
+    if (name == "i64" || name == "int") return Type::int64();
+    if (name == "f64" || name == "float") return Type::float64();
+    if (name == "bool") return Type::boolean();
+    if (name == "string" || name == "str") return Type::string();
+    if (name.empty()) return Type::unknown();
+    return TypeCache::instance().parse_type(name);
+}
+
 void TypeChecker::check(const ast::Program& program) {
-    (void)program;
-    // Would traverse AST and check types
+    var_scopes.clear();
+    struct_fields.clear();
+    enum_variants.clear();
+    function_sigs.clear();
+    push_scope();
+
+    const auto& decls = program.get_declarations();
+
+    // First pass: register struct, enum, and function signatures
+    for (const auto& stmt : decls) {
+        if (!stmt) continue;
+        if (stmt->get_kind() == ast::Statement::Kind::Struct) {
+            auto* s = static_cast<const ast::StructStmt*>(stmt.get());
+            std::vector<std::pair<std::string, TypePtr>> fields;
+            for (const auto& f : s->get_fields()) {
+                fields.push_back({f.name, parse_type_name(f.type)});
+            }
+            struct_fields[s->get_name()] = fields;
+            ctx_.env().add_struct(s->get_name(), TypeCache::instance().get_generic(s->get_name()));
+        } else if (stmt->get_kind() == ast::Statement::Kind::Enum) {
+            auto* e = static_cast<const ast::EnumStmt*>(stmt.get());
+            std::vector<std::string> variants;
+            for (const auto& v : e->get_variants()) {
+                variants.push_back(v.name);
+            }
+            enum_variants[e->get_name()] = variants;
+            ctx_.env().add_enum(e->get_name(), TypeCache::instance().get_generic(e->get_name()));
+        } else if (stmt->get_kind() == ast::Statement::Kind::Function) {
+            auto* f = static_cast<const ast::FunctionStmt*>(stmt.get());
+            TypePtr ret = parse_type_name(f->get_return_type());
+            function_sigs[f->get_name()] = ret;
+        }
+    }
+
+    // Second pass: check all declarations
+    for (const auto& stmt : decls) {
+        if (!stmt) continue;
+        check_stmt(stmt.get());
+    }
+
+    pop_scope();
 }
 
-TypePtr TypeChecker::check_expr(const ast::ExprPtr& expr) {
-    (void)expr;
-    return Type::unknown();
+TypePtr TypeChecker::check_stmt(const ast::Statement* stmt) {
+    if (!stmt) return Type::unit();
+
+    switch (stmt->get_kind()) {
+        case ast::Statement::Kind::Function: {
+            auto* f = static_cast<const ast::FunctionStmt*>(stmt);
+            return check_function(*f);
+        }
+        case ast::Statement::Kind::Struct: {
+            auto* s = static_cast<const ast::StructStmt*>(stmt);
+            return check_struct(*s);
+        }
+        case ast::Statement::Kind::Enum: {
+            auto* e = static_cast<const ast::EnumStmt*>(stmt);
+            return check_enum(*e);
+        }
+        case ast::Statement::Kind::Let: {
+            auto* let = static_cast<const ast::LetStmt*>(stmt);
+            TypePtr init_type = Type::unknown();
+            if (let->get_initializer()) {
+                init_type = check_expr(let->get_initializer());
+            }
+            TypePtr declared = parse_type_name(let->get_type());
+            if (declared && !declared->is_unknown() && init_type && !init_type->is_unknown()) {
+                if (!can_coerce(init_type, declared)) {
+                    mismatch_error(declared, init_type, let->get_span());
+                }
+            }
+            define_var(let->get_name(), declared && !declared->is_unknown() ? declared : init_type);
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Assign: {
+            auto* assign = static_cast<const ast::AssignStmt*>(stmt);
+            TypePtr target = check_expr(assign->get_target());
+            TypePtr value = check_expr(assign->get_value());
+            if (target && !target->is_unknown() && value && !value->is_unknown()) {
+                if (!can_coerce(value, target)) {
+                    mismatch_error(target, value, assign->get_span());
+                }
+            }
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Expression: {
+            auto* es = static_cast<const ast::ExprStmt*>(stmt);
+            check_expr(es->get_expr());
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Block: {
+            auto* block = static_cast<const ast::BlockStmt*>(stmt);
+            push_scope();
+            for (const auto& s : block->get_statements()) {
+                check_stmt(s.get());
+            }
+            pop_scope();
+            return Type::unit();
+        }
+        case ast::Statement::Kind::If: {
+            auto* if_stmt = static_cast<const ast::IfStmt*>(stmt);
+            const auto& conds = if_stmt->get_conditions();
+            const auto& bodies = if_stmt->get_bodies();
+            for (size_t i = 0; i < conds.size(); ++i) {
+                if (conds[i]) check_expr(conds[i].get());
+                if (i < bodies.size() && bodies[i]) {
+                    push_scope();
+                    check_stmt(dynamic_cast<const ast::Statement*>(bodies[i].get()));
+                    pop_scope();
+                }
+            }
+            if (if_stmt->get_else_body()) {
+                push_scope();
+                check_stmt(dynamic_cast<const ast::Statement*>(if_stmt->get_else_body()));
+                pop_scope();
+            }
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Match: {
+            auto* m = static_cast<const ast::MatchStmt*>(stmt);
+            return check_match(*m);
+        }
+        case ast::Statement::Kind::For: {
+            auto* f = static_cast<const ast::ForStmt*>(stmt);
+            return check_for(*f);
+        }
+        case ast::Statement::Kind::While: {
+            auto* w = static_cast<const ast::WhileStmt*>(stmt);
+            if (w->get_condition()) check_expr(w->get_condition());
+            push_scope();
+            check_stmt(dynamic_cast<const ast::Statement*>(w->get_body()));
+            pop_scope();
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Return: {
+            auto* ret = static_cast<const ast::ReturnStmt*>(stmt);
+            if (ret->get_value()) check_expr(ret->get_value());
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Break:
+        case ast::Statement::Kind::Continue:
+            return Type::unit();
+        default:
+            return Type::unit();
+    }
 }
 
-TypePtr TypeChecker::check_stmt(const ast::StmtPtr& stmt) {
-    (void)stmt;
-    return Type::unit();
+TypePtr TypeChecker::check_expr(const ast::Expression* expr) {
+    if (!expr) return Type::unknown();
+
+    switch (expr->get_kind()) {
+        case ast::Expression::Kind::Literal: {
+            auto* lit = static_cast<const ast::LiteralExpr*>(expr);
+            const auto& v = lit->get_value();
+            if (std::holds_alternative<int64_t>(v)) return Type::int64();
+            if (std::holds_alternative<double>(v)) return Type::float64();
+            if (std::holds_alternative<bool>(v)) return Type::boolean();
+            if (std::holds_alternative<std::string>(v)) return Type::string();
+            return Type::unknown();
+        }
+        case ast::Expression::Kind::Identifier: {
+            auto* ident = static_cast<const ast::IdentifierExpr*>(expr);
+            TypePtr t = lookup_var(ident->get_name());
+            if (t) return t;
+            // Could be a function reference
+            auto fit = function_sigs.find(ident->get_name());
+            if (fit != function_sigs.end()) return fit->second;
+            return Type::unknown();
+        }
+        case ast::Expression::Kind::Binary: {
+            auto* bin = static_cast<const ast::BinaryExpr*>(expr);
+            return check_binary_op(*bin);
+        }
+        case ast::Expression::Kind::Unary: {
+            auto* un = static_cast<const ast::UnaryExpr*>(expr);
+            return check_unary_op(*un);
+        }
+        case ast::Expression::Kind::Call: {
+            auto* call = static_cast<const ast::CallExpr*>(expr);
+            return check_call(*call);
+        }
+        case ast::Expression::Kind::Index: {
+            auto* idx = static_cast<const ast::IndexExpr*>(expr);
+            return check_index(*idx);
+        }
+        case ast::Expression::Kind::Member: {
+            auto* member = static_cast<const ast::MemberExpr*>(expr);
+            return check_field(*member);
+        }
+        case ast::Expression::Kind::Lambda: {
+            auto* lam = static_cast<const ast::LambdaExpr*>(expr);
+            return check_lambda(*lam);
+        }
+        case ast::Expression::Kind::Array: {
+            auto* arr = static_cast<const ast::ArrayExpr*>(expr);
+            TypePtr elem = Type::unknown();
+            for (const auto& e : arr->get_elements()) {
+                TypePtr t = check_expr(e.get());
+                if (!elem || elem->is_unknown()) elem = t;
+            }
+            if (!elem || elem->is_unknown()) elem = Type::int64();
+            return TypeCache::instance().get_array(elem, arr->size());
+        }
+        default:
+            return Type::unknown();
+    }
 }
 
 TypePtr TypeChecker::check_binary_op(const ast::BinaryExpr& op) {
-    (void)op;
+    TypePtr left = check_expr(op.get_left());
+    TypePtr right = check_expr(op.get_right());
+    if (!left || !right) return Type::unknown();
+
+    auto oper = op.get_operator();
+    bool is_arith = (oper == TokenType::Op_plus || oper == TokenType::Op_minus ||
+                     oper == TokenType::Op_star || oper == TokenType::Op_slash ||
+                     oper == TokenType::Op_percent);
+    bool is_cmp = (oper == TokenType::Op_eq || oper == TokenType::Op_neq ||
+                   oper == TokenType::Op_lt || oper == TokenType::Op_lte ||
+                   oper == TokenType::Op_gt || oper == TokenType::Op_gte);
+    bool is_logical = (oper == TokenType::Op_and || oper == TokenType::Op_or);
+
+    if (is_logical) {
+        return Type::boolean();
+    }
+    if (is_cmp) {
+        return Type::boolean();
+    }
+    if (is_arith) {
+        if (left->is_unknown() || right->is_unknown()) {
+            return Type::unknown();
+        }
+        if (left->is_numeric() && right->is_numeric()) {
+            return numeric_coerce(left, right);
+        }
+        type_error("Arithmetic operation requires numeric types", op.get_span());
+        return Type::unknown();
+    }
     return Type::unknown();
 }
 
 TypePtr TypeChecker::check_unary_op(const ast::UnaryExpr& op) {
-    (void)op;
-    return Type::unknown();
+    TypePtr operand = check_expr(op.get_operand());
+    if (!operand) return Type::unknown();
+    auto oper = op.get_operator();
+    if (oper == TokenType::Op_minus || oper == TokenType::Op_plus) {
+        if (operand->is_numeric()) return operand;
+        type_error("Unary arithmetic requires numeric type", op.get_span());
+        return Type::unknown();
+    }
+    if (oper == TokenType::Op_bang) {
+        return Type::boolean();
+    }
+    return operand;
 }
 
 TypePtr TypeChecker::check_call(const ast::CallExpr& call) {
-    (void)call;
+    auto* callee = call.get_callee();
+    if (!callee) return Type::unknown();
+
+    // Check arguments
+    for (const auto& arg : call.get_arguments()) {
+        check_expr(arg.get());
+    }
+
+    if (callee->get_kind() == ast::Expression::Kind::Identifier) {
+        auto* ident = static_cast<const ast::IdentifierExpr*>(callee);
+        const std::string& name = ident->get_name();
+
+        // Check for struct constructor
+        auto sit = struct_fields.find(name);
+        if (sit != struct_fields.end()) {
+            return ctx_.env().get_struct(name);
+        }
+
+        // Check for enum variant constructor
+        for (const auto& ep : enum_variants) {
+            for (const auto& vname : ep.second) {
+                if (vname == name) {
+                    return ctx_.env().get_enum(ep.first);
+                }
+            }
+        }
+
+        // Function call
+        auto fit = function_sigs.find(name);
+        if (fit != function_sigs.end()) {
+            return fit->second;
+        }
+    }
     return Type::unknown();
 }
 
 TypePtr TypeChecker::check_index(const ast::IndexExpr& index) {
-    (void)index;
+    TypePtr obj = check_expr(index.get_object());
+    check_expr(index.get_index());
+    if (obj && obj->is_array()) {
+        auto* arr = static_cast<ArrayType*>(obj.get());
+        return arr->element_type;
+    }
     return Type::unknown();
 }
 
 TypePtr TypeChecker::check_field(const ast::MemberExpr& field) {
-    (void)field;
+    TypePtr obj = check_expr(field.get_object());
+    if (!obj) return Type::unknown();
+
+    // Check struct fields
+    for (const auto& sp : struct_fields) {
+        for (const auto& f : sp.second) {
+            if (f.first == field.get_member()) {
+                return f.second;
+            }
+        }
+    }
     return Type::unknown();
 }
 
-TypePtr TypeChecker::check_function(const ast::FunctionStmt& decl) {
-    (void)decl;
+TypePtr TypeChecker::check_lambda(const ast::LambdaExpr& lambda) {
+    push_scope();
+    for (const auto& param : lambda.get_params()) {
+        define_var(param.first, parse_type_name(param.second));
+    }
+    if (lambda.get_body()) {
+        auto* stmt = dynamic_cast<const ast::Statement*>(lambda.get_body());
+        auto* expr = dynamic_cast<const ast::Expression*>(lambda.get_body());
+        if (stmt) {
+            check_stmt(stmt);
+        } else if (expr) {
+            check_expr(expr);
+        }
+    }
+    pop_scope();
+    return TypeCache::instance().get_function(Type::unknown(), Type::unknown());
+}
+
+TypePtr TypeChecker::check_match(const ast::MatchStmt& match) {
+    TypePtr scrutinee = Type::unknown();
+    if (match.get_expr()) {
+        scrutinee = check_expr(match.get_expr());
+    }
+
+    const auto& patterns = match.get_patterns();
+    const auto& bodies = match.get_bodies();
+
+    for (size_t i = 0; i < patterns.size(); ++i) {
+        if (!patterns[i]) continue;
+
+        // Check pattern type against scrutinee
+        if (patterns[i]->get_kind() == ast::Expression::Kind::Literal) {
+            TypePtr pat_type = check_expr(patterns[i].get());
+            if (scrutinee && !scrutinee->is_unknown() && pat_type && !pat_type->is_unknown()) {
+                if (!can_coerce(pat_type, scrutinee)) {
+                    mismatch_error(scrutinee, pat_type, patterns[i]->get_span());
+                }
+            }
+        }
+
+        // Check body
+        if (i < bodies.size() && bodies[i]) {
+            push_scope();
+            auto* stmt = dynamic_cast<const ast::Statement*>(bodies[i].get());
+            auto* expr = dynamic_cast<const ast::Expression*>(bodies[i].get());
+            if (stmt) check_stmt(stmt);
+            else if (expr) check_expr(expr);
+            pop_scope();
+        }
+    }
     return Type::unit();
 }
 
-TypePtr TypeChecker::check_struct(const ast::FunctionStmt& decl) {
-    (void)decl;
+TypePtr TypeChecker::check_for(const ast::ForStmt& for_stmt) {
+    TypePtr iter_type = Type::unknown();
+    if (for_stmt.get_iterable()) {
+        iter_type = check_expr(for_stmt.get_iterable());
+    }
+
+    TypePtr var_type = Type::unknown();
+    if (iter_type) {
+        if (iter_type->is_array()) {
+            auto* arr = static_cast<ArrayType*>(iter_type.get());
+            var_type = arr->element_type;
+        } else if (iter_type->is_string()) {
+            var_type = Type::string();
+        } else if (iter_type->is_integer()) {
+            var_type = Type::int64();
+        }
+    }
+
+    push_scope();
+    define_var(for_stmt.get_variable(), var_type);
+    auto* body = dynamic_cast<const ast::Statement*>(for_stmt.get_body());
+    if (body) check_stmt(body);
+    pop_scope();
+    return Type::unit();
+}
+
+TypePtr TypeChecker::check_function(const ast::FunctionStmt& decl) {
+    push_scope();
+    TypePtr ret = parse_type_name(decl.get_return_type());
+    for (const auto& param : decl.get_params()) {
+        define_var(param.first, parse_type_name(param.second));
+    }
+    auto* body = dynamic_cast<const ast::Statement*>(decl.get_body());
+    if (body) check_stmt(body);
+    pop_scope();
+    return Type::unit();
+}
+
+TypePtr TypeChecker::check_struct(const ast::StructStmt& decl) {
+    // Validate all field types are known
+    for (const auto& field : decl.get_fields()) {
+        TypePtr ft = parse_type_name(field.type);
+        if (!ft || ft->is_unknown()) {
+            type_error("Unknown type for field '" + field.name + "': " + field.type, field.span);
+        }
+    }
+    return Type::unit();
+}
+
+TypePtr TypeChecker::check_enum(const ast::EnumStmt& decl) {
+    // Validate variant type consistency (simplified: just check types are known)
+    for (const auto& variant : decl.get_variants()) {
+        for (const auto& ty : variant.associated_types) {
+            TypePtr vt = parse_type_name(ty);
+            if (!vt || vt->is_unknown()) {
+                type_error("Unknown type in enum variant '" + variant.name + "': " + ty, variant.span);
+            }
+        }
+    }
     return Type::unit();
 }
 
 TypePtr TypeChecker::check_process(const ast::SerialProcessStmt& process) {
-    (void)process;
+    push_scope();
+    for (const auto& param : process.get_params()) {
+        define_var(param.first, parse_type_name(param.second));
+    }
+    auto* body = dynamic_cast<const ast::Statement*>(process.get_body());
+    if (body) check_stmt(body);
+    pop_scope();
     return Type::unit();
 }
 
@@ -464,9 +882,11 @@ TypePtr TypeChecker::coerce(TypePtr from, TypePtr to, const SourceSpan& span) {
 }
 
 bool TypeChecker::can_coerce(TypePtr from, TypePtr to) {
+    if (!from || !to) return true;
     if (from->equals(to)) return true;
     if (from->is_numeric() && to->is_numeric()) return true;
     if (from->is_string() && to->is_string()) return true;
+    if (to->is_unknown() || from->is_unknown()) return true;
     return false;
 }
 
@@ -475,7 +895,7 @@ void TypeChecker::type_error(const std::string& msg, const SourceSpan& span) {
 }
 
 void TypeChecker::mismatch_error(TypePtr expected, TypePtr found, const SourceSpan& span) {
-    std::string msg = "Type mismatch: expected " + expected->to_string() + 
+    std::string msg = "Type mismatch: expected " + expected->to_string() +
                       ", found " + found->to_string();
     errors_.emplace_back(msg, span, ErrorSeverity::Error, "TYPE");
 }

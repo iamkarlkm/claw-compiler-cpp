@@ -20,6 +20,9 @@
 #include "vm/claw_vm.h"
 #include "codegen/c_codegen.h"
 #include "codegen/native_codegen.h"
+#include "codegen/macho_writer.h"
+#include "codegen/linker_integration.h"
+#include "common/parse_cache.h"
 // #include "emitter/wasm/wasm_backend.h"  // TODO: fix ast::Module → ast::Program
 #include "pipeline/execution_engine.h"
 #include "repl/claw_repl.h"
@@ -42,8 +45,8 @@ struct CompileOptions {
     std::string input_file;
     std::string output_file;
     
-    enum class Mode { 
-        None, Tokens, AST, Semantic, TypeCheck, Interpret, Bytecode, JIT, Hybrid, CCodeGen, NativeCodegen, WebAssembly, REPL 
+    enum class Mode {
+        None, Tokens, AST, Semantic, TypeCheck, Interpret, Bytecode, JIT, Hybrid, CCodeGen, NativeCodegen, AOT, WebAssembly, REPL
     } mode = Mode::None;
     
     int opt_level = 0;
@@ -71,6 +74,7 @@ void print_usage(const char* prog) {
     std::cout << "  -H, --hybrid        Hybrid: interpret + JIT hot paths\n";
     std::cout << "  -C, --ccodegen      Generate C code\n";
     std::cout << "  -n, --native        Generate x86-64 native code\n";
+    std::cout << "  --aot               AOT compile to executable (x86-64 + Mach-O)\n";
     std::cout << "  -w, --wasm          Generate WebAssembly\n";
     std::cout << "  -i, --repl          Start REPL interactive mode\n";
     
@@ -95,6 +99,7 @@ std::string get_mode_name(CompileOptions::Mode mode) {
         case CompileOptions::Mode::Hybrid: return "Hybrid (VM+JIT)";
         case CompileOptions::Mode::CCodeGen: return "C CodeGen";
         case CompileOptions::Mode::NativeCodegen: return "Native x86-64";
+        case CompileOptions::Mode::AOT: return "AOT (x86-64 executable)";
         case CompileOptions::Mode::WebAssembly: return "WebAssembly";
         case CompileOptions::Mode::REPL: return "REPL (Interactive)";
         default: return "None";
@@ -142,6 +147,9 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
         }
         else if (arg == "-n" || arg == "--native") {
             opts.mode = CompileOptions::Mode::NativeCodegen;
+        }
+        else if (arg == "--aot") {
+            opts.mode = CompileOptions::Mode::AOT;
         }
         else if (arg == "-w" || arg == "--wasm") {
             opts.mode = CompileOptions::Mode::WebAssembly;
@@ -194,6 +202,7 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
             else if (mode_arg == "hybrid") opts.mode = CompileOptions::Mode::Hybrid;
             else if (mode_arg == "ccodegen" || mode_arg == "c") opts.mode = CompileOptions::Mode::CCodeGen;
             else if (mode_arg == "native") opts.mode = CompileOptions::Mode::NativeCodegen;
+            else if (mode_arg == "aot") opts.mode = CompileOptions::Mode::AOT;
             else if (mode_arg == "wasm" || mode_arg == "webassembly") opts.mode = CompileOptions::Mode::WebAssembly;
             else if (mode_arg == "repl") opts.mode = CompileOptions::Mode::REPL;
             else if (mode_arg == "typecheck") opts.mode = CompileOptions::Mode::TypeCheck;
@@ -240,12 +249,23 @@ bool load_source(const std::string& filename, std::string& source) {
 // 词法分析
 // ============================================================================
 
-std::vector<Token> lex(const std::string& source, bool verbose) {
+std::vector<Token> lex(const std::string& source, const std::string& filename, bool verbose) {
+    ParseCache cache;
+    if (cache.has_cache(source, filename)) {
+        auto tokens = cache.load_tokens();
+        if (verbose) {
+            std::cout << "  Loaded " << tokens.size() << " tokens from cache\n";
+        }
+        return tokens;
+    }
+
     Lexer lexer(source);
     auto tokens = lexer.scan_all();
     if (verbose) {
         std::cout << "  Lexed " << tokens.size() << " tokens\n";
     }
+
+    cache.save_tokens(source, filename, tokens);
     return tokens;
 }
 
@@ -253,7 +273,7 @@ std::vector<Token> lex(const std::string& source, bool verbose) {
 // 语法分析
 // ============================================================================
 
-std::shared_ptr<ast::Program> parse(const std::vector<Token>& tokens, 
+std::shared_ptr<ast::Program> parse(const std::vector<Token>& tokens,
                                      DiagnosticReporter& reporter, bool verbose) {
     Parser parser(tokens);
     parser.set_reporter(&reporter);
@@ -324,12 +344,12 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
     // 字节码编译 - 使用兼容层
     BytecodeCompiler compiler;
     auto module = compiler.compile(*program);
-    
+
     if (!module) {
         std::cerr << "Error: Bytecode compilation failed: " << compiler.getLastError() << "\n";
         return false;
     }
-    
+
     if (verbose) {
         std::cout << "  Compiled " << module->functions.size() << " functions\n";
         std::cout << "  Total bytecode instructions: ";
@@ -339,7 +359,7 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         }
         std::cout << total << "\n";
     }
-    
+
     // 在 VM 中执行
     vm::ClawVM vm;
     if (!vm.load_module(*module)) {
@@ -634,6 +654,129 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
 }
 
 // ============================================================================
+// AOT 编译：生成可执行文件
+// ============================================================================
+
+bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
+                  const std::string& output_file) {
+    if (verbose) {
+        std::cout << "  Compiling to AOT executable...\n";
+    }
+
+    // 1. Compile to bytecode
+    BytecodeCompiler bc_compiler;
+    auto module = bc_compiler.compile(program);
+
+    if (!module) {
+        std::cerr << "Error: Bytecode compilation failed: " << bc_compiler.getLastError() << "\n";
+        return false;
+    }
+
+    if (verbose) {
+        std::cout << "  Bytecode: " << module->functions.size() << " functions\n";
+    }
+
+    // 2. Compile bytecode to native code
+    codegen::NativeCodeGenerator native_codegen;
+    codegen::NativeCodeGenerator::Config config;
+    config.enable_sse2 = true;
+    config.enable_optimizations = true;
+    native_codegen.set_config(config);
+
+    if (!native_codegen.compile_module(*module)) {
+        std::cerr << "Error: Native code generation failed: " << native_codegen.get_error() << "\n";
+        return false;
+    }
+
+    const auto& compiled_funcs = native_codegen.get_compiled_functions();
+    if (compiled_funcs.empty()) {
+        std::cerr << "Error: No compiled functions generated\n";
+        return false;
+    }
+
+    // 3. Write Mach-O object file
+    std::string obj_path = output_file + ".o";
+    claw::codegen::MachOWriter writer;
+
+    // Collect unique external symbols
+    std::unordered_set<std::string> external_syms;
+    for (const auto& cf : compiled_funcs) {
+        for (const auto& ext : cf.external_calls) {
+            external_syms.insert(ext.symbol_name);
+        }
+    }
+
+    for (size_t i = 0; i < compiled_funcs.size(); ++i) {
+        const auto& cf = compiled_funcs[i];
+
+        claw::codegen::MachOSection text;
+        text.name = "__text";
+        text.segname = "__TEXT";
+        text.data = cf.code;
+        text.align = 4;
+        text.flags = 0x80000400;
+
+        // Add relocations for external calls
+        for (const auto& ext : cf.external_calls) {
+            claw::codegen::MachORelocation rel;
+            rel.offset = ext.code_offset;
+            rel.symbol = ext.symbol_name;
+            rel.pcrel = true;
+            rel.length = 2; // 4 bytes
+            rel.type = 2;   // RELOC_X86_64_BRANCH
+            rel.addend = 0;
+            text.relocations.push_back(rel);
+        }
+
+        writer.add_section(text);
+
+        // Add function symbol
+        claw::codegen::MachOSymbol sym;
+        sym.name = "_" + cf.name;
+        sym.value = 0;
+        sym.section = static_cast<uint32_t>(i + 1);
+        sym.global = (i == 0); // First function is main/entry
+        writer.add_symbol(sym);
+    }
+
+    // Add undefined external symbols
+    for (const auto& sym_name : external_syms) {
+        claw::codegen::MachOSymbol undef;
+        undef.name = sym_name;
+        undef.value = 0;
+        undef.section = 0;
+        undef.global = true;
+        undef.undefined = true;
+        writer.add_symbol(undef);
+    }
+
+    if (!writer.write(obj_path)) {
+        std::cerr << "Error: Failed to write Mach-O object file: " << obj_path << "\n";
+        return false;
+    }
+
+    if (verbose) {
+        std::cout << "  Mach-O object written to: " << obj_path << "\n";
+    }
+
+    // 4. Link with system linker
+    claw::codegen::LinkerIntegration linker;
+    if (!linker.link_with_runtime(obj_path, output_file)) {
+        std::cerr << "Error: Linking failed: " << linker.get_error() << "\n";
+        return false;
+    }
+
+    // Clean up temporary object file
+    std::remove(obj_path.c_str());
+
+    if (verbose) {
+        std::cout << "  AOT executable written to: " << output_file << "\n";
+    }
+
+    return true;
+}
+
+// ============================================================================
 // REPL 交互模式
 // ============================================================================
 
@@ -686,7 +829,7 @@ int main(int argc, char** argv) {
     auto start_time = high_resolution_clock::now();
     
     // 词法分析
-    auto tokens = lex(source, opts.verbose);
+    auto tokens = lex(source, opts.input_file, opts.verbose);
     if (opts.mode == CompileOptions::Mode::Tokens) {
         std::cout << "\n=== Tokens ===\n";
         for (size_t i = 0; i < tokens.size(); i++) {
@@ -760,7 +903,16 @@ int main(int argc, char** argv) {
         case CompileOptions::Mode::NativeCodegen:
             success = generate_native(*program, opts.verbose, opts.show_ir, opts.output_file);
             break;
-            
+
+        case CompileOptions::Mode::AOT:
+            if (opts.output_file.empty()) {
+                std::cerr << "Error: AOT mode requires -o <output_file>\n";
+                success = false;
+            } else {
+                success = generate_aot(*program, opts.verbose, opts.show_ir, opts.output_file);
+            }
+            break;
+
         case CompileOptions::Mode::WebAssembly:
             {
                 // TODO: fix wasm backend - ast::Module → ast::Program

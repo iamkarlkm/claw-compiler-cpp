@@ -41,8 +41,10 @@ namespace ast {
     class ReturnStmt;
     class BlockStmt;
     class FunctionStmt;
-    class StructDecl;
-    class ProcessDecl;
+    class StructStmt;
+    class EnumStmt;
+    class TraitStmt;
+    class ImplStmt;
     class PublishStmt;
     class SubscribeStmt;
     class SerialProcessStmt;
@@ -133,6 +135,7 @@ public:
     virtual bool is_reference() const;
     virtual bool is_generic() const;  // NEW: check if generic/type variable
     virtual bool is_type_var() const; // NEW: check if type variable
+    virtual bool is_unknown() const;  // NEW: check if unknown type
     virtual bool can_be_zero() const;
     virtual bool is_copyable() const;
     
@@ -373,17 +376,21 @@ private:
     std::map<std::string, TypePtr> function_signatures_;
     
     // AST node visitors
-    TypePtr check_expr(const ast::ExprPtr& expr);
-    TypePtr check_stmt(const ast::StmtPtr& stmt);
-    
+    TypePtr check_expr(const ast::Expression* expr);
+    TypePtr check_stmt(const ast::Statement* stmt);
+
     // Specific checks
     TypePtr check_binary_op(const ast::BinaryExpr& op);
     TypePtr check_unary_op(const ast::UnaryExpr& op);
     TypePtr check_call(const ast::CallExpr& call);
     TypePtr check_index(const ast::IndexExpr& index);
     TypePtr check_field(const ast::MemberExpr& field);
+    TypePtr check_lambda(const ast::LambdaExpr& lambda);
+    TypePtr check_match(const ast::MatchStmt& match);
+    TypePtr check_for(const ast::ForStmt& for_stmt);
     TypePtr check_function(const ast::FunctionStmt& decl);
-    TypePtr check_struct(const ast::FunctionStmt& decl);
+    TypePtr check_struct(const ast::StructStmt& decl);
+    TypePtr check_enum(const ast::EnumStmt& decl);
     TypePtr check_process(const ast::SerialProcessStmt& process);
     
     // Type coercion
@@ -817,6 +824,7 @@ inline bool Type::is_bool() const { return kind == TypeKind::BOOL; }
 inline bool Type::is_copyable() const { return true; }
 inline bool Type::is_generic() const { return kind == TypeKind::GENERIC || kind == TypeKind::TYPE_VAR; }
 inline bool Type::is_type_var() const { return kind == TypeKind::TYPE_VAR; }
+inline bool Type::is_unknown() const { return kind == TypeKind::UNKNOWN; }
 
 inline bool Type::can_be_zero() const {
     return is_numeric() || is_string() || is_optional();

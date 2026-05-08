@@ -134,8 +134,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_expression(ast::Expression* exp
             return generate_lambda(static_cast<ast::LambdaExpr*>(expr));
         default:
             // Slice, Cast, Range, Ref, MutRef, Borrow etc.
-            std::cerr << "Warning: unhandled expression kind: "
-                      << static_cast<int>(expr->get_kind()) << std::endl;
             return nullptr;
     }
 }
@@ -169,7 +167,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_identifier(ast::IdentifierExpr*
     
     auto value = lookup_variable(id->get_name());
     if (!value) {
-        std::cerr << "Warning: undefined variable: " << id->get_name() << std::endl;
         return nullptr;
     }
     
@@ -266,8 +263,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_member(ast::MemberExpr* member)
     
     // 简化处理：成员访问暂不实现完整 GEP
     // TODO: 实现 struct field access
-    std::cerr << "Warning: member access not fully implemented: " 
-              << member->get_member() << std::endl;
     return obj;
 }
 
@@ -471,8 +466,6 @@ void IRGenerator::generate_assign(ast::AssignStmt* assign) {
     if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(target_expr)) {
         auto target = lookup_variable(ident->get_name());
         if (!target) {
-            std::cerr << "Error: assignment to undefined variable: " 
-                      << ident->get_name() << std::endl;
             return;
         }
         builder->create_store(value, target);
@@ -481,11 +474,11 @@ void IRGenerator::generate_assign(ast::AssignStmt* assign) {
         auto base = generate_expression(idx_expr->get_object());
         auto index = generate_expression(idx_expr->get_index());
         // TODO: implement indexed store
-        std::cerr << "Warning: indexed assignment not fully implemented" << std::endl;
+        (void)base;
+        (void)index;
     } else if (dynamic_cast<ast::MemberExpr*>(target_expr)) {
         // Member assignment: obj.field = value
         // TODO: implement member store
-        std::cerr << "Warning: member assignment not fully implemented" << std::endl;
     }
 }
 
@@ -633,8 +626,6 @@ void IRGenerator::generate_for(ast::ForStmt* for_loop) {
     }
     
     // TODO: 支持数组/张量迭代 (需要运行时迭代器支持)
-    std::cerr << "Warning: For loop with non-range iterable not fully implemented" << std::endl;
-    
     // 简化处理: 跳过循环体
     builder->create_br(after_block);
     builder->set_insert_point(after_block);
@@ -690,7 +681,6 @@ void IRGenerator::generate_while(ast::WhileStmt* while_loop) {
 
 void IRGenerator::generate_break() {
     if (loop_stack.empty()) {
-        std::cerr << "Error: break outside loop" << std::endl;
         return;
     }
     builder->create_br(loop_stack.back().after_block);
@@ -698,7 +688,6 @@ void IRGenerator::generate_break() {
 
 void IRGenerator::generate_continue() {
     if (loop_stack.empty()) {
-        std::cerr << "Error: continue outside loop" << std::endl;
         return;
     }
     builder->create_br(loop_stack.back().condition_block);

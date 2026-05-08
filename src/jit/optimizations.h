@@ -207,10 +207,12 @@ public:
      * @brief 执行循环不变代码外提 (LICM)
      * @param func 函数
      * @param loop 循环信息
+     * @param escape_results 逃逸分析结果（用于识别循环内不逃逸的分配）
      * @return 优化后的函数
      */
     bytecode::Function hoist_invariants(bytecode::Function& func,
-                                         const LoopInfo& loop);
+                                         const LoopInfo& loop,
+                                         const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results = {});
     
     /**
      * @brief 执行循环合并
@@ -230,7 +232,8 @@ private:
     
     // 检查指令是否循环不变
     bool is_loop_invariant(const bytecode::Instruction& inst,
-                           const std::unordered_set<size_t>& loop_vars);
+                           const std::unordered_set<size_t>& loop_vars,
+                           const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results = {});
 };
 
 // ============================================================================
@@ -283,17 +286,28 @@ public:
     };
     
     const Stats& stats() const { return stats_; }
-    
+
+    /**
+     * @brief 获取最近一次逃逸分析的结果
+     * @return 变量ID到逃逸分析结果的映射
+     */
+    const std::unordered_map<uint32_t, EscapeAnalysisResult>& get_escape_results() const {
+        return last_escape_results_;
+    }
+
 private:
     AdvancedOptimizerConfig config_;
     Stats stats_;
-    
+
+    // 最近一次逃逸分析结果（供JIT编译器查询）
+    std::unordered_map<uint32_t, EscapeAnalysisResult> last_escape_results_;
+
     // 子优化器
     EscapeAnalyzer escape_analyzer_;
     TypeSpecializer type_specializer_;
     FunctionInliner function_inliner_;
     LoopOptimizer loop_optimizer_;
-    
+
     // 优化流程
     bytecode::Function run_escape_analysis(const bytecode::Function& func);
     bytecode::Function run_type_specialization(const bytecode::Function& func);

@@ -89,7 +89,8 @@ private:
     void compileExprStmt(const ast::ExprStmt& stmt);
     void compilePublishStmt(const ast::PublishStmt& stmt);
     void compileSubscribeStmt(const ast::SubscribeStmt& stmt);
-    
+    void compileStructStmt(const ast::StructStmt& stmt);
+
     // 表达式编译
     void compileLiteralExpr(const ast::LiteralExpr& expr);
     void compileIdentifierExpr(const ast::IdentifierExpr& expr);
@@ -139,6 +140,7 @@ private:
     bool debugInfo_ = false;
     int nextGlobalSlot_ = 0;
     std::unordered_map<std::string, int> globalVars_;
+    std::unordered_map<std::string, std::vector<std::string>> structRegistry_;
 };
 
 } // namespace claw

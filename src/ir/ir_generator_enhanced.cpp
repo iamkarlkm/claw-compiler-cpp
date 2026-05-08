@@ -31,7 +31,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_literal_enhanced(
             return builder->create_constant(static_cast<int64_t>(v));
         } else {
             // monostate (null)
-            std::cerr << "Warning: null literal" << std::endl;
             return nullptr;
         }
     }, val);
@@ -77,7 +76,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_index_enhanced(
         return builder->create_tensor_load(base, {index});
     }
 
-    std::cerr << "Warning: index on unsupported type" << std::endl;
     return base;
 }
 
@@ -236,7 +234,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_field_access(
         return builder->create_load(field_ptr, field_name);
     }
 
-    std::cerr << "Warning: field access not fully implemented for: " << field_name << std::endl;
     return object;
 }
 
@@ -484,7 +481,6 @@ std::shared_ptr<ir::Value> IRGenerator::generate_expression_enhanced(
         return generate_lambda(lambda);
     }
 
-    std::cerr << "Warning: unsupported expression type" << std::endl;
     return nullptr;
 }
 
@@ -522,8 +518,6 @@ void IRGenerator::generate_statement_enhanced(ast::Statement* stmt) {
         generate_publish(publish);
     } else if (auto* sub = dynamic_cast<ast::SubscribeStmt*>(stmt)) {
         generate_subscribe(sub);
-    } else {
-        std::cerr << "Warning: unsupported statement type" << std::endl;
     }
 }
 

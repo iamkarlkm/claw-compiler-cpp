@@ -51,6 +51,14 @@ cmake_install.cmake
 
 dev-logs/
 test/
+dev-reports/
+AGENTS.md
+CLAUDE.md
+**/test_*
+**/*.ba*
+**/*.new*
+**/*.fix*
+**/*.old*
 
 # brain:begin gitignore-session
 .brain/session.json

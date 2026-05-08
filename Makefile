@@ -15,12 +15,23 @@ ifeq ($(UNAME_S),Darwin)
     CXXFLAGS += -stdlib=libc++
 endif
 
+# Build directories
+BUILD_DIR = build
+DEBUG_BUILD_DIR = $(BUILD_DIR)/debug
+
+# Auto-detect parallelism if not specified by user
+NPROCS := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+ifeq ($(filter -j%,$(MAKEFLAGS)),)
+    MAKEFLAGS += -j$(NPROCS)
+endif
+
 # ============================================================================
 # Core Sources
 # ============================================================================
 
 CORE_SOURCES = \
     src/common/common.h \
+    src/common/parse_cache.cpp \
     src/lexer/lexer.h \
     src/lexer/token.h \
     src/parser/parser.h \
@@ -47,6 +58,8 @@ CORE_SOURCES = \
     src/pipeline/perf_profiler.cpp \
     src/codegen/codegen.cpp \
     src/codegen/native_codegen.cpp \
+    src/codegen/macho_writer.cpp \
+    src/codegen/linker_integration.cpp \
     src/native_codegen/native_codegen.cpp \
     src/emitter/x86_64_emitter.cpp \
     src/emitter/arm64_emitter.cpp \
@@ -90,6 +103,10 @@ CORE_SOURCES = \
     src/debugger/claw_debugger_cli.cpp \
     src/json/json.h \
     src/main.cpp
+
+CORE_CPP_SOURCES = $(filter %.cpp,$(CORE_SOURCES))
+CORE_OBJECTS     = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP_SOURCES))
+DEBUG_OBJECTS    = $(patsubst %.cpp,$(DEBUG_BUILD_DIR)/%.o,$(CORE_CPP_SOURCES))
 
 # ============================================================================
 # Test Sources
@@ -144,8 +161,12 @@ help:
 	@echo ""
 
 # Main compiler
-claw: $(CORE_SOURCES)
-	$(CXX) $(CXXFLAGS) -o $@ $(filter %.cpp,$^) $(LDFLAGS)
+claw: $(CORE_OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(BUILD_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # LSP Server
 claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp
@@ -208,17 +229,21 @@ test-docgen:
 # ============================================================================
 
 clean:
-	rm -f claw claw-lsp claw-repl
+	rm -f claw claw-lsp claw-repl claw-debug
 	rm -f test_benchmark test_cuda test_package test_debugger
 	rm -f test_auto_scheduler test_tensorir test_wasm test_attribute test_docgen test_vm_evaluator
-	rm -f *.o
+	rm -rf $(BUILD_DIR)
 
 # ============================================================================
 # Debug builds
 # ============================================================================
 
-debug-claw: $(CORE_SOURCES)
-	$(CXX) $(DEBUG_FLAGS) -o claw-debug $(filter %.cpp,$^) $(LDFLAGS)
+debug-claw: $(DEBUG_OBJECTS)
+	$(CXX) $(DEBUG_FLAGS) -o claw-debug $^ $(LDFLAGS)
+
+$(DEBUG_BUILD_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(DEBUG_FLAGS) -c -o $@ $<
 
 # ============================================================================
 # Installation

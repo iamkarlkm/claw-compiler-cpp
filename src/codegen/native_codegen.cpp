@@ -31,19 +31,30 @@ bool NativeCodeGenerator::compile_module(const bytecode::Module& module) {
     if (!check_condition(!module.functions.empty(), "Module has no functions")) {
         return false;
     }
-    
+
+    current_module_ = &module;
+    compiled_functions_.clear();
+
     // Compile each function
     for (size_t i = 0; i < module.functions.size(); i++) {
         const auto& func = module.functions[i];
-        
+
         // Reset generator for each function
         generator_ = X86_64CodeGenerator();
-        
+        current_external_calls_.clear();
+
         if (!compile_function(func)) {
             return false;
         }
-        
-        // For now, use first function as entry point
+
+        // Capture compiled function for AOT
+        CompiledFunction cf;
+        cf.name = func.name;
+        cf.code = generator_.getCode();
+        cf.external_calls = current_external_calls_;
+        compiled_functions_.push_back(std::move(cf));
+
+        // For now, use first function as entry point (JIT path)
         if (i == 0) {
             const auto& code = generator_.getCode();
             entry_point_ = generator_.allocateCode(code.size());
@@ -54,7 +65,7 @@ bool NativeCodeGenerator::compile_module(const bytecode::Module& module) {
             std::memcpy(entry_point_, code.data(), code.size());
         }
     }
-    
+
     return true;
 }
 
@@ -90,9 +101,6 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
         }
     }
     
-    // Generate function epilogue
-    emit_epilogue();
-    
     // Apply optimizations
     if (config_.enable_optimizations) {
         optimize_peephole();
@@ -114,10 +122,34 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::NOP:
             generator_.emitNOP();
             break;
-        case Op::PUSH:
-            // operand is constant index or immediate
-            generator_.emitPUSH_imm(static_cast<int64_t>(opnd));
+        case Op::PUSH: {
+            // operand is constant pool index
+            if (current_module_ && opnd < current_module_->constants.values.size()) {
+                const auto& val = current_module_->constants.values[opnd];
+                if (val.type == bytecode::ValueType::I64) {
+                    generator_.emitMOV_RI(X86Reg::RAX, val.data.i64);
+                    generator_.emitPUSH(X86Reg::RAX);
+                } else if (val.type == bytecode::ValueType::F64) {
+                    // Load double into xmm0 via stack
+                    int64_t bits;
+                    std::memcpy(&bits, &val.data.f64, sizeof(bits));
+                    generator_.emitMOV_RI(X86Reg::RAX, bits);
+                    generator_.emitPUSH(X86Reg::RAX);
+                } else if (val.type == bytecode::ValueType::BOOL) {
+                    generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RAX);
+                    if (val.data.b) {
+                        generator_.emitADD_RI(X86Reg::RAX, 1);
+                    }
+                    generator_.emitPUSH(X86Reg::RAX);
+                } else {
+                    // Fallback: push immediate (index)
+                    generator_.emitPUSH_imm(static_cast<int64_t>(opnd));
+                }
+            } else {
+                generator_.emitPUSH_imm(static_cast<int64_t>(opnd));
+            }
             break;
+        }
         case Op::POP:
             generator_.emitPOP(X86Reg::RAX);
             break;
@@ -154,16 +186,17 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             generator_.emitADD_RI(X86Reg::RAX, 1);
             break;
             
-        // Float arithmetic (simplified)
+        // Float arithmetic
         case Op::FADD:
         case Op::FSUB:
         case Op::FMUL:
         case Op::FDIV:
-            // Float operations via runtime for now
-            break;
-        case Op::FMOD:
         case Op::FNEG:
         case Op::FINC:
+            if (!compile_float_arithmetic(inst)) return false;
+            break;
+        case Op::FMOD:
+            // TODO: fmod requires runtime call
             break;
             
         // Integer comparison
@@ -183,7 +216,7 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::FLE:
         case Op::FGT:
         case Op::FGE:
-            // Float comparison via runtime for now
+            if (!compile_float_comparison(inst)) return false;
             break;
             
         // Logical operations
@@ -220,11 +253,13 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::F2I:
         case Op::I2B:
         case Op::B2I:
+            if (!compile_conversion(inst)) return false;
+            break;
         case Op::I2S:
         case Op::F2S:
         case Op::S2I:
         case Op::S2F:
-            // Type conversion via runtime
+            // String conversions require runtime support
             break;
             
         // Local variables
@@ -396,6 +431,105 @@ bool NativeCodeGenerator::compile_comparison(const bytecode::Instruction& inst) 
 }
 
 // ============================================================================
+// Float Arithmetic Operations
+// ============================================================================
+
+bool NativeCodeGenerator::compile_float_arithmetic(const bytecode::Instruction& inst) {
+    using Op = bytecode::OpCode;
+
+    switch (inst.op) {
+        case Op::FADD:
+        case Op::FSUB:
+        case Op::FMUL:
+        case Op::FDIV: {
+            // Stack: ..., left, right (top)
+            // Load operands from stack into XMM registers
+            generator_.emitMOVSD_RM(X86Reg::XMM1, Operand::makeMem(X86Reg::RSP));
+            generator_.emitMOVSD_RM(X86Reg::XMM0, Operand::makeMem(X86Reg::RSP, X86Reg::NONE, 8, 1, 8));
+
+            switch (inst.op) {
+                case Op::FADD: generator_.emitADDSD(X86Reg::XMM0, X86Reg::XMM1); break;
+                case Op::FSUB: generator_.emitSUBSD(X86Reg::XMM0, X86Reg::XMM1); break;
+                case Op::FMUL: generator_.emitMULSD(X86Reg::XMM0, X86Reg::XMM1); break;
+                case Op::FDIV: generator_.emitDIVSD(X86Reg::XMM0, X86Reg::XMM1); break;
+                default: break;
+            }
+
+            // Store result to [rsp+8], pop right operand
+            generator_.emitMOVSD_MR(Operand::makeMem(X86Reg::RSP, X86Reg::NONE, 8, 1, 8), X86Reg::XMM0);
+            generator_.emitADD_RI(X86Reg::RSP, 8);
+            break;
+        }
+
+        case Op::FNEG: {
+            // Flip sign bit: XOR with 0x8000000000000000
+            generator_.emitPOP(X86Reg::RAX);
+            generator_.emitMOV_RI(X86Reg::RCX, 0x8000000000000000LL);
+            generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RCX);
+            generator_.emitPUSH(X86Reg::RAX);
+            break;
+        }
+
+        case Op::FINC: {
+            // Add 1.0 to top of stack
+            generator_.emitMOVSD_RM(X86Reg::XMM0, Operand::makeMem(X86Reg::RSP));
+            generator_.emitMOV_RI(X86Reg::RAX, 0x3FF0000000000000LL); // 1.0 IEEE 754
+            generator_.emitPUSH(X86Reg::RAX);
+            generator_.emitMOVSD_RM(X86Reg::XMM1, Operand::makeMem(X86Reg::RSP));
+            generator_.emitADD_RI(X86Reg::RSP, 8);
+            generator_.emitADDSD(X86Reg::XMM0, X86Reg::XMM1);
+            generator_.emitMOVSD_MR(Operand::makeMem(X86Reg::RSP), X86Reg::XMM0);
+            break;
+        }
+
+        default:
+            set_error("Unknown float arithmetic operation");
+            return false;
+    }
+
+    return true;
+}
+
+// ============================================================================
+// Float Comparison Operations
+// ============================================================================
+
+bool NativeCodeGenerator::compile_float_comparison(const bytecode::Instruction& inst) {
+    using Op = bytecode::OpCode;
+
+    // Load operands from stack
+    generator_.emitMOVSD_RM(X86Reg::XMM1, Operand::makeMem(X86Reg::RSP));
+    generator_.emitMOVSD_RM(X86Reg::XMM0, Operand::makeMem(X86Reg::RSP, X86Reg::NONE, 8, 1, 8));
+
+    // Pop both operands
+    generator_.emitADD_RI(X86Reg::RSP, 16);
+
+    // Compare
+    generator_.emitUCOMISD(X86Reg::XMM0, X86Reg::XMM1);
+
+    Condition cond;
+    switch (inst.op) {
+        case Op::FEQ: cond = Condition::E;   break;
+        case Op::FNE: cond = Condition::NE;  break;
+        case Op::FLT: cond = Condition::B;   break;
+        case Op::FLE: cond = Condition::BE;  break;
+        case Op::FGT: cond = Condition::A;   break;
+        case Op::FGE: cond = Condition::AE;  break;
+        default:
+            set_error("Unknown float comparison operation");
+            return false;
+    }
+
+    // Set RAX to 1 if condition true, 0 otherwise
+    generator_.emitMOV_RI(X86Reg::RAX, 1);
+    generator_.emitJcc_rel32(cond, 3); // Skip XOR
+    generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RAX);
+    generator_.emitPUSH(X86Reg::RAX);
+
+    return true;
+}
+
+// ============================================================================
 // Logical Operations
 // ============================================================================
 
@@ -510,19 +644,60 @@ bool NativeCodeGenerator::compile_call(const bytecode::Instruction& inst) {
             generator_.emitPUSH(X86Reg::RAX);
             break;
             
-        case Op::CALL_EXT:
-            // Call external/native function via register
-            generator_.emitCALL_R(X86Reg::RAX);
+        case Op::CALL_EXT: {
+            // Decode operands: lower 16 bits = str_idx, upper 16 bits = arg_count
+            uint32_t str_idx = inst.operand & 0xFFFF;
+            uint32_t arg_count = (inst.operand >> 16) & 0xFFFF;
+
+            std::string func_name;
+            if (current_module_ && str_idx < current_module_->constants.values.size()) {
+                const auto& val = current_module_->constants.values[str_idx];
+                if (val.type == bytecode::ValueType::STRING) {
+                    func_name = val.str;
+                }
+            }
+
+            // Pop arguments into System V AMD64 argument registers
+            // Claw stack grows down; args were pushed left-to-right
+            // So top of stack = last argument
+            static const X86Reg arg_regs[] = {
+                X86Reg::RDI, X86Reg::RSI, X86Reg::RDX,
+                X86Reg::RCX, X86Reg::R8, X86Reg::R9
+            };
+            for (int i = static_cast<int>(arg_count) - 1; i >= 0; --i) {
+                if (i < 6) {
+                    generator_.emitPOP(arg_regs[i]);
+                } else {
+                    generator_.emitPOP(X86Reg::RAX); // discard extra args for now
+                }
+            }
+
+            // Emit call with relocation placeholder
+            generator_.emitCALL_rel32(0);
+
+            // Track external call for AOT object file generation
+            if (!func_name.empty()) {
+                std::string symbol = "_claw_" + func_name;
+                current_external_calls_.push_back({
+                    generator_.getCode().size() - 4,
+                    symbol
+                });
+            }
+
+            // Push return value (functions may return nil, but push RAX anyway)
             generator_.emitPUSH(X86Reg::RAX);
             break;
+        }
             
         case Op::RET:
-            // Return
+            // Return: emit epilogue then ret
+            emit_epilogue();
             generator_.emitRET();
             break;
-            
+
         case Op::RET_NULL:
-            // Return null
+            // Return null: emit epilogue then xor rax and ret
+            emit_epilogue();
             generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RAX);
             generator_.emitRET();
             break;
@@ -590,6 +765,48 @@ bool NativeCodeGenerator::compile_memory(const bytecode::Instruction& inst) {
 // ============================================================================
 
 bool NativeCodeGenerator::compile_conversion(const bytecode::Instruction& inst) {
+    using Op = bytecode::OpCode;
+
+    switch (inst.op) {
+        case Op::I2F: {
+            // Pop int64, convert to double, push double
+            generator_.emitPOP(X86Reg::RAX);
+            generator_.emitCVTSI2SD(X86Reg::XMM0, X86Reg::RAX);
+            generator_.emitSUB_RI(X86Reg::RSP, 8);
+            generator_.emitMOVSD_MR(Operand::makeMem(X86Reg::RSP), X86Reg::XMM0);
+            break;
+        }
+
+        case Op::F2I: {
+            // Pop double, convert to int64 (truncate), push int64
+            generator_.emitMOVSD_RM(X86Reg::XMM0, Operand::makeMem(X86Reg::RSP));
+            generator_.emitCVTTSD2SI(X86Reg::RAX, X86Reg::XMM0);
+            generator_.emitADD_RI(X86Reg::RSP, 8);
+            generator_.emitPUSH(X86Reg::RAX);
+            break;
+        }
+
+        case Op::I2B: {
+            // Normalize int64 to 0 or 1
+            generator_.emitPOP(X86Reg::RAX);
+            generator_.emitTEST_RR(X86Reg::RAX, X86Reg::RAX);
+            generator_.emitMOV_RI(X86Reg::RAX, 1);
+            generator_.emitJcc_rel32(Condition::NE, 3);
+            generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RAX);
+            generator_.emitPUSH(X86Reg::RAX);
+            break;
+        }
+
+        case Op::B2I: {
+            // Bool is already 0 or 1 as int64, no-op
+            break;
+        }
+
+        default:
+            set_error("Unknown conversion operation");
+            return false;
+    }
+
     return true;
 }
 

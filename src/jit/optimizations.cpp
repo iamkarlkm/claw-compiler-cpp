@@ -321,7 +321,8 @@ size_t LoopOptimizer::find_loop_end(const bytecode::Function& func, size_t heade
 
 bool LoopOptimizer::is_loop_invariant(
     const bytecode::Instruction& inst,
-    const std::unordered_set<size_t>& loop_vars) {
+    const std::unordered_set<size_t>& loop_vars,
+    const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results) {
 
     // 检查指令是否依赖循环变量
     // 简化: 如果不修改任何循环变量，则是循环不变的
@@ -346,6 +347,17 @@ bool LoopOptimizer::is_loop_invariant(
         case bytecode::OpCode::FSUB:
         case bytecode::OpCode::FMUL:
             return true;
+
+        // 对象分配: 如果不逃逸，则是循环不变的（可以移到循环外重用）
+        case bytecode::OpCode::ALLOC_ARRAY:
+        case bytecode::OpCode::ALLOC_OBJ:
+        case bytecode::OpCode::CREATE_TUPLE: {
+            auto it = escape_results.find(inst.operand);
+            if (it != escape_results.end() && !it->second.escapes) {
+                return true;
+            }
+            return false;
+        }
 
         default:
             return false;
@@ -389,7 +401,8 @@ bytecode::Function LoopOptimizer::unroll_loop(
 
 bytecode::Function LoopOptimizer::hoist_invariants(
     bytecode::Function& func,
-    const LoopInfo& loop) {
+    const LoopInfo& loop,
+    const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results) {
 
     bytecode::Function result = func;
 
@@ -408,7 +421,7 @@ bytecode::Function LoopOptimizer::hoist_invariants(
 
     for (size_t i = loop.start_offset; i < loop.end_offset; ++i) {
         const auto& inst = func.code[i];
-        if (is_loop_invariant(inst, loop_vars)) {
+        if (is_loop_invariant(inst, loop_vars, escape_results)) {
             // 检查是否已经被 hoist 过
             bool already_hoisted = false;
             for (const auto& h : hoisted) {
@@ -446,7 +459,7 @@ bytecode::Function LoopOptimizer::hoist_invariants(
                     adjust++;
                 }
             }
-            result.code.erase(result.code.begin() + idx);
+            result.code.erase(result.code.begin() + idx + adjust);
         }
     }
 
@@ -478,15 +491,16 @@ bytecode::Function AdvancedOptimizer::run_escape_analysis(
     const bytecode::Function& func) {
 
     if (!config_.enable_escape_analysis) {
+        last_escape_results_.clear();
         return func;
     }
 
-    auto escape_results = escape_analyzer_.analyze_function(func);
+    last_escape_results_ = escape_analyzer_.analyze_function(func);
 
     // 根据逃逸分析结果进行栈上分配优化
     bytecode::Function result = func;
 
-    for (const auto& [var_id, escape] : escape_results) {
+    for (const auto& [var_id, escape] : last_escape_results_) {
         if (!escape.escapes) {
             // 可以栈上分配，标记该变量
             stats_.stack_allocated++;
@@ -567,7 +581,7 @@ bytecode::Function AdvancedOptimizer::run_loop_optimizations(
     for (const auto& loop : loops) {
         // 循环不变代码外提
         if (config_.enable_licm) {
-            bytecode::Function hoisted = loop_optimizer_.hoist_invariants(result, loop);
+            bytecode::Function hoisted = loop_optimizer_.hoist_invariants(result, loop, last_escape_results_);
             // Check if any code was actually hoisted (compare sizes as proxy)
             if (hoisted.code.size() != result.code.size()) {
                 result = hoisted;
