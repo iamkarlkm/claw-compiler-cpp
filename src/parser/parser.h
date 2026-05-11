@@ -958,7 +958,7 @@ inline std::unique_ptr<ast::Statement> Parser::parse_loop_statement() {
     }
     auto body = parse_block();
     
-    return std::make_unique<ast::WhileStmt>(nullptr, std::move(body),
+    return std::make_unique<ast::LoopStmt>(std::move(body),
                                             span_from(previous()));
 }
 
@@ -2123,12 +2123,28 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
             advance(); // consume '['
             
             auto index = parse_expression();
-            
-            if (check(TokenType::Dot) && peek().type == TokenType::Dot) {
-                // Slice
-                advance(); advance(); // consume '..'
+
+            // Check if parse_expression consumed '..' as a range binary op
+            // In that case, 'index' is a BinaryExpr(Op_range, start, end)
+            if (auto* range_bin = dynamic_cast<ast::BinaryExpr*>(index.get())) {
+                if (range_bin->get_operator() == TokenType::Op_range) {
+                    auto start_expr = range_bin->release_left();
+                    auto end_expr = range_bin->release_right();
+                    expr = std::make_unique<ast::SliceExpr>(
+                        std::move(expr), std::move(start_expr), std::move(end_expr),
+                        span_from(previous())
+                    );
+                } else {
+                    expr = std::make_unique<ast::IndexExpr>(
+                        std::move(expr), std::move(index),
+                        span_from(previous())
+                    );
+                }
+            } else if (check(TokenType::Op_range)) {
+                // Slice with explicit '..'
+                advance(); // consume '..'
                 auto end = parse_expression();
-                
+
                 expr = std::make_unique<ast::SliceExpr>(
                     std::move(expr), std::move(index), std::move(end),
                     span_from(previous())

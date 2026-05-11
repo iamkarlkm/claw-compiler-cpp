@@ -508,6 +508,8 @@ void IRGenerator::generate_statement_enhanced(ast::Statement* stmt) {
         generate_for_enhanced(for_stmt);
     } else if (auto* while_stmt = dynamic_cast<ast::WhileStmt*>(stmt)) {
         generate_while(while_stmt);
+    } else if (auto* loop_stmt = dynamic_cast<ast::LoopStmt*>(stmt)) {
+        generate_loop(loop_stmt);
     } else if (auto* break_stmt = dynamic_cast<ast::BreakStmt*>(stmt)) {
     (void)break_stmt;
         generate_break();

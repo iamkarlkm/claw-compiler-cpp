@@ -163,6 +163,9 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
         case ast::Statement::Kind::While:
             compileWhileStmt(static_cast<const ast::WhileStmt&>(stmt));
             break;
+        case ast::Statement::Kind::Loop:
+            compileLoopStmt(static_cast<const ast::LoopStmt&>(stmt));
+            break;
         case ast::Statement::Kind::Return:
             compileReturnStmt(static_cast<const ast::ReturnStmt&>(stmt));
             break;
@@ -674,6 +677,43 @@ void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
     }
 
     // Patch any continue jumps inside the body to the loop start (condition check)
+    if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().continueJumpIdx, loopStartIdx);
+    }
+
+    ctx_->loopStack.pop_back();
+}
+
+void BytecodeCompiler::compileLoopStmt(const ast::LoopStmt& stmt) {
+    int loopStartIdx = ctx_->currentFunction->code.size();
+
+    LoopContext loopCtx;
+    loopCtx.breakJumpIdx = -1;
+    loopCtx.continueJumpIdx = -1;
+    loopCtx.scopeDepth = ctx_->scopeDepth;
+    ctx_->loopStack.push_back(loopCtx);
+
+    enterScope();
+    auto* body = stmt.get_body();
+    if (body) {
+        if (auto* blockStmt = dynamic_cast<const ast::BlockStmt*>(body)) {
+            compileBlockStmt(*blockStmt);
+        } else if (auto* stmtNode = dynamic_cast<const ast::Statement*>(body)) {
+            compileStatement(*stmtNode);
+        }
+    }
+    exitScope();
+
+    // Jump back to loop start
+    int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+    emitOp1(bytecode::OpCode::JMP, backOffset);
+
+    // Patch any break jumps inside the body
+    if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+    }
+
+    // Patch any continue jumps inside the body to the loop start
     if (ctx_->loopStack.back().continueJumpIdx >= 0) {
         patchJump(ctx_->loopStack.back().continueJumpIdx, loopStartIdx);
     }

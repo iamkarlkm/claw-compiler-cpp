@@ -563,6 +563,13 @@ TypePtr TypeChecker::check_stmt(const ast::Statement* stmt) {
             pop_scope();
             return Type::unit();
         }
+        case ast::Statement::Kind::Loop: {
+            auto* l = static_cast<const ast::LoopStmt*>(stmt);
+            push_scope();
+            check_stmt(dynamic_cast<const ast::Statement*>(l->get_body()));
+            pop_scope();
+            return Type::unit();
+        }
         case ast::Statement::Kind::Return: {
             auto* ret = static_cast<const ast::ReturnStmt*>(stmt);
             if (ret->get_value()) check_expr(ret->get_value());

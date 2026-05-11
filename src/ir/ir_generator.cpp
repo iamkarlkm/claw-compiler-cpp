@@ -323,6 +323,9 @@ void IRGenerator::generate_statement(ast::Statement* stmt) {
         case ast::Statement::Kind::While:
             generate_while(static_cast<ast::WhileStmt*>(stmt));
             break;
+        case ast::Statement::Kind::Loop:
+            generate_loop(static_cast<ast::LoopStmt*>(stmt));
+            break;
         case ast::Statement::Kind::Break:
             generate_break();
             break;
@@ -675,6 +678,36 @@ void IRGenerator::generate_while(ast::WhileStmt* while_loop) {
     exit_scope();
     
     // 设置 after 块
+    builder->set_insert_point(after_block);
+    loop_stack.pop_back();
+}
+
+void IRGenerator::generate_loop(ast::LoopStmt* loop) {
+    if (!loop) return;
+
+    auto* body = loop->get_body();
+    if (!body) return;
+
+    auto body_block = create_block("loop.body");
+    auto after_block = create_block("loop.after");
+
+    LoopContext ctx{body_block, body_block, after_block};
+    loop_stack.push_back(ctx);
+
+    builder->create_br(body_block);
+
+    builder->set_insert_point(body_block);
+    enter_scope();
+
+    if (auto* block_stmt = dynamic_cast<ast::BlockStmt*>(body)) {
+        generate_block(block_stmt);
+    }
+
+    if (!current_block->terminator) {
+        builder->create_br(body_block);
+    }
+    exit_scope();
+
     builder->set_insert_point(after_block);
     loop_stack.pop_back();
 }

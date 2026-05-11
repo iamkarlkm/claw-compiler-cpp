@@ -112,7 +112,8 @@ private:
     // 循环语句转换
     void generate_for(ast::ForStmt* for_loop);
     void generate_while(ast::WhileStmt* while_loop);
-    
+    void generate_loop(ast::LoopStmt* loop);
+
     // Break/Continue 转换
     void generate_break();
     void generate_continue();

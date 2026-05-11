@@ -106,6 +106,9 @@ struct TensorValue {
 // Extended Value type to support tensors
 using Tensor = std::shared_ptr<TensorValue>;
 
+// Forward declaration for array values
+struct ArrayValue;
+
 // Runtime value types - match AST literal types exactly
 using Value = std::variant<
     std::monostate,
@@ -113,8 +116,14 @@ using Value = std::variant<
     double,
     std::string,
     bool,
-    char
+    char,
+    std::shared_ptr<ArrayValue>
 >;
+
+// Array value wrapper for first-class arrays in expressions
+struct ArrayValue {
+    std::vector<Value> elements;
+};
 
 // Runtime value wrapper that can hold scalar, array, or tensor
 struct RuntimeValue {
@@ -143,7 +152,7 @@ struct RuntimeValue {
 
     // Get value at index (1-based in Claw)
     Value& at(int64_t idx) {
-        if (idx == 1 || array.empty()) {
+        if (array.empty()) {
             return scalar;
         }
         if (idx >= 1 && idx <= static_cast<int64_t>(array.size())) {
@@ -153,7 +162,7 @@ struct RuntimeValue {
     }
 
     const Value& at(int64_t idx) const {
-        if (idx == 1 || array.empty()) {
+        if (array.empty()) {
             return scalar;
         }
         if (idx >= 1 && idx <= static_cast<int64_t>(array.size())) {
@@ -518,7 +527,7 @@ public:
 
     // Convert value to string
     std::string value_to_string(const Value& v) {
-        return std::visit([](auto&& val) -> std::string {
+        return std::visit([this](auto&& val) -> std::string {
             using T = std::decay_t<decltype(val)>;
             if constexpr (std::is_same_v<T, std::monostate>) {
                 return "null";
@@ -532,6 +541,12 @@ public:
                 return val ? "true" : "false";
             } else if constexpr (std::is_same_v<T, char>) {
                 return std::string(1, val);
+            } else if constexpr (std::is_same_v<T, std::shared_ptr<ArrayValue>>) {
+                std::string result;
+                for (const auto& elem : val->elements) {
+                    result += value_to_string(elem);
+                }
+                return result;
             }
             return "<?>";
         }, v);
@@ -1017,6 +1032,10 @@ public:
                 execute_while(static_cast<claw::ast::WhileStmt*>(stmt));
                 break;
             }
+            case claw::ast::Statement::Kind::Loop: {
+                execute_loop(static_cast<claw::ast::LoopStmt*>(stmt));
+                break;
+            }
             case claw::ast::Statement::Kind::Match: {
                 execute_match(static_cast<claw::ast::MatchStmt*>(stmt));
                 break;
@@ -1201,6 +1220,21 @@ public:
                     }
                 }
             }
+            // Check for array literal: [1, 2, 3]
+            if (init_expr->get_kind() == claw::ast::Expression::Kind::Array) {
+                auto* arr = static_cast<claw::ast::ArrayExpr*>(init_expr);
+                val.type_name = "array";
+                val.size = static_cast<int64_t>(arr->size());
+                for (const auto& elem : arr->get_elements()) {
+                    RuntimeValue elem_val;
+                    elem_val.type_name = "auto";
+                    elem_val.size = 1;
+                    elem_val.scalar = evaluate(elem.get());
+                    val.array.push_back(std::move(elem_val));
+                }
+                scoped_set(name, val);
+                return;
+            }
             Value init_val = evaluate(init_expr);
             if (val.size == 1) {
                 val.scalar = init_val;
@@ -1376,9 +1410,81 @@ public:
             }
         }
 
-        // Support array/tensor iteration
+        // Handle array literal: for v in [1, 2, 3]
+        if (iterable->get_kind() == claw::ast::Expression::Kind::Array) {
+            auto* arr_expr = static_cast<claw::ast::ArrayExpr*>(iterable);
+            for (const auto& elem : arr_expr->get_elements()) {
+                RuntimeValue loop_var;
+                loop_var.type_name = "auto";
+                loop_var.size = 1;
+                loop_var.scalar = evaluate(elem.get());
+                scoped_set(var_name, loop_var);
+
+                execute_block(for_stmt->get_body());
+
+                if (return_flag || throw_flag) break;
+                if (break_flag) {
+                    break_flag = false;
+                    break;
+                }
+                if (continue_flag) {
+                    continue_flag = false;
+                    continue;
+                }
+            }
+            return;
+        }
+
+        // Handle identifier (variable) iteration: arrays or strings
+        if (iterable->get_kind() == claw::ast::Expression::Kind::Identifier) {
+            auto* ident = static_cast<claw::ast::IdentifierExpr*>(iterable);
+            RuntimeValue* var = scoped_get(ident->get_name());
+            if (var) {
+                // Array variable iteration
+                if (!var->array.empty()) {
+                    for (const auto& elem : var->array) {
+                        scoped_set(var_name, elem);
+                        execute_block(for_stmt->get_body());
+                        if (return_flag || throw_flag) break;
+                        if (break_flag) {
+                            break_flag = false;
+                            break;
+                        }
+                        if (continue_flag) {
+                            continue_flag = false;
+                            continue;
+                        }
+                    }
+                    return;
+                }
+                // String variable iteration
+                if (std::holds_alternative<std::string>(var->scalar)) {
+                    auto str = std::get<std::string>(var->scalar);
+                    for (size_t idx = 0; idx < str.size(); idx++) {
+                        RuntimeValue loop_var;
+                        loop_var.type_name = "char";
+                        loop_var.size = 1;
+                        loop_var.scalar = static_cast<int64_t>(str[idx]);
+                        scoped_set(var_name, loop_var);
+                        execute_block(for_stmt->get_body());
+                        if (return_flag || throw_flag) break;
+                        if (break_flag) {
+                            break_flag = false;
+                            break;
+                        }
+                        if (continue_flag) {
+                            continue_flag = false;
+                            continue;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Support scalar iteration (integer literal as range)
         Value arr_val = evaluate(iterable);
-        
+
         // Handle integer literal as range: for i in 10 → 1..10 (Claw 1-based)
         if (std::holds_alternative<int64_t>(arr_val)) {
             int64_t end = std::get<int64_t>(arr_val);
@@ -1403,8 +1509,8 @@ public:
             }
             return;
         }
-        
-        // Handle string iteration (character by character)
+
+        // Handle string literal iteration (character by character)
         if (std::holds_alternative<std::string>(arr_val)) {
             auto str = std::get<std::string>(arr_val);
             for (size_t idx = 0; idx < str.size(); idx++) {
@@ -1413,11 +1519,11 @@ public:
                 loop_var.size = 1;
                 loop_var.scalar = static_cast<int64_t>(str[idx]);
                 scoped_set(var_name, loop_var);
-                
+
                 execute_block(for_stmt->get_body());
-                
+
                 if (return_flag || throw_flag) break;
-                
+
                 if (break_flag) {
                     break_flag = false;
                     break;
@@ -1429,7 +1535,31 @@ public:
             }
             return;
         }
-        
+
+        // Handle slice/array Value iteration
+        if (auto* arr = std::get_if<std::shared_ptr<ArrayValue>>(&arr_val)) {
+            for (const auto& elem : (*arr)->elements) {
+                RuntimeValue loop_var;
+                loop_var.type_name = "auto";
+                loop_var.size = 1;
+                loop_var.scalar = elem;
+                scoped_set(var_name, loop_var);
+
+                execute_block(for_stmt->get_body());
+
+                if (return_flag || throw_flag) break;
+                if (break_flag) {
+                    break_flag = false;
+                    break;
+                }
+                if (continue_flag) {
+                    continue_flag = false;
+                    continue;
+                }
+            }
+            return;
+        }
+
         std::cerr << "Error: Unsupported for loop iterable type\n";
     }
 
@@ -1447,6 +1577,25 @@ public:
 
             // Execute loop body
             execute_block(while_stmt->get_body());
+
+            if (return_flag || throw_flag) break;
+
+            if (break_flag) {
+                break_flag = false;
+                break;
+            }
+            if (continue_flag) {
+                continue_flag = false;
+                continue;
+            }
+        }
+    }
+
+    // Execute loop statement (infinite loop)
+    void execute_loop(claw::ast::LoopStmt* loop_stmt) {
+        while (true) {
+            // Execute loop body
+            execute_block(loop_stmt->get_body());
 
             if (return_flag || throw_flag) break;
 
@@ -1677,6 +1826,8 @@ public:
                 return val != 0.0;
             } else if constexpr (std::is_same_v<T, std::string>) {
                 return !val.empty();
+            } else if constexpr (std::is_same_v<T, std::shared_ptr<ArrayValue>>) {
+                return !val->elements.empty();
             }
             return false;
         }, v);
@@ -1712,6 +1863,9 @@ public:
             }
             case claw::ast::Expression::Kind::Index: {
                 return evaluate_index(static_cast<claw::ast::IndexExpr*>(expr));
+            }
+            case claw::ast::Expression::Kind::Slice: {
+                return evaluate_slice(static_cast<claw::ast::SliceExpr*>(expr));
             }
             case claw::ast::Expression::Kind::Call: {
                 return evaluate_call(static_cast<claw::ast::CallExpr*>(expr));
@@ -1838,6 +1992,81 @@ public:
                     return var->at(idx);
                 }
             }
+        }
+
+        // Handle array Value (e.g., from slice expression)
+        Value obj_val = evaluate(obj);
+        if (auto* arr = std::get_if<std::shared_ptr<ArrayValue>>(&obj_val)) {
+            Value idx_val = evaluate(idx_expr);
+            if (std::holds_alternative<int64_t>(idx_val)) {
+                int64_t idx = std::get<int64_t>(idx_val);
+                if (idx >= 1 && idx <= static_cast<int64_t>((*arr)->elements.size())) {
+                    return (*arr)->elements[idx - 1];
+                }
+            }
+        }
+
+        return Value();
+    }
+
+    // Evaluate slice expression (arr[start..end] or str[start..end])
+    Value evaluate_slice(claw::ast::SliceExpr* slice) {
+        claw::ast::Expression* obj = slice->get_object();
+        claw::ast::Expression* start_expr = slice->get_start();
+        claw::ast::Expression* end_expr = slice->get_end();
+
+        Value start_val = evaluate(start_expr);
+        Value end_val = evaluate(end_expr);
+        if (!std::holds_alternative<int64_t>(start_val) ||
+            !std::holds_alternative<int64_t>(end_val)) {
+            return Value();
+        }
+        int64_t start_idx = std::get<int64_t>(start_val);
+        int64_t end_idx = std::get<int64_t>(end_val);
+
+        // Convert from 1-based inclusive to 0-based indices
+        int64_t s = start_idx - 1;
+        int64_t e = end_idx - 1;
+
+        if (obj->get_kind() == claw::ast::Expression::Kind::Identifier) {
+            auto* ident = static_cast<claw::ast::IdentifierExpr*>(obj);
+            RuntimeValue* var = scoped_get(ident->get_name());
+            if (var) {
+                // String slice
+                if (std::holds_alternative<std::string>(var->scalar)) {
+                    const std::string& str = std::get<std::string>(var->scalar);
+                    if (s < 0) s = 0;
+                    if (e >= static_cast<int64_t>(str.size())) e = static_cast<int64_t>(str.size()) - 1;
+                    if (s > e) return std::string();
+                    return str.substr(static_cast<size_t>(s), static_cast<size_t>(e - s + 1));
+                }
+                // Array slice
+                if (!var->array.empty()) {
+                    auto arr_val = std::make_shared<ArrayValue>();
+                    if (s < 0) s = 0;
+                    if (e >= static_cast<int64_t>(var->array.size())) e = static_cast<int64_t>(var->array.size()) - 1;
+                    for (int64_t i = s; i <= e; i++) {
+                        if (i >= 0 && i < static_cast<int64_t>(var->array.size())) {
+                            arr_val->elements.push_back(var->array[i].scalar);
+                        }
+                    }
+                    return arr_val;
+                }
+            }
+        }
+
+        // Handle array Value (e.g., nested slice)
+        Value obj_val = evaluate(obj);
+        if (auto* arr = std::get_if<std::shared_ptr<ArrayValue>>(&obj_val)) {
+            auto arr_val = std::make_shared<ArrayValue>();
+            if (s < 0) s = 0;
+            if (e >= static_cast<int64_t>((*arr)->elements.size())) e = static_cast<int64_t>((*arr)->elements.size()) - 1;
+            for (int64_t i = s; i <= e; i++) {
+                if (i >= 0 && i < static_cast<int64_t>((*arr)->elements.size())) {
+                    arr_val->elements.push_back((*arr)->elements[i]);
+                }
+            }
+            return arr_val;
         }
 
         return Value();

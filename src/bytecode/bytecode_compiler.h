@@ -82,6 +82,7 @@ private:
     void compileMatchStmt(const ast::MatchStmt& stmt);
     void compileForStmt(const ast::ForStmt& stmt);
     void compileWhileStmt(const ast::WhileStmt& stmt);
+    void compileLoopStmt(const ast::LoopStmt& stmt);
     void compileReturnStmt(const ast::ReturnStmt& stmt);
     void compileBreakStmt(const ast::BreakStmt& stmt);
     void compileContinueStmt(const ast::ContinueStmt& stmt);

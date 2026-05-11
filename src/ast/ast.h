@@ -146,7 +146,10 @@ public:
     TokenType get_operator() const { return op_; }
     Expression* get_left() const { return left_.get(); }
     Expression* get_right() const { return right_.get(); }
-    
+
+    std::unique_ptr<Expression> release_left() { return std::move(left_); }
+    std::unique_ptr<Expression> release_right() { return std::move(right_); }
+
     std::string to_string() const override {
         return "(" + left_->to_string() + " " + token_type_to_string(op_) + 
                " " + right_->to_string() + ")";
@@ -617,6 +620,22 @@ public:
     
 private:
     std::unique_ptr<Expression> condition_;
+    std::unique_ptr<ASTNode> body_;
+};
+
+// Loop statement (infinite loop)
+class LoopStmt : public Statement {
+public:
+    LoopStmt(std::unique_ptr<ASTNode> body, const SourceSpan& span)
+        : Statement(Kind::Loop, span), body_(std::move(body)) {}
+
+    ASTNode* get_body() const { return body_.get(); }
+
+    std::string to_string() const override {
+        return "loop { ... }";
+    }
+
+private:
     std::unique_ptr<ASTNode> body_;
 };
 

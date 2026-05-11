@@ -313,6 +313,9 @@ TypeProfile::TypeKind TypeProfiler::value_to_type_kind(const interpreter::Value*
     if (std::holds_alternative<char>(*value)) {
         return TypeProfile::TypeKind::STRING;
     }
+    if (std::holds_alternative<std::shared_ptr<claw::interpreter::ArrayValue>>(*value)) {
+        return TypeProfile::TypeKind::ARRAY;
+    }
 
     return TypeProfile::TypeKind::UNKNOWN;
 }
