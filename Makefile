@@ -401,6 +401,10 @@ test-bytecode-opt: claw
 	@test "`./claw -b -O1 /tmp/_bc_inline2.claw 2>/dev/null | tail -2 | head -1`" = "10" || (echo "BC function inlining 2 failed"; exit 1)
 	@echo "fn count(n,acc){ if n<=0 { return acc; } return count(n-1,acc+1); } fn main(){ print(count(1000,0)); }" > /tmp/_bc_tco.claw
 	@test "`./claw -b -O1 /tmp/_bc_tco.claw 2>/dev/null | tail -2 | head -1`" = "1000" || (echo "BC tail call optimization failed"; exit 1)
+	@echo "fn main() { let sum = 0; for x in [1, 2, 3, 4, 5] { sum = sum + x; } print(sum); }" > /tmp/_bc_for.claw
+	@test "`./claw -b -O1 /tmp/_bc_for.claw 2>/dev/null | tail -2 | head -1`" = "15" || (echo "BC for-loop desugaring failed"; exit 1)
+	@echo "fn main() { let sum = 0; for i in 0..5 { sum = sum + i; } print(sum); }" > /tmp/_bc_range.claw
+	@test "`./claw -b -O1 /tmp/_bc_range.claw 2>/dev/null | tail -2 | head -1`" = "10" || (echo "BC range iteration failed"; exit 1)
 	@rm -f /tmp/_bc_*.claw
 	@echo "Bytecode optimization tests passed"
 

@@ -15,6 +15,9 @@ src/test_*
 !src/test/run_tests.cpp
 !src/test/test_lexer.cpp
 !src/test/test_parser.cpp
+!src/test/test_iterator_desugarer.cpp
+!src/test/test_type_inference.cpp
+!src/test/test_compact_ast.cpp
 !src/test/integration_test.h
 !src/test/test.h
 src/bytecode/test_*

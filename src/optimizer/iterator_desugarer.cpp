@@ -275,17 +275,18 @@ std::unique_ptr<ast::Statement> IteratorDesugarer::desugar_array_iteration(
     // let _i = 0;
     auto init_index = make_let(idx_var, make_int_lit(0, span), span);
 
-    // arr.len
-    auto len_expr = std::make_unique<ast::MemberExpr>(
-        clone_expr(iterable), "len", span);
+    // len(arr)
+    auto len_call = std::make_unique<ast::CallExpr>(
+        std::make_unique<ast::IdentifierExpr>("len", span), span);
+    len_call->add_argument(clone_expr(iterable));
 
-    // _i >= arr.len
+    // _i >= len(arr)
     auto cond = make_binary(TokenType::Op_gte,
                             make_id_expr(idx_var, span),
-                            std::move(len_expr),
+                            std::move(len_call),
                             span);
 
-    // if _i >= arr.len { break; }
+    // if _i >= len(arr) { break; }
     auto break_if = make_break_if(std::move(cond), span);
 
     // arr[_i]
@@ -440,17 +441,18 @@ std::unique_ptr<ast::Statement> IteratorDesugarer::desugar_enumerate_iteration(
     // let _i = 0;
     auto init_index = make_let(idx_var, make_int_lit(0, span), span);
 
-    // arr.len
-    auto len_expr = std::make_unique<ast::MemberExpr>(
-        clone_expr(*arr_expr), "len", span);
+    // len(arr)
+    auto len_call = std::make_unique<ast::CallExpr>(
+        std::make_unique<ast::IdentifierExpr>("len", span), span);
+    len_call->add_argument(clone_expr(*arr_expr));
 
-    // _i >= arr.len
+    // _i >= len(arr)
     auto cond = make_binary(TokenType::Op_gte,
                             make_id_expr(idx_var, span),
-                            std::move(len_expr),
+                            std::move(len_call),
                             span);
 
-    // if _i >= arr.len { break; }
+    // if _i >= len(arr) { break; }
     auto break_if = make_break_if(std::move(cond), span);
 
     // arr[_i]
