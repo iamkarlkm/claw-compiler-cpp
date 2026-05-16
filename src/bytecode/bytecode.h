@@ -152,7 +152,10 @@ enum class OpCode : uint8_t {
 
     // Extended (16)
     EXT = 0xF8,         // Extended operations
-    RESERVED            // Reserved for future
+    RESERVED,           // Reserved for future
+
+    // Exception Handling
+    THROW = 0xFA        // Throw exception (pops value from stack)
 };
 
 // Extended operations (for EXT opcode)
@@ -420,6 +423,17 @@ struct Upvalue {
     Upvalue(uint32_t i, bool local) : index(i), is_local(local) {}
 };
 
+// Exception handler entry for try/catch
+struct ExceptionHandler {
+    uint32_t start_ip;      // Start of protected region
+    uint32_t end_ip;        // End of protected region
+    uint32_t catch_ip;      // Jump target for catch block
+    int32_t catch_var;      // Local variable index to store exception (-1 = bare catch)
+
+    ExceptionHandler(uint32_t s, uint32_t e, uint32_t c, int32_t v = -1)
+        : start_ip(s), end_ip(e), catch_ip(c), catch_var(v) {}
+};
+
 struct Function {
     uint32_t id;
     std::string name;
@@ -430,10 +444,21 @@ struct Function {
     std::vector<std::string> local_names;  // For debugging
     std::vector<ValueType> param_types;    // Type of each parameter (for JIT)
     ValueType return_type = ValueType::I64; // Return type (for JIT)
+    std::vector<ExceptionHandler> exception_handlers; // Try/catch handlers
 
     Function() : id(0), name(""), arity(0), local_count(0) {}
     Function(uint32_t i, const std::string& n, uint32_t a)
         : id(i), name(n), arity(a), local_count(0) {}
+
+    // Find exception handler for a given IP
+    const ExceptionHandler* find_handler(uint32_t ip) const {
+        for (const auto& h : exception_handlers) {
+            if (ip >= h.start_ip && ip < h.end_ip) {
+                return &h;
+            }
+        }
+        return nullptr;
+    }
 };
 
 struct Module {

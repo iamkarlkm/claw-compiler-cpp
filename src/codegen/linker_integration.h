@@ -41,6 +41,11 @@ private:
 
     bool compile_runtime_stub();
     bool invoke_linker(const std::vector<std::string>& args);
+
+    // Detect the fastest available linker and return the cc invocation prefix
+    std::string detect_fast_linker();
+
+    std::string linker_cmd_;  // e.g. "cc" or "cc -fuse-ld=zld"
 };
 
 } // namespace codegen

@@ -4,6 +4,7 @@
 #include "optimizations.h"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace claw {
 namespace jit {
@@ -12,72 +13,480 @@ namespace jit {
 // 逃逸分析实现
 // ============================================================================
 
-std::unordered_map<uint32_t, EscapeAnalysisResult> EscapeAnalyzer::analyze_function(
+std::unordered_map<size_t, EscapeAnalysisResult> EscapeAnalyzer::analyze_function(
     const bytecode::Function& func) {
 
-    std::unordered_map<uint32_t, EscapeAnalysisResult> results;
+    // Stack simulation: each slot holds either nullopt (unknown) or an instruction index
+    // of the allocation that produced the value at that stack position.
+    std::vector<std::optional<size_t>> sim_stack;
+    // Map from local variable index to allocation instruction index
+    std::unordered_map<uint32_t, std::optional<size_t>> local_allocs;
+    // Results: instruction index -> escape result
+    std::unordered_map<size_t, EscapeAnalysisResult> results;
 
-    // 初始化: 假设所有局部变量都不逃逸
-    // 遍历指令分析逃逸情况
+    auto pop_stack = [&](size_t n = 1) {
+        for (size_t k = 0; k < n && !sim_stack.empty(); ++k) {
+            sim_stack.pop_back();
+        }
+    };
+
+    auto push_alloc = [&](size_t inst_idx) {
+        sim_stack.push_back(inst_idx);
+    };
+
+    auto mark_escape = [&](std::optional<size_t> alloc_idx) {
+        if (alloc_idx.has_value()) {
+            results[alloc_idx.value()].escapes = true;
+        }
+    };
+
+    auto get_top = [&](size_t offset_from_top = 0) -> std::optional<size_t> {
+        size_t idx = sim_stack.size();
+        if (idx <= offset_from_top) return std::nullopt;
+        return sim_stack[idx - 1 - offset_from_top];
+    };
+
+    // --- Pass 1: forward simulation tracking allocations into locals ---
     for (size_t i = 0; i < func.code.size(); ++i) {
         const auto& inst = func.code[i];
 
         switch (inst.op) {
-            // 对象创建 - 初始为不逃逸
+            // Object creation - push allocation marker
             case bytecode::OpCode::ALLOC_OBJ:
             case bytecode::OpCode::ALLOC_ARRAY:
             case bytecode::OpCode::CREATE_TUPLE: {
-                EscapeAnalysisResult result;
-                results[inst.operand] = result;
+                results[i] = EscapeAnalysisResult{};  // default: does not escape
+                push_alloc(i);
                 break;
             }
 
-            // 存储到全局变量 - 逃逸
-            case bytecode::OpCode::STORE_GLOBAL: {
-                // operand 是变量 ID
-                auto it = results.find(inst.operand);
-                if (it != results.end()) {
-                    it->second.stored_to_global = true;
-                    it->second.escapes = true;
+            // Stack operations
+            case bytecode::OpCode::POP:
+                pop_stack(1);
+                break;
+            case bytecode::OpCode::DUP:
+                if (!sim_stack.empty()) sim_stack.push_back(sim_stack.back());
+                break;
+            case bytecode::OpCode::SWAP:
+                if (sim_stack.size() >= 2) {
+                    std::swap(sim_stack[sim_stack.size() - 1], sim_stack[sim_stack.size() - 2]);
+                }
+                break;
+
+            // Local variables
+            case bytecode::OpCode::LOAD_LOCAL:
+            case bytecode::OpCode::LOAD_LOCAL_0:
+            case bytecode::OpCode::LOAD_LOCAL_1: {
+                uint32_t local_idx = inst.operand;
+                if (inst.op == bytecode::OpCode::LOAD_LOCAL_0) local_idx = 0;
+                if (inst.op == bytecode::OpCode::LOAD_LOCAL_1) local_idx = 1;
+                auto it = local_allocs.find(local_idx);
+                if (it != local_allocs.end()) {
+                    sim_stack.push_back(it->second);
+                } else {
+                    sim_stack.push_back(std::nullopt);
                 }
                 break;
             }
+            case bytecode::OpCode::STORE_LOCAL: {
+                pop_stack(1);
+                auto val = get_top(0);
+                local_allocs[inst.operand] = val;
+                break;
+            }
 
-            // 函数调用 - 可能逃逸
-            case bytecode::OpCode::CALL:
+            // Global variables - value escapes
+            case bytecode::OpCode::STORE_GLOBAL:
+            case bytecode::OpCode::DEFINE_GLOBAL: {
+                mark_escape(get_top(0));
+                pop_stack(1);
+                break;
+            }
+
+            // Returns - return value escapes
+            case bytecode::OpCode::RET: {
+                mark_escape(get_top(0));
+                pop_stack(1);
+                break;
+            }
+            case bytecode::OpCode::RET_NULL:
+                break;
+
+            // Function calls - all arguments and callee may escape
+            case bytecode::OpCode::CALL: {
+                // operand = arg count; stack: [callee, arg1, ..., argN]
+                uint32_t arg_count = inst.operand;
+                // callee + args
+                for (uint32_t a = 0; a <= arg_count; ++a) {
+                    mark_escape(get_top(a));
+                }
+                pop_stack(arg_count + 1);
+                sim_stack.push_back(std::nullopt);  // push return value
+                break;
+            }
             case bytecode::OpCode::CALL_EXT: {
-                // 检查前几个栈操作是否是需要分析的对象
-                // 简化实现
+                uint32_t arg_count = (inst.operand >> 16) & 0xFFFF;
+                for (uint32_t a = 0; a < arg_count; ++a) {
+                    mark_escape(get_top(a));
+                }
+                pop_stack(arg_count);
+                sim_stack.push_back(std::nullopt);
                 break;
             }
 
-            // 返回值 - 可能逃逸
-            case bytecode::OpCode::RET:
-            case bytecode::OpCode::RET_NULL: {
-                // 检查返回值是否来自逃逸对象
+            // Array/field/elem store - the stored value and container may escape
+            case bytecode::OpCode::STORE_INDEX: {
+                // stack: [array, index, value]
+                mark_escape(get_top(0));  // value
+                mark_escape(get_top(2));  // array
+                pop_stack(3);
+                break;
+            }
+            case bytecode::OpCode::ARRAY_PUSH: {
+                // stack: [array, value]
+                mark_escape(get_top(0));  // value
+                mark_escape(get_top(1));  // array
+                pop_stack(2);
+                sim_stack.push_back(std::nullopt);  // array stays on stack
+                break;
+            }
+            case bytecode::OpCode::STORE_FIELD: {
+                // stack: [obj, field_name, value]
+                mark_escape(get_top(0));  // value
+                mark_escape(get_top(2));  // object
+                pop_stack(3);
+                break;
+            }
+            case bytecode::OpCode::STORE_ELEM: {
+                // stack: [tuple, index, value]
+                mark_escape(get_top(0));  // value
+                mark_escape(get_top(2));  // tuple
+                pop_stack(3);
                 break;
             }
 
-            // 创建闭包 - 捕获变量逃逸
+            // Closure - captured values escape
             case bytecode::OpCode::CLOSURE: {
-                // 被闭包捕获的变量逃逸
+                mark_escape(get_top(0));
+                pop_stack(1);
+                sim_stack.push_back(std::nullopt);
                 break;
             }
+
+            // Upvalue operations
+            case bytecode::OpCode::GET_UPVALUE:
+                sim_stack.push_back(std::nullopt);
+                break;
+            case bytecode::OpCode::SET_UPVALUE: {
+                pop_stack(1);
+                break;
+            }
+            case bytecode::OpCode::CLOSE_UPVALUE:
+                break;
+
+            // Jumps - conservatively clear the stack simulation since
+            // we don't do full control-flow analysis in this simplified version.
+            case bytecode::OpCode::JMP:
+            case bytecode::OpCode::JMP_IF:
+            case bytecode::OpCode::JMP_IF_NOT:
+                // For conditional jumps, we could try to merge states,
+                // but for simplicity we just keep going. The fixed-point
+                // pass below will catch escapes through other paths.
+                if (inst.op == bytecode::OpCode::JMP_IF || inst.op == bytecode::OpCode::JMP_IF_NOT) {
+                    pop_stack(1);
+                }
+                break;
+
+            // Consumes from stack
+            case bytecode::OpCode::LOAD_INDEX: {
+                // stack: [array, index]
+                pop_stack(2);
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::ARRAY_LEN: {
+                pop_stack(1);
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::LOAD_FIELD: {
+                pop_stack(2);
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::LOAD_ELEM: {
+                pop_stack(2);
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::OBJ_TYPE: {
+                pop_stack(1);
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+
+            // Tensor ops - conservative
+            case bytecode::OpCode::TENSOR_CREATE:
+            case bytecode::OpCode::TENSOR_LOAD:
+            case bytecode::OpCode::TENSOR_STORE:
+            case bytecode::OpCode::TENSOR_MATMUL:
+            case bytecode::OpCode::TENSOR_RESHAPE: {
+                // These have complex stack behavior; be conservative
+                sim_stack.clear();
+                sim_stack.push_back(std::nullopt);
+                break;
+            }
+
+            // Type conversions - consume one, produce one
+            case bytecode::OpCode::I2F: case bytecode::OpCode::F2I:
+            case bytecode::OpCode::I2B: case bytecode::OpCode::B2I:
+            case bytecode::OpCode::I2S: case bytecode::OpCode::F2S:
+            case bytecode::OpCode::S2I: case bytecode::OpCode::S2F:
+            case bytecode::OpCode::INEG: case bytecode::OpCode::FNEG:
+            case bytecode::OpCode::NOT:  case bytecode::OpCode::BNOT:
+            case bytecode::OpCode::TRUNC: case bytecode::OpCode::ZEXT:
+            case bytecode::OpCode::SEXT: case bytecode::OpCode::FTRUNC:
+            case bytecode::OpCode::IINC: case bytecode::OpCode::FINC:
+                pop_stack(1);
+                sim_stack.push_back(std::nullopt);
+                break;
+
+            // Binary ops - consume two, produce one
+            case bytecode::OpCode::IADD: case bytecode::OpCode::ISUB:
+            case bytecode::OpCode::IMUL: case bytecode::OpCode::IDIV:
+            case bytecode::OpCode::IMOD:
+            case bytecode::OpCode::FADD: case bytecode::OpCode::FSUB:
+            case bytecode::OpCode::FMUL: case bytecode::OpCode::FDIV:
+            case bytecode::OpCode::FMOD:
+            case bytecode::OpCode::IEQ: case bytecode::OpCode::INE:
+            case bytecode::OpCode::ILT: case bytecode::OpCode::ILE:
+            case bytecode::OpCode::IGT: case bytecode::OpCode::IGE:
+            case bytecode::OpCode::FEQ: case bytecode::OpCode::FNE:
+            case bytecode::OpCode::FLT: case bytecode::OpCode::FLE:
+            case bytecode::OpCode::FGT: case bytecode::OpCode::FGE:
+            case bytecode::OpCode::AND: case bytecode::OpCode::OR:
+            case bytecode::OpCode::BAND: case bytecode::OpCode::BOR:
+            case bytecode::OpCode::BXOR:
+            case bytecode::OpCode::SHL: case bytecode::OpCode::SHR:
+            case bytecode::OpCode::USHR:
+                pop_stack(2);
+                sim_stack.push_back(std::nullopt);
+                break;
+
+            // Push constant
+            case bytecode::OpCode::PUSH:
+                sim_stack.push_back(std::nullopt);
+                break;
+
+            // Loops
+            case bytecode::OpCode::LOOP:
+                break;
 
             default:
                 break;
         }
     }
 
-    // 迭代分析直到固定点
+    // --- Pass 2: fixed-point propagation ---
+    // If a local is known to hold an allocation and that local is ever
+    // loaded into an escaping context in any path, mark the allocation.
+    // We already marked many escapes in pass 1, but locals can be loaded
+    // in different basic blocks. Re-simulate and propagate.
     bool changed = true;
     while (changed) {
         changed = false;
-        // 传播逃逸信息
-        for (auto& [var_id, result] : results) {
-            if (result.escapes) {
-                // 如果变量逃逸，标记所有相关变量
-                // 简化实现
+        sim_stack.clear();
+        local_allocs.clear();
+
+        for (size_t i = 0; i < func.code.size(); ++i) {
+            const auto& inst = func.code[i];
+
+            switch (inst.op) {
+                case bytecode::OpCode::ALLOC_OBJ:
+                case bytecode::OpCode::ALLOC_ARRAY:
+                case bytecode::OpCode::CREATE_TUPLE:
+                    sim_stack.push_back(i);
+                    break;
+
+                case bytecode::OpCode::STORE_LOCAL: {
+                    if (!sim_stack.empty()) {
+                        local_allocs[inst.operand] = sim_stack.back();
+                        sim_stack.pop_back();
+                    }
+                    break;
+                }
+
+                case bytecode::OpCode::LOAD_LOCAL:
+                case bytecode::OpCode::LOAD_LOCAL_0:
+                case bytecode::OpCode::LOAD_LOCAL_1: {
+                    uint32_t li = inst.operand;
+                    if (inst.op == bytecode::OpCode::LOAD_LOCAL_0) li = 0;
+                    if (inst.op == bytecode::OpCode::LOAD_LOCAL_1) li = 1;
+                    auto it = local_allocs.find(li);
+                    if (it != local_allocs.end()) {
+                        sim_stack.push_back(it->second);
+                    } else {
+                        sim_stack.push_back(std::nullopt);
+                    }
+                    break;
+                }
+
+                // Any context where the top of stack escapes
+                case bytecode::OpCode::STORE_GLOBAL:
+                case bytecode::OpCode::DEFINE_GLOBAL:
+                case bytecode::OpCode::RET:
+                    if (!sim_stack.empty()) {
+                        auto val = sim_stack.back();
+                        if (val.has_value() && !results[val.value()].escapes) {
+                            results[val.value()].escapes = true;
+                            changed = true;
+                        }
+                        sim_stack.pop_back();
+                    }
+                    break;
+
+                case bytecode::OpCode::CALL: {
+                    uint32_t ac = inst.operand;
+                    for (uint32_t a = 0; a <= ac && a < sim_stack.size(); ++a) {
+                        auto val = sim_stack[sim_stack.size() - 1 - a];
+                        if (val.has_value() && !results[val.value()].escapes) {
+                            results[val.value()].escapes = true;
+                            changed = true;
+                        }
+                    }
+                    for (uint32_t a = 0; a <= ac && !sim_stack.empty(); ++a) sim_stack.pop_back();
+                    sim_stack.push_back(std::nullopt);
+                    break;
+                }
+                case bytecode::OpCode::CALL_EXT: {
+                    uint32_t ac = (inst.operand >> 16) & 0xFFFF;
+                    for (uint32_t a = 0; a < ac && a < sim_stack.size(); ++a) {
+                        auto val = sim_stack[sim_stack.size() - 1 - a];
+                        if (val.has_value() && !results[val.value()].escapes) {
+                            results[val.value()].escapes = true;
+                            changed = true;
+                        }
+                    }
+                    for (uint32_t a = 0; a < ac && !sim_stack.empty(); ++a) sim_stack.pop_back();
+                    sim_stack.push_back(std::nullopt);
+                    break;
+                }
+
+                case bytecode::OpCode::STORE_INDEX:
+                case bytecode::OpCode::STORE_FIELD:
+                case bytecode::OpCode::STORE_ELEM:
+                case bytecode::OpCode::ARRAY_PUSH: {
+                    // Conservative: mark all involved values as escaping
+                    size_t n = (inst.op == bytecode::OpCode::ARRAY_PUSH) ? 2 : 3;
+                    for (size_t a = 0; a < n && a < sim_stack.size(); ++a) {
+                        auto val = sim_stack[sim_stack.size() - 1 - a];
+                        if (val.has_value() && !results[val.value()].escapes) {
+                            results[val.value()].escapes = true;
+                            changed = true;
+                        }
+                    }
+                    for (size_t a = 0; a < n && !sim_stack.empty(); ++a) sim_stack.pop_back();
+                    if (inst.op == bytecode::OpCode::ARRAY_PUSH) sim_stack.push_back(std::nullopt);
+                    break;
+                }
+
+                case bytecode::OpCode::CLOSURE: {
+                    if (!sim_stack.empty()) {
+                        auto val = sim_stack.back();
+                        if (val.has_value() && !results[val.value()].escapes) {
+                            results[val.value()].escapes = true;
+                            changed = true;
+                        }
+                        sim_stack.pop_back();
+                    }
+                    sim_stack.push_back(std::nullopt);
+                    break;
+                }
+
+                // Pop one
+                case bytecode::OpCode::POP:
+                case bytecode::OpCode::I2F: case bytecode::OpCode::F2I:
+                case bytecode::OpCode::I2B: case bytecode::OpCode::B2I:
+                case bytecode::OpCode::I2S: case bytecode::OpCode::F2S:
+                case bytecode::OpCode::S2I: case bytecode::OpCode::S2F:
+                case bytecode::OpCode::INEG: case bytecode::OpCode::FNEG:
+                case bytecode::OpCode::NOT:  case bytecode::OpCode::BNOT:
+                case bytecode::OpCode::TRUNC: case bytecode::OpCode::ZEXT:
+                case bytecode::OpCode::SEXT: case bytecode::OpCode::FTRUNC:
+                case bytecode::OpCode::IINC: case bytecode::OpCode::FINC:
+                case bytecode::OpCode::ARRAY_LEN:
+                case bytecode::OpCode::OBJ_TYPE:
+                case bytecode::OpCode::JMP_IF:
+                case bytecode::OpCode::JMP_IF_NOT:
+                    if (!sim_stack.empty()) sim_stack.pop_back();
+                    if (inst.op == bytecode::OpCode::JMP_IF || inst.op == bytecode::OpCode::JMP_IF_NOT) break;
+                    sim_stack.push_back(std::nullopt);
+                    break;
+
+                // Pop two
+                case bytecode::OpCode::LOAD_INDEX:
+                case bytecode::OpCode::LOAD_ELEM:
+                case bytecode::OpCode::LOAD_FIELD:
+                case bytecode::OpCode::IADD: case bytecode::OpCode::ISUB:
+                case bytecode::OpCode::IMUL: case bytecode::OpCode::IDIV:
+                case bytecode::OpCode::IMOD:
+                case bytecode::OpCode::FADD: case bytecode::OpCode::FSUB:
+                case bytecode::OpCode::FMUL: case bytecode::OpCode::FDIV:
+                case bytecode::OpCode::FMOD:
+                case bytecode::OpCode::IEQ: case bytecode::OpCode::INE:
+                case bytecode::OpCode::ILT: case bytecode::OpCode::ILE:
+                case bytecode::OpCode::IGT: case bytecode::OpCode::IGE:
+                case bytecode::OpCode::FEQ: case bytecode::OpCode::FNE:
+                case bytecode::OpCode::FLT: case bytecode::OpCode::FLE:
+                case bytecode::OpCode::FGT: case bytecode::OpCode::FGE:
+                case bytecode::OpCode::AND: case bytecode::OpCode::OR:
+                case bytecode::OpCode::BAND: case bytecode::OpCode::BOR:
+                case bytecode::OpCode::BXOR:
+                case bytecode::OpCode::SHL: case bytecode::OpCode::SHR:
+                case bytecode::OpCode::USHR:
+                    if (sim_stack.size() >= 2) {
+                        sim_stack.pop_back();
+                        sim_stack.pop_back();
+                    }
+                    sim_stack.push_back(std::nullopt);
+                    break;
+
+                // Pop three
+                case bytecode::OpCode::EXT:
+                    // Extended opcodes are conservative
+                    sim_stack.clear();
+                    break;
+
+                case bytecode::OpCode::PUSH:
+                    sim_stack.push_back(std::nullopt);
+                    break;
+                case bytecode::OpCode::DUP:
+                    if (!sim_stack.empty()) sim_stack.push_back(sim_stack.back());
+                    break;
+                case bytecode::OpCode::SWAP:
+                    if (sim_stack.size() >= 2) {
+                        std::swap(sim_stack[sim_stack.size()-1], sim_stack[sim_stack.size()-2]);
+                    }
+                    break;
+
+                case bytecode::OpCode::GET_UPVALUE:
+                    sim_stack.push_back(std::nullopt);
+                    break;
+                case bytecode::OpCode::SET_UPVALUE:
+                    if (!sim_stack.empty()) sim_stack.pop_back();
+                    break;
+
+                case bytecode::OpCode::TENSOR_CREATE:
+                case bytecode::OpCode::TENSOR_LOAD:
+                case bytecode::OpCode::TENSOR_STORE:
+                case bytecode::OpCode::TENSOR_MATMUL:
+                case bytecode::OpCode::TENSOR_RESHAPE:
+                    sim_stack.clear();
+                    sim_stack.push_back(std::nullopt);
+                    break;
+
+                default:
+                    break;
             }
         }
     }
@@ -321,8 +730,9 @@ size_t LoopOptimizer::find_loop_end(const bytecode::Function& func, size_t heade
 
 bool LoopOptimizer::is_loop_invariant(
     const bytecode::Instruction& inst,
+    size_t inst_idx,
     const std::unordered_set<size_t>& loop_vars,
-    const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results) {
+    const std::unordered_map<size_t, EscapeAnalysisResult>& escape_results) {
 
     // 检查指令是否依赖循环变量
     // 简化: 如果不修改任何循环变量，则是循环不变的
@@ -352,7 +762,7 @@ bool LoopOptimizer::is_loop_invariant(
         case bytecode::OpCode::ALLOC_ARRAY:
         case bytecode::OpCode::ALLOC_OBJ:
         case bytecode::OpCode::CREATE_TUPLE: {
-            auto it = escape_results.find(inst.operand);
+            auto it = escape_results.find(inst_idx);
             if (it != escape_results.end() && !it->second.escapes) {
                 return true;
             }
@@ -402,7 +812,7 @@ bytecode::Function LoopOptimizer::unroll_loop(
 bytecode::Function LoopOptimizer::hoist_invariants(
     bytecode::Function& func,
     const LoopInfo& loop,
-    const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results) {
+    const std::unordered_map<size_t, EscapeAnalysisResult>& escape_results) {
 
     bytecode::Function result = func;
 
@@ -421,7 +831,7 @@ bytecode::Function LoopOptimizer::hoist_invariants(
 
     for (size_t i = loop.start_offset; i < loop.end_offset; ++i) {
         const auto& inst = func.code[i];
-        if (is_loop_invariant(inst, loop_vars, escape_results)) {
+        if (is_loop_invariant(inst, i, loop_vars, escape_results)) {
             // 检查是否已经被 hoist 过
             bool already_hoisted = false;
             for (const auto& h : hoisted) {

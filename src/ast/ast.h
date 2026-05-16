@@ -19,6 +19,7 @@ class ASTNode;
 class Expression;
 class Statement;
 class Type;
+class Pattern;
 
 // AST node base class
 class ASTNode {
@@ -149,6 +150,8 @@ public:
 
     std::unique_ptr<Expression> release_left() { return std::move(left_); }
     std::unique_ptr<Expression> release_right() { return std::move(right_); }
+    std::unique_ptr<Expression>& mutable_left() { return left_; }
+    std::unique_ptr<Expression>& mutable_right() { return right_; }
 
     std::string to_string() const override {
         return "(" + left_->to_string() + " " + token_type_to_string(op_) + 
@@ -170,7 +173,9 @@ public:
     
     TokenType get_operator() const { return op_; }
     Expression* get_operand() const { return operand_.get(); }
-    
+    std::unique_ptr<Expression> release_operand() { return std::move(operand_); }
+    std::unique_ptr<Expression>& mutable_operand() { return operand_; }
+
     std::string to_string() const override {
         return "(" + std::string(token_type_to_string(op_)) + 
                operand_->to_string() + ")";
@@ -190,14 +195,38 @@ public:
     void add_argument(std::unique_ptr<Expression> arg) {
         arguments_.push_back(std::move(arg));
     }
-    
+
+    // Explicit type arguments for generic instantiation: id<Int>(42)
+    void add_type_arg(const std::string& type_arg) {
+        type_args_.push_back(type_arg);
+    }
+    void set_type_args(std::vector<std::string> type_args) {
+        type_args_ = std::move(type_args);
+    }
+    const auto& get_type_args() const { return type_args_; }
+    bool has_type_args() const { return !type_args_.empty(); }
+
     Expression* get_callee() const { return callee_.get(); }
+    std::unique_ptr<Expression> release_callee() { return std::move(callee_); }
+    std::unique_ptr<Expression>& mutable_callee() { return callee_; }
     const std::vector<std::unique_ptr<Expression>>& get_arguments() const {
         return arguments_;
     }
-    
+    std::vector<std::unique_ptr<Expression>>& mutable_arguments() {
+        return arguments_;
+    }
+
     std::string to_string() const override {
-        std::string result = callee_->to_string() + "(";
+        std::string result = callee_->to_string();
+        if (!type_args_.empty()) {
+            result += "<";
+            for (size_t i = 0; i < type_args_.size(); i++) {
+                result += type_args_[i];
+                if (i + 1 < type_args_.size()) result += ", ";
+            }
+            result += ">";
+        }
+        result += "(";
         for (size_t i = 0; i < arguments_.size(); i++) {
             result += arguments_[i]->to_string();
             if (i < arguments_.size() - 1) result += ", ";
@@ -205,10 +234,11 @@ public:
         result += ")";
         return result;
     }
-    
+
 private:
     std::unique_ptr<Expression> callee_;
     std::vector<std::unique_ptr<Expression>> arguments_;
+    std::vector<std::string> type_args_;
 };
 
 // Index expression (expr[idx])
@@ -221,7 +251,11 @@ public:
     
     Expression* get_object() const { return object_.get(); }
     Expression* get_index() const { return index_.get(); }
-    
+    std::unique_ptr<Expression> release_object() { return std::move(object_); }
+    std::unique_ptr<Expression> release_index() { return std::move(index_); }
+    std::unique_ptr<Expression>& mutable_object() { return object_; }
+    std::unique_ptr<Expression>& mutable_index() { return index_; }
+
     std::string to_string() const override {
         return object_->to_string() + "[" + index_->to_string() + "]";
     }
@@ -244,13 +278,19 @@ public:
     Expression* get_object() const { return object_.get(); }
     Expression* get_start() const { return start_.get(); }
     Expression* get_end() const { return end_.get(); }
-    
+    std::unique_ptr<Expression> release_object() { return std::move(object_); }
+    std::unique_ptr<Expression> release_start() { return std::move(start_); }
+    std::unique_ptr<Expression> release_end() { return std::move(end_); }
+    std::unique_ptr<Expression>& mutable_object() { return object_; }
+    std::unique_ptr<Expression>& mutable_start() { return start_; }
+    std::unique_ptr<Expression>& mutable_end() { return end_; }
+
     std::string to_string() const override {
-        return object_->to_string() + "[" + 
-               (start_ ? start_->to_string() : "") + ".." + 
+        return object_->to_string() + "[" +
+               (start_ ? start_->to_string() : "") + ".." +
                (end_ ? end_->to_string() : "") + "]";
     }
-    
+
 private:
     std::unique_ptr<Expression> object_;
     std::unique_ptr<Expression> start_;
@@ -265,11 +305,12 @@ public:
         : Expression(Kind::Tuple, span), elements_(std::move(elements)) {}
     
     const auto& get_elements() const { return elements_; }
+    std::vector<std::unique_ptr<Expression>>& mutable_elements() { return elements_; }
     size_t size() const { return elements_.size(); }
-    Expression* get_element(size_t i) const { 
-        return i < elements_.size() ? elements_[i].get() : nullptr; 
+    Expression* get_element(size_t i) const {
+        return i < elements_.size() ? elements_[i].get() : nullptr;
     }
-    
+
     std::string to_string() const override {
         std::string s = "(";
         for (size_t i = 0; i < elements_.size(); i++) {
@@ -279,12 +320,12 @@ public:
         s += ")";
         return s;
     }
-    
+
     std::unique_ptr<ASTNode> clone() const override {
         // Clone not needed for this task
         return nullptr;
     }
-    
+
 private:
     std::vector<std::unique_ptr<Expression>> elements_;
 };
@@ -297,11 +338,12 @@ public:
         : Expression(Kind::Array, span), elements_(std::move(elements)) {}
     
     const auto& get_elements() const { return elements_; }
+    std::vector<std::unique_ptr<Expression>>& mutable_elements() { return elements_; }
     size_t size() const { return elements_.size(); }
     Expression* get_element(size_t i) const {
         return i < elements_.size() ? elements_[i].get() : nullptr;
     }
-    
+
     std::string to_string() const override {
         std::string s = "[";
         for (size_t i = 0; i < elements_.size(); i++) {
@@ -311,11 +353,11 @@ public:
         s += "]";
         return s;
     }
-    
+
     std::unique_ptr<ASTNode> clone() const override {
         return nullptr;
     }
-    
+
 private:
     std::vector<std::unique_ptr<Expression>> elements_;
 };
@@ -329,12 +371,14 @@ public:
           member_(member) {}
     
     Expression* get_object() const { return object_.get(); }
+    std::unique_ptr<Expression> release_object() { return std::move(object_); }
+    std::unique_ptr<Expression>& mutable_object() { return object_; }
     const std::string& get_member() const { return member_; }
-    
+
     std::string to_string() const override {
         return object_->to_string() + "." + member_;
     }
-    
+
 private:
     std::unique_ptr<Expression> object_;
     std::string member_;
@@ -354,7 +398,8 @@ public:
     const auto& get_params() const { return params_; }
     const std::string& get_return_type() const { return return_type_; }
     ASTNode* get_body() const { return body_.get(); }
-    
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+
     std::string to_string() const override {
         std::string result = "fn (";
         for (size_t i = 0; i < params_.size(); i++) {
@@ -405,6 +450,7 @@ public:
         Const,
         Try,
         Throw,
+        Raise,
     };
     
     Statement(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -420,13 +466,15 @@ class ExprStmt : public Statement {
 public:
     ExprStmt(std::unique_ptr<Expression> expr)
         : Statement(Kind::Expression, expr->get_span()), expr_(std::move(expr)) {}
-    
+
     Expression* get_expr() const { return expr_.get(); }
-    
+    std::unique_ptr<Expression> release_expr() { return std::move(expr_); }
+    void set_expr(std::unique_ptr<Expression> e) { expr_ = std::move(e); }
+
     std::string to_string() const override {
         return expr_->to_string() + ";";
     }
-    
+
 private:
     std::unique_ptr<Expression> expr_;
 };
@@ -451,6 +499,7 @@ public:
     const std::string& get_name() const { return name_; }
     const std::string& get_type() const { return type_; }
     Expression* get_initializer() const { return initializer_.get(); }
+    std::unique_ptr<Expression> release_initializer() { return std::move(initializer_); }
 
     std::string to_string() const override {
         std::string result = "let ";
@@ -492,7 +541,8 @@ public:
     const std::string& get_name() const { return name_; }
     const std::string& get_type() const { return type_; }
     Expression* get_initializer() const { return initializer_.get(); }
-    
+    std::unique_ptr<Expression> release_initializer() { return std::move(initializer_); }
+
     std::string to_string() const override {
         std::string result = "const " + name_;
         if (!type_.empty()) result += ": " + type_;
@@ -518,11 +568,15 @@ public:
     
     Expression* get_target() const { return target_.get(); }
     Expression* get_value() const { return value_.get(); }
-    
+    std::unique_ptr<Expression> release_target() { return std::move(target_); }
+    std::unique_ptr<Expression> release_value() { return std::move(value_); }
+    void set_target(std::unique_ptr<Expression> t) { target_ = std::move(t); }
+    void set_value(std::unique_ptr<Expression> v) { value_ = std::move(v); }
+
     std::string to_string() const override {
         return target_->to_string() + " = " + value_->to_string() + ";";
     }
-    
+
 private:
     std::unique_ptr<Expression> target_;
     std::unique_ptr<Expression> value_;
@@ -541,15 +595,18 @@ public:
     void set_else_body(std::unique_ptr<ASTNode> body) { else_body_ = std::move(body); }
     
     const auto& get_conditions() const { return conditions_; }
+    auto& mutable_conditions() { return conditions_; }
     const auto& get_bodies() const { return bodies_; }
+    auto& mutable_bodies() { return bodies_; }
     ASTNode* get_else_body() const { return else_body_.get(); }
-    
+    std::unique_ptr<ASTNode> release_else_body() { return std::move(else_body_); }
+
     std::string to_string() const override {
         std::string result = "if " + conditions_[0]->to_string() + " { ... }";
         if (else_body_) result += " else { ... }";
         return result;
     }
-    
+
 private:
     std::vector<std::unique_ptr<Expression>> conditions_;
     std::vector<std::unique_ptr<ASTNode>> bodies_;
@@ -559,25 +616,26 @@ private:
 // Match statement
 class MatchStmt : public Statement {
 public:
-    MatchStmt(std::unique_ptr<Expression> expr, const SourceSpan& span)
-        : Statement(Kind::Match, span), expr_(std::move(expr)) {}
-    
-    void add_case(std::unique_ptr<Expression> pattern, std::unique_ptr<ASTNode> body) {
-        patterns_.push_back(std::move(pattern));
-        bodies_.push_back(std::move(body));
-    }
-    
+    MatchStmt(std::unique_ptr<Expression> expr, const SourceSpan& span);
+    ~MatchStmt();
+
+    void add_case(std::unique_ptr<Pattern> pattern, std::unique_ptr<ASTNode> body);
+
     Expression* get_expr() const { return expr_.get(); }
+    std::unique_ptr<Expression> release_expr() { return std::move(expr_); }
+    void set_expr(std::unique_ptr<Expression> e) { expr_ = std::move(e); }
     const auto& get_patterns() const { return patterns_; }
+    auto& mutable_patterns() { return patterns_; }
     const auto& get_bodies() const { return bodies_; }
-    
+    auto& mutable_bodies() { return bodies_; }
+
     std::string to_string() const override {
-        return "match " + expr_->to_string() + " { ... }";
+        return "match " + (expr_ ? expr_->to_string() : "?") + " { ... }";
     }
-    
+
 private:
     std::unique_ptr<Expression> expr_;
-    std::vector<std::unique_ptr<Expression>> patterns_;
+    std::vector<std::unique_ptr<Pattern>> patterns_;
     std::vector<std::unique_ptr<ASTNode>> bodies_;
 };
 
@@ -591,12 +649,16 @@ public:
     
     const std::string& get_variable() const { return variable_; }
     Expression* get_iterable() const { return iterable_.get(); }
+    std::unique_ptr<Expression> release_iterable() { return std::move(iterable_); }
+    void set_iterable(std::unique_ptr<Expression> it) { iterable_ = std::move(it); }
     ASTNode* get_body() const { return body_.get(); }
-    
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+    void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
+
     std::string to_string() const override {
         return "for " + variable_ + " in " + iterable_->to_string() + " { ... }";
     }
-    
+
 private:
     std::string variable_;
     std::unique_ptr<Expression> iterable_;
@@ -612,12 +674,16 @@ public:
           body_(std::move(body)) {}
     
     Expression* get_condition() const { return condition_.get(); }
+    std::unique_ptr<Expression> release_condition() { return std::move(condition_); }
+    void set_condition(std::unique_ptr<Expression> cond) { condition_ = std::move(cond); }
     ASTNode* get_body() const { return body_.get(); }
-    
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+    void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
+
     std::string to_string() const override {
         return "while " + condition_->to_string() + " { ... }";
     }
-    
+
 private:
     std::unique_ptr<Expression> condition_;
     std::unique_ptr<ASTNode> body_;
@@ -630,6 +696,8 @@ public:
         : Statement(Kind::Loop, span), body_(std::move(body)) {}
 
     ASTNode* get_body() const { return body_.get(); }
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+    void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
 
     std::string to_string() const override {
         return "loop { ... }";
@@ -648,12 +716,13 @@ public:
     
     void set_value(std::unique_ptr<Expression> value) { value_ = std::move(value); }
     Expression* get_value() const { return value_.get(); }
-    
+    std::unique_ptr<Expression> release_value() { return std::move(value_); }
+
     std::string to_string() const override {
         if (value_) return "return " + value_->to_string() + ";";
         return "return;";
     }
-    
+
 private:
     std::unique_ptr<Expression> value_;
 };
@@ -668,15 +737,17 @@ public:
     const std::string& get_name() const { return name_; }
     const std::string& get_type_name() const { return type_name_; }
     Statement* get_body() const { return body_.get(); }
+    std::unique_ptr<Statement> release_body() { return std::move(body_); }
+    void set_body(std::unique_ptr<Statement> body) { body_ = std::move(body); }
     const SourceSpan& get_span() const { return span_; }
-    
+
     std::string to_string() const override {
         if (name_.empty()) return "catch " + body_->to_string();
         return "catch " + name_ + ": " + type_name_ + " " + body_->to_string();
     }
-    
+
     bool is_catch_all() const { return name_.empty(); }
-    
+
 private:
     std::string name_;
     std::string type_name_;
@@ -691,12 +762,14 @@ public:
     
     void set_body(std::unique_ptr<Statement> body) { body_ = std::move(body); }
     Statement* get_body() const { return body_.get(); }
-    
+    std::unique_ptr<Statement> release_body() { return std::move(body_); }
+
     void add_catch(std::unique_ptr<CatchClause> clause) {
         catches_.push_back(std::move(clause));
     }
     const std::vector<std::unique_ptr<CatchClause>>& get_catches() const { return catches_; }
-    
+    auto& mutable_catches() { return catches_; }
+
     std::string to_string() const override {
         std::string result = "try " + body_->to_string();
         for (const auto& c : catches_) {
@@ -715,13 +788,33 @@ class ThrowStmt : public Statement {
 public:
     ThrowStmt(std::unique_ptr<Expression> value, const SourceSpan& span)
         : Statement(Kind::Throw, span), value_(std::move(value)) {}
-    
+
     Expression* get_value() const { return value_.get(); }
-    
+    std::unique_ptr<Expression> release_value() { return std::move(value_); }
+    void set_value(std::unique_ptr<Expression> v) { value_ = std::move(v); }
+
     std::string to_string() const override {
         return "throw " + value_->to_string() + ";";
     }
-    
+
+private:
+    std::unique_ptr<Expression> value_;
+};
+
+// Raise statement (compile-time error effect)
+class RaiseStmt : public Statement {
+public:
+    RaiseStmt(std::unique_ptr<Expression> value, const SourceSpan& span)
+        : Statement(Kind::Raise, span), value_(std::move(value)) {}
+
+    Expression* get_value() const { return value_.get(); }
+    std::unique_ptr<Expression> release_value() { return std::move(value_); }
+    void set_value(std::unique_ptr<Expression> v) { value_ = std::move(v); }
+
+    std::string to_string() const override {
+        return "raise " + value_->to_string() + ";";
+    }
+
 private:
     std::unique_ptr<Expression> value_;
 };
@@ -756,6 +849,7 @@ public:
     }
     
     const auto& get_statements() const { return statements_; }
+    auto& mutable_statements() { return statements_; }
     
     std::string to_string() const override {
         std::string result = "{\n";
@@ -793,14 +887,17 @@ public:
     void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
     void set_is_serial(bool is_serial) { is_serial_ = is_serial; }
     void set_is_async(bool is_async) { is_async_ = is_async; }
-    
+    void set_noraise(bool noraise) { noraise_ = noraise; }
+
     const std::string& get_name() const { return name_; }
     const auto& get_type_params() const { return type_params_; }
     const auto& get_params() const { return params_; }
     const std::string& get_return_type() const { return return_type_; }
     ASTNode* get_body() const { return body_.get(); }
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
     bool is_serial() const { return is_serial_; }
     bool is_async() const { return is_async_; }
+    bool is_noraise() const { return noraise_; }
     bool has_type_params() const { return !type_params_.empty(); }
     
     std::string to_string() const override {
@@ -835,6 +932,7 @@ private:
     std::unique_ptr<ASTNode> body_;
     bool is_serial_ = false;
     bool is_async_ = false;
+    bool noraise_ = false;
 };
 
 // Publish statement (event system)
@@ -850,7 +948,8 @@ public:
     
     const std::string& get_event_name() const { return event_name_; }
     const auto& get_arguments() const { return arguments_; }
-    
+    auto& mutable_arguments() { return arguments_; }
+
     std::string to_string() const override {
         std::string result = "publish " + event_name_ + "(";
         for (size_t i = 0; i < arguments_.size(); i++) {
@@ -879,11 +978,12 @@ public:
     
     const std::string& get_event_name() const { return event_name_; }
     FunctionStmt* get_handler() const { return handler_.get(); }
-    
+    std::unique_ptr<FunctionStmt> release_handler() { return std::move(handler_); }
+
     std::string to_string() const override {
         return "subscribe " + event_name_ + " { ... }";
     }
-    
+
 private:
     std::string event_name_;
     std::unique_ptr<FunctionStmt> handler_;
@@ -904,7 +1004,8 @@ public:
     const std::string& get_name() const { return name_; }
     const auto& get_params() const { return params_; }
     ASTNode* get_body() const { return body_.get(); }
-    
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+
     std::string to_string() const override {
         std::string result = "serial process " + name_ + "(";
         for (size_t i = 0; i < params_.size(); i++) {
@@ -914,7 +1015,7 @@ public:
         result += ") { ... }";
         return result;
     }
-    
+
 private:
     std::string name_;
     std::vector<std::pair<std::string, std::string>> params_;
@@ -1268,6 +1369,7 @@ public:
     }
     
     const auto& get_declarations() const { return declarations_; }
+    auto& mutable_declarations() { return declarations_; }
     
     std::string to_string() const override {
         std::string result;

@@ -91,6 +91,8 @@ private:
     void compilePublishStmt(const ast::PublishStmt& stmt);
     void compileSubscribeStmt(const ast::SubscribeStmt& stmt);
     void compileStructStmt(const ast::StructStmt& stmt);
+    void compileTryStmt(const ast::TryStmt& stmt);
+    void compileThrowStmt(const ast::ThrowStmt& stmt);
 
     // 表达式编译
     void compileLiteralExpr(const ast::LiteralExpr& expr);

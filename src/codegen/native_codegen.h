@@ -165,7 +165,7 @@ private:
     // ============================================================================
     
     // Generate function prologue
-    void emit_prologue(int local_count);
+    void emit_prologue(int arity, int local_count);
     
     // Generate function epilogue
     void emit_epilogue();

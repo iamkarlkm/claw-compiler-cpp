@@ -151,8 +151,16 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
     // [NEW] 执行寄存器分配
     auto reg_allocation = allocate_registers_for_function(func);
 
-    // 估计代码大小
-    size_t code_size = estimate_code_size(func);
+    // [NEW] 运行逃逸分析，为栈分配优化提供信息
+    EscapeAnalyzer escape_analyzer;
+    escape_results_ = escape_analyzer.analyze_function(func);
+
+    // 重置JIT编译时的分配跟踪
+    local_alloc_idx_.clear();
+    sim_alloc_stack_.clear();
+
+    // 估计代码大小 (增加预留以容纳栈分配产生的额外代码)
+    size_t code_size = estimate_code_size(func) + 256;
 
     // 分配代码缓存
     void* code_ptr = code_cache_->allocate(code_size);
@@ -197,15 +205,20 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::POP:
                 emit_stack_op(current, inst.op);
                 if (!type_stack_.empty()) type_stack_.pop_back();
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 break;
             case bytecode::OpCode::DUP:
                 emit_stack_op(current, inst.op);
                 if (!type_stack_.empty()) type_stack_.push_back(type_stack_.back());
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.push_back(sim_alloc_stack_.back());
                 break;
             case bytecode::OpCode::SWAP:
                 emit_stack_op(current, inst.op);
                 if (type_stack_.size() >= 2) {
                     std::swap(type_stack_[type_stack_.size() - 1], type_stack_[type_stack_.size() - 2]);
+                }
+                if (sim_alloc_stack_.size() >= 2) {
+                    std::swap(sim_alloc_stack_[sim_alloc_stack_.size() - 1], sim_alloc_stack_[sim_alloc_stack_.size() - 2]);
                 }
                 break;
 
@@ -253,6 +266,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     current = &code[11];
                 }
                 type_stack_.push_back(last_pushed_type_);
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
 
@@ -292,6 +306,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     type_stack_.push_back(bytecode::ValueType::I64);
                     last_pushed_type_ = bytecode::ValueType::I64;
                 }
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
 
@@ -308,6 +327,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::F64);
                 last_pushed_type_ = bytecode::ValueType::F64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 整数比较 (类型感知)
@@ -346,6 +370,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
 
@@ -363,6 +392,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 逻辑/位运算
@@ -375,6 +409,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::NOT:
             case bytecode::OpCode::BAND:
@@ -385,6 +424,8 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 位移运算
@@ -398,6 +439,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 类型转换
@@ -406,6 +452,8 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::F64);
                 last_pushed_type_ = bytecode::ValueType::F64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::F2I:
             case bytecode::OpCode::I2B:
@@ -414,6 +462,8 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::I2S:
             case bytecode::OpCode::F2S:
@@ -421,18 +471,24 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::STRING);
                 last_pushed_type_ = bytecode::ValueType::STRING;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::S2I:
                 emit_type_conversion(current, inst.op);
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::S2F:
                 emit_type_conversion(current, inst.op);
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::F64);
                 last_pushed_type_ = bytecode::ValueType::F64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 局部变量
@@ -442,6 +498,10 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     last_pushed_type_ = local_types_[inst.operand];
                 }
                 type_stack_.push_back(last_pushed_type_);
+                {
+                    auto it = local_alloc_idx_.find(inst.operand);
+                    sim_alloc_stack_.push_back(it != local_alloc_idx_.end() ? it->second : std::nullopt);
+                }
                 break;
             case bytecode::OpCode::STORE_LOCAL:
                 emit_store_local(current, static_cast<size_t>(inst.operand));
@@ -451,16 +511,32 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                     type_stack_.pop_back();
                 }
+                {
+                    std::optional<size_t> alloc_idx;
+                    if (!sim_alloc_stack_.empty()) {
+                        alloc_idx = sim_alloc_stack_.back();
+                        sim_alloc_stack_.pop_back();
+                    }
+                    local_alloc_idx_[inst.operand] = alloc_idx;
+                }
                 break;
             case bytecode::OpCode::LOAD_LOCAL_0:
                 emit_load_local(current, 0);
                 if (!local_types_.empty()) last_pushed_type_ = local_types_[0];
                 type_stack_.push_back(last_pushed_type_);
+                {
+                    auto it = local_alloc_idx_.find(0);
+                    sim_alloc_stack_.push_back(it != local_alloc_idx_.end() ? it->second : std::nullopt);
+                }
                 break;
             case bytecode::OpCode::LOAD_LOCAL_1:
                 emit_load_local(current, 1);
                 if (local_types_.size() > 1) last_pushed_type_ = local_types_[1];
                 type_stack_.push_back(last_pushed_type_);
+                {
+                    auto it = local_alloc_idx_.find(1);
+                    sim_alloc_stack_.push_back(it != local_alloc_idx_.end() ? it->second : std::nullopt);
+                }
                 break;
 
             // 跳转 - 正确处理前向/后向跳转
@@ -497,6 +573,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                     current = &code[10];
                     if (!type_stack_.empty()) type_stack_.pop_back();
+                    if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 } else if (inst.op == bytecode::OpCode::JMP_IF_NOT) {
                     code[0] = 0x58; // pop rax
                     code[1] = 0x48; code[2] = 0x85; code[3] = 0xc0; // test rax, rax
@@ -511,6 +588,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                     current = &code[10];
                     if (!type_stack_.empty()) type_stack_.pop_back();
+                    if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 } else {
                     code[0] = 0x59; // pop rcx
                     code[1] = 0x48; code[2] = 0xff; code[3] = 0xc9; // dec rcx
@@ -534,6 +612,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 emit_array_op(current, inst.op);
                 type_stack_.push_back(bytecode::ValueType::ARRAY);
                 last_pushed_type_ = bytecode::ValueType::ARRAY;
+                sim_alloc_stack_.push_back(i);
                 break;
             case bytecode::OpCode::LOAD_INDEX: {
                 // Determine object type (object is below index on stack)
@@ -574,6 +653,10 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 2);
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
             case bytecode::OpCode::STORE_INDEX:
@@ -583,12 +666,19 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     type_stack_.pop_back();
                     type_stack_.pop_back();
                 }
+                if (sim_alloc_stack_.size() >= 3) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
                 break;
             case bytecode::OpCode::ARRAY_LEN:
                 emit_array_op(current, inst.op);
                 if (!type_stack_.empty()) type_stack_.pop_back();
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::ARRAY_PUSH:
                 emit_array_op(current, inst.op);
@@ -596,6 +686,11 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     type_stack_.pop_back();
                     type_stack_.pop_back();
                 }
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.pop_back();
+                    sim_alloc_stack_.pop_back();
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 返回
@@ -612,6 +707,9 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 size_t pop_count = arg_count + 1;
                 if (type_stack_.size() >= pop_count) {
                     type_stack_.resize(type_stack_.size() - pop_count);
+                }
+                if (sim_alloc_stack_.size() >= pop_count) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - pop_count);
                 }
                 // Infer return type from callee if previous instruction was LOAD_GLOBAL
                 bytecode::ValueType ret_type = bytecode::ValueType::I64;
@@ -631,6 +729,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 }
                 type_stack_.push_back(ret_type);
                 last_pushed_type_ = ret_type;
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
             case bytecode::OpCode::CALL_EXT: {
@@ -640,8 +739,12 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (type_stack_.size() >= ext_arg_count) {
                     type_stack_.resize(type_stack_.size() - ext_arg_count);
                 }
+                if (sim_alloc_stack_.size() >= ext_arg_count) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - ext_arg_count);
+                }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
 
@@ -658,6 +761,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                 }
                 type_stack_.push_back(last_pushed_type_);
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::STORE_GLOBAL:
                 emit_store_global(current, static_cast<uint32_t>(inst.operand));
@@ -670,6 +774,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                     type_stack_.pop_back();
                 }
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 break;
             case bytecode::OpCode::DEFINE_GLOBAL:
                 emit_define_global(current, static_cast<uint32_t>(inst.operand));
@@ -682,6 +787,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                     }
                     type_stack_.pop_back();
                 }
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 break;
 
             // 张量操作
@@ -693,40 +799,130 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 emit_tensor_op(current, inst.op);
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                sim_alloc_stack_.clear();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // 闭包操作
             case bytecode::OpCode::CLOSURE:
                 // 闭包创建需要运行时支持
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             case bytecode::OpCode::CLOSE_UPVALUE:
+                emit_upvalue_op(current, inst.op);
+                break;
             case bytecode::OpCode::GET_UPVALUE:
                 emit_upvalue_op(current, inst.op);
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
+            case bytecode::OpCode::SET_UPVALUE:
+                emit_upvalue_op(current, inst.op);
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
                 break;
 
             // 元组操作
             case bytecode::OpCode::CREATE_TUPLE: {
-                emit_tuple_op(current, inst.op);
+                bool stack_alloc = false;
+                auto it = escape_results_.find(i);
+                if (it != escape_results_.end() && !it->second.escapes) {
+                    stack_alloc = true;
+                }
+                if (stack_alloc) {
+                    // 内联栈分配: sub rsp, 32; 构造两个 Value; push rsp
+                    uint8_t* code = static_cast<uint8_t*>(current);
+                    code[0] = 0x59; // pop rcx (elem0)
+                    code[1] = 0x58; // pop rax (elem1)
+                    code[2] = 0x48; code[3] = 0x83; code[4] = 0xec; code[5] = 0x20; // sub rsp, 32
+                    code[6] = 0x48; code[7] = 0x89; code[8] = 0x44; code[9] = 0x24; code[10] = 0x10; // mov [rsp+16], rax
+                    code[11] = 0xc6; code[12] = 0x44; code[13] = 0x24; code[14] = 0x18; code[15] = 0x02; // mov byte [rsp+24], INT
+                    code[16] = 0x48; code[17] = 0x89; code[18] = 0x0c; code[19] = 0x24; // mov [rsp], rcx
+                    code[20] = 0xc6; code[21] = 0x44; code[22] = 0x24; code[23] = 0x08; code[24] = 0x02; // mov byte [rsp+8], INT
+                    code[25] = 0x54; // push rsp
+                    current = &code[26];
+                } else {
+                    emit_tuple_op(current, inst.op);
+                }
                 if (type_stack_.size() >= 2) {
                     type_stack_.resize(type_stack_.size() - 2);
                 }
                 type_stack_.push_back(bytecode::ValueType::TUPLE);
                 last_pushed_type_ = bytecode::ValueType::TUPLE;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 2);
+                }
+                sim_alloc_stack_.push_back(i);
                 break;
             }
             case bytecode::OpCode::LOAD_ELEM: {
-                emit_tuple_op(current, inst.op);
+                bool is_stack_tuple = false;
+                if (sim_alloc_stack_.size() >= 2) {
+                    auto tuple_alloc = sim_alloc_stack_[sim_alloc_stack_.size() - 2];
+                    if (tuple_alloc.has_value()) {
+                        auto er_it = escape_results_.find(tuple_alloc.value());
+                        if (er_it != escape_results_.end() && !er_it->second.escapes) {
+                            is_stack_tuple = true;
+                        }
+                    }
+                }
+                if (is_stack_tuple) {
+                    // 内联访问栈分配元组
+                    uint8_t* code = static_cast<uint8_t*>(current);
+                    code[0] = 0x5e; // pop rsi (index)
+                    code[1] = 0x5f; // pop rdi (tuple_ptr)
+                    code[2] = 0x48; code[3] = 0x85; code[4] = 0xf6; // test rsi, rsi
+                    code[5] = 0x74; code[6] = 0x07; // je +7
+                    code[7] = 0x48; code[8] = 0x8b; code[9] = 0x47; code[10] = 0x10; // mov rax, [rdi+16]
+                    code[11] = 0xeb; code[12] = 0x03; // jmp +3
+                    code[13] = 0x48; code[14] = 0x8b; code[15] = 0x07; // mov rax, [rdi]
+                    code[16] = 0x50; // push rax
+                    current = &code[17];
+                } else {
+                    emit_tuple_op(current, inst.op);
+                }
                 if (type_stack_.size() >= 2) {
                     type_stack_.resize(type_stack_.size() - 2);
                 }
                 type_stack_.push_back(bytecode::ValueType::I64);
                 last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 2);
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
             case bytecode::OpCode::STORE_ELEM: {
-                emit_tuple_op(current, inst.op);
+                bool is_stack_tuple = false;
+                if (sim_alloc_stack_.size() >= 3) {
+                    auto tuple_alloc = sim_alloc_stack_[sim_alloc_stack_.size() - 3];
+                    if (tuple_alloc.has_value()) {
+                        auto er_it = escape_results_.find(tuple_alloc.value());
+                        if (er_it != escape_results_.end() && !er_it->second.escapes) {
+                            is_stack_tuple = true;
+                        }
+                    }
+                }
+                if (is_stack_tuple) {
+                    // 内联修改栈分配元组
+                    uint8_t* code = static_cast<uint8_t*>(current);
+                    code[0] = 0x5a; // pop rdx (value)
+                    code[1] = 0x5e; // pop rsi (index)
+                    code[2] = 0x5f; // pop rdi (tuple_ptr)
+                    code[3] = 0x48; code[4] = 0x85; code[5] = 0xf6; // test rsi, rsi
+                    code[6] = 0x74; code[7] = 0x0a; // je +10
+                    code[8] = 0x48; code[9] = 0x89; code[10] = 0x57; code[11] = 0x10; // mov [rdi+16], rdx
+                    code[12] = 0xc6; code[13] = 0x47; code[14] = 0x18; code[15] = 0x02; // mov byte [rdi+24], INT
+                    code[16] = 0xeb; code[17] = 0x07; // jmp +7
+                    code[18] = 0x48; code[19] = 0x89; code[20] = 0x17; // mov [rdi], rdx
+                    code[21] = 0xc6; code[22] = 0x47; code[23] = 0x08; code[24] = 0x02; // mov byte [rdi+8], INT
+                    current = &code[25];
+                } else {
+                    emit_tuple_op(current, inst.op);
+                }
                 if (type_stack_.size() >= 3) {
                     type_stack_.resize(type_stack_.size() - 3);
+                }
+                if (sim_alloc_stack_.size() >= 3) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 3);
                 }
                 break;
             }
@@ -735,16 +931,28 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::PRINT:
             case bytecode::OpCode::PRINTLN:
             case bytecode::OpCode::PANIC:
+                emit_system_call(current, inst.op);
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                break;
             case bytecode::OpCode::HALT:
+                emit_system_call(current, inst.op);
+                break;
             case bytecode::OpCode::INPUT:
+                emit_system_call(current, inst.op);
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
             case bytecode::OpCode::TYPE_OF:
                 emit_system_call(current, inst.op);
+                if (!sim_alloc_stack_.empty()) sim_alloc_stack_.pop_back();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             // EXT 标准库函数调用 - 2026-04-26 新增
             case bytecode::OpCode::EXT:
                 // inst.args[0] 包含标准库函数 opcode
                 emit_ext_stdlib_call(current, inst);
+                sim_alloc_stack_.clear();
+                sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
             default:
@@ -3103,6 +3311,10 @@ void RuntimeFunctionRegistry::register_builtin_functions() {
     register_function("array_len", reinterpret_cast<void*>(&runtime::array_len));
     register_function("array_get", reinterpret_cast<void*>(&runtime::array_get));
     register_function("array_set", reinterpret_cast<void*>(&runtime::array_set));
+
+    // 元组操作
+    register_function("tuple_get", reinterpret_cast<void*>(&runtime::tuple_get));
+    register_function("tuple_set", reinterpret_cast<void*>(&runtime::tuple_set));
     
     // 字符串操作
     register_function("string_concat", reinterpret_cast<void*>(&runtime::string_concat));

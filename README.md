@@ -42,33 +42,33 @@ claw_free  → pool_release
     │
     ▼
 ┌─────────┐
-│  Lexer   │  token.h + lexer.h (1,081 行)
+│  Lexer   │  token.h + lexer.h
 │  词法分析 │  关键字/标识符/字面量/运算符
 └────┬─────┘
      │ Token 流
      ▼
 ┌─────────┐
-│  Parser  │  parser.h (1,988 行)
+│  Parser  │  parser.h
 │  语法分析 │  递归下降，生成 AST
 └────┬─────┘
      │ AST
      ▼
 ┌─────────────────────────────────┐
-│          AST (ast.h, 910 行)      │
-│  Expression: Literal/Id/Binary/  │
-│    Unary/Call/Index/Array/Range  │
-│  Statement: Let/If/For/While/    │
-│    Return/Block/Function/        │
-│    Try/Catch/Throw (进行中)       │
-└──┬──────────────────────────┬───┘
-   │                          │
-   ▼                          ▼
-┌──────────┐          ┌──────────┐
-│解释器执行  │          │ C 代码生成 │
-│interpreter│          │c_codegen  │
-│(1,500 行) │          │(1,073 行) │
-│--run 模式 │          │-C 模式    │
-└──────────┘          └──────────┘
+│  Type Checker + Semantic        │
+│  类型检查 + 语义分析              │
+└────┬────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────┐
+│  IR Generator                   │
+│  AST → SSA-based IR             │
+└────┬────────────────────────────┘
+     │
+     ├───→ C Codegen (-C)
+     ├───→ Native AOT (--aot) → x86-64 Mach-O 可执行文件
+     ├───→ LLVM IR (-c)
+     ├───→ WASM (后端开发中)
+     └───→ Bytecode Compiler ──→ ClawVM / JIT
 ```
 
 ---
@@ -79,8 +79,10 @@ claw_free  → pool_release
 
 ```bash
 cd claw-compiler
-make claw          # 需要 clang++ + C++17
+make all          # 编译 claw + claw-lsp + claw-repl
 ```
+
+需要：clang++ (C++17)、LLVM 19 (macOS: `/usr/local/Cellar/llvm/19.1.4`)
 
 ### 使用
 
@@ -91,6 +93,19 @@ make claw          # 需要 clang++ + C++17
 # C 代码生成
 ./claw -C program.claw > program.c
 gcc program.c -o program
+
+# AOT 编译为原生可执行文件 (x86-64)
+./claw --aot -o myapp program.claw
+./myapp
+
+# 字节码模式
+./claw --mode=bytecode program.claw
+
+# JIT 模式
+./claw --mode=jit program.claw
+
+# REPL 交互式环境
+./claw-repl
 ```
 
 ### 示例
@@ -120,49 +135,52 @@ fn main() {
 - **表达式**：算术、比较、逻辑、位运算
 - **数据类型**：i8-i64、u8-u64、f32/f64、bool、string、数组 `T[N]`
 
-### For 循环语义
-```claw
-for i in 5      // 1..5，Claw 1-based range
-for i in 1..5   // 显式范围
-for i in arr    // 遍历数组
-```
+### 执行引擎 (5 种模式)
+| 模式 | 命令 | 说明 |
+|------|------|------|
+| AST 解释器 | `--run` | 树遍历解释器 |
+| C 代码生成 | `-C` | 生成带生命周期标注的 C 代码 |
+| LLVM IR | `-c` | 生成 LLVM IR |
+| AOT 编译 | `--aot` | AST → Bytecode → x86-64 → Mach-O 可执行文件 |
+| Bytecode VM | `--mode=bytecode` | ClawVM 栈式虚拟机 |
+| JIT | `--mode=jit` | Method JIT + Optimizing JIT + Tracing JIT |
 
-### 递归支持
-- 解释器通过 `variable_stack` + `scoped_set/scoped_get` 实现帧隔离
-- `return_value` / `return_flag` 在函数调用时 save/restore
-- 验证通过：fib(15)=610, factorial(10)=3628800
+### AOT 编译
+- AST → Bytecode → x86-64 机器码 → Mach-O → 原生可执行文件
+- 支持算术、比较、逻辑运算、条件分支、循环、函数调用、递归
+- 自动链接 AOT 运行时 stub (print/println)
+- 智能构建缓存 (FNV-1a 哈希，重复构建 ~0.5ms)
+- 自动探测最快系统链接器 (zld/mold/lld)
 
-### C 代码生成 — 统一生命周期管理
-生成的 C 代码带有完整的 scope 标注：
+### JIT 编译器
+- **Method JIT**: 方法级快速编译
+- **Optimizing JIT**: 常量折叠、DCE、强度消减、函数内联、循环优化
+- **Tracing JIT**: 热点轨迹记录与编译
+- **多目标支持**: x86-64 / ARM64 / RISC-V64
+- **线性扫描寄存器分配器**
 
-```c
-int64_t test_scope() {
-    // [claw] scope-enter: fn_body (depth=1)
-    int64_t x = 0;
-    // [claw] scope-enter: block_1 (depth=2)
-    char* s = "hello"; // [claw] alloc: s (string)
-    if ((x == 1)) {
-        // [claw] pre-return cleanup: block_1
-        // [claw] skip-free: s (is return value)
-        return s;
-    }
-    // [claw] scope-free: block_1 (1 heap var(s))
-    claw_free((void*)s); // [claw] free: s
-    // [claw] scope-exit: block_1
-    return 0;
-} // [claw] scope-exit: fn_body
-```
+### 包管理器
+- `Claw.toml` 清单解析 (TOML-like 语法)
+- SemVer 版本解析与约束匹配 (`^`, `~`, `>=`, 范围)
+- 依赖解析器 (回溯算法 + 约束满足)
+- 锁定文件 (`Claw.lock`) 与拓扑排序
+- 本地缓存管理 (LRU)
 
----
+### 开发工具
+- **LSP 服务器** (`claw-lsp`): 补全、跳转、重命名、语义高亮
+- **REPL** (`claw-repl`): 多行输入、变量存储、历史记录
+- **调试器** (`claw-debugger`): 断点、单步、调用栈、变量查看
+- **性能测量框架**: 11 种指标、5 种输出格式 (text/csv/json/markdown/html)
 
-## 进行中
+### 张量优化
+- **TensorIR**: 张量中间表示 + 调度原语 (tile/fuse/split/reorder/parallel/unroll/vectorize)
+- **Auto-Scheduler**: 随机搜索 + 进化算法
+- **CUDA 代码生成器**: 生成可编译的 CUDA C++ 代码
 
-- **try/catch/throw 异常处理**
-  - ✅ Token 枚举 + Lexer 关键字
-  - ✅ AST 节点 (TryStmt / CatchClause / ThrowStmt)
-  - 🔲 Parser 规则
-  - 🔲 Interpreter 异常栈展开
-  - 🔲 C Codegen setjmp/longjmp
+### 属性与宏系统
+- Rust 风格属性: `#[inline]`, `#[target(arch = "cuda")]`
+- 17 种内置属性
+- 对象式/函数式宏 + 递归展开
 
 ---
 
@@ -171,64 +189,85 @@ int64_t test_scope() {
 ```
 claw-compiler/
 ├── src/
-│   ├── main.cpp                    # 入口：--run 解释器 / -C 代码生成
-│   ├── lexer/
-│   │   ├── token.h                 # Token 枚举 + 关键字映射
-│   │   └── lexer.h                 # 词法分析器
-│   ├── ast/
-│   │   └── ast.h                   # AST 节点定义
-│   ├── parser/
-│   │   └── parser.h                # 递归下降解析器
-│   ├── interpreter/
-│   │   └── interpreter.h           # 树遍历解释器
-│   ├── codegen/
-│   │   └── c_codegen.h             # C 代码生成器
-│   ├── type/                       # 类型系统（开发中）
-│   ├── semantic/                   # 语义分析（开发中）
-│   └── tensorir/                   # 张量 IR（规划中）
-├── Makefile
+│   ├── main.cpp                    # CLI 入口 (--run / -C / --aot / --mode=...)
+│   ├── lexer/                      # 词法分析
+│   ├── parser/                     # 语法分析
+│   ├── ast/                        # AST 节点
+│   ├── type/                       # 类型系统 + 张量推断
+│   ├── semantic/                   # 语义分析器
+│   ├── ir/                         # SSA-based IR + 优化器
+│   ├── bytecode/                   # 字节码编译器 + 指令集
+│   ├── vm/                         # ClawVM 栈式虚拟机
+│   ├── jit/                        # JIT 编译器 + 运行时
+│   ├── codegen/                    # AOT / Native / Mach-O / Linker
+│   ├── emitter/                    # x86-64 / ARM64 / RISC-V / WASM 发射器
+│   ├── pipeline/                   # 执行引擎 + 性能分析
+│   ├── package/                    # 包管理器 (manifest/resolve/lock)
+│   ├── lsp/                        # LSP 服务器
+│   ├── repl/                       # REPL
+│   ├── debugger/                   # 调试器
+│   ├── benchmark/                  # 性能测量框架
+│   ├── tensorir/                   # TensorIR
+│   ├── auto_scheduler/             # 自动调度系统
+│   ├── ml/                         # ML 成本模型
+│   ├── backend/                    # CUDA 代码生成
+│   ├── frontend/                   # 属性/宏系统
+│   ├── json/                       # JSON 序列化
+│   ├── stdlib/                     # 标准库集成
+│   └── common/                     # 公共模块
+├── tests/                          # 单元测试
+├── Makefile                        # 主构建系统 (无 CMake)
 ├── claw-memory-model.md            # 内存所有权模型规范
-└── dev_status.md                   # 开发日志
+└── dev_status.md                   # 详细开发日志
 ```
 
-### 核心代码量
+---
 
-| 模块 | 文件 | 行数 |
-|------|------|------|
-| Lexer | token.h + lexer.h | 1,081 |
-| AST | ast.h | 910 |
-| Parser | parser.h | 1,988 |
-| Interpreter | interpreter.h | 1,500 |
-| C Codegen | c_codegen.h | 1,073 |
-| Main | main.cpp | 246 |
-| **总计** | | **6,798** |
+## 测试
+
+```bash
+make test              # 运行所有可用测试
+make test-benchmark    # 性能测量框架 (20 测试)
+make test-cuda         # CUDA 代码生成 (17 测试)
+make test-package      # 包管理器 (24 测试)
+make test-attribute    # 属性/宏系统 (17 测试)
+make test-docgen       # 文档生成器 (16 测试)
+make test-ir-passes    # IR 优化遍
+make test-lexer        # 词法分析器 (29 测试)
+make test-aot          # AOT 端到端测试 (17 测试)
+```
 
 ---
 
 ## 开发计划
 
-### Phase 1: 核心前端 ✅
-- [x] Lexer (词法分析器)
-- [x] Parser (递归下降)
-- [x] AST (完整节点体系)
+### 已完成
+- [x] Phase 1: 核心前端 (Lexer + Parser + AST)
+- [x] Phase 2: 执行引擎 (解释器 + C 代码生成)
+- [x] Phase 3: 类型系统 + 语义分析
+- [x] Phase 4: 编译流水线集成 (IR + LLVM + 优化器)
+- [x] Phase 8: ClawVM + 字节码 + IR/Bytecode 桥接
+- [x] Phase 9: JIT 编译器 (Method + Optimizing + Tracing)
+- [x] Phase 10: TensorIR + 自动调度
+- [x] Phase 12: LSP 服务器
+- [x] Phase 13: 编译器核心完善
+- [x] Phase 14: RISC-V JIT
+- [x] Phase 15: 调试器
+- [x] Phase 16: 高级优化框架
+- [x] Phase 17: ML 特征提取
+- [x] Phase 18: JIT 基础设施 (TypeProfiler/InlineCache/HotSpot)
+- [x] Phase 19-21: Method JIT / 迭代器 / Tracing JIT
+- [x] Phase 22: Native Codegen
+- [x] Phase 23: WebAssembly 后端 (核心完成)
+- [x] Phase 24: CUDA 代码生成器
+- [x] Phase 26: 属性与宏系统
+- [x] Phase 27: 文档生成器
 
-### Phase 2: 执行引擎 🔄
-- [x] 树遍历解释器 (--run)
-- [x] C 代码生成 (-C)
-- [x] 统一 scope 生命周期管理
-- [x] 递归函数调用
-- [ ] try/catch/throw 异常处理
-
-### Phase 3: 类型系统 📋
-- [ ] 类型检查器
-- [ ] 泛型支持
+### 进行中 / 待完善
+- [ ] WebAssembly 后端完整编译链
+- [ ] 完整异常处理 (try/catch/throw) — 前端已完成，后端待完善
+- [ ] 泛型类型完整后端支持
 - [ ] 结构体 / 枚举
-
-### Phase 4: 优化与后端 📋
-- [ ] IR 中间表示
-- [ ] 常量折叠 / 死代码消除
-- [ ] LLVM 后端（可选）
-- [ ] 对象池分配器
 
 ---
 

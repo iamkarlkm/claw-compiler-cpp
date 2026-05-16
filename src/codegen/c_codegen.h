@@ -12,6 +12,7 @@
 #include <set>
 #include <stack>
 #include "ast/ast.h"
+#include "ast/pattern.h"
 
 namespace claw {
 namespace codegen {
@@ -858,35 +859,67 @@ private:
         return true;
     }
     
+    std::string generate_pattern(ast::Pattern* pat) {
+        if (!pat) return "/* null pattern */";
+        switch (pat->get_kind()) {
+            case ast::Pattern::Kind::Wildcard:
+                return "/* wildcard */";
+            case ast::Pattern::Kind::Variable: {
+                auto* vp = static_cast<ast::VariablePattern*>(pat);
+                return vp->get_name();
+            }
+            case ast::Pattern::Kind::Literal: {
+                auto* lp = static_cast<ast::LiteralPattern*>(pat);
+                return std::visit([](auto&& v) -> std::string {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, int64_t>) return std::to_string(v);
+                    else if constexpr (std::is_same_v<T, double>) return std::to_string(v);
+                    else if constexpr (std::is_same_v<T, std::string>) return "\"" + v + "\"";
+                    else if constexpr (std::is_same_v<T, bool>) return v ? "true" : "false";
+                    else if constexpr (std::is_same_v<T, char>) return "'" + std::string(1, v) + "'";
+                    return "null";
+                }, lp->get_value());
+            }
+            default:
+                return "/* complex pattern */";
+        }
+    }
+
     bool generate_match(ast::MatchStmt* match) {
         if (!match) return false;
-        
+
         std::string subject = generate_expression(match->get_expr());
-        
+
         const auto& patterns = match->get_patterns();
         const auto& bodies = match->get_bodies();
-        
+
         if (patterns.empty()) return true;
-        
+
         code_ << "    // Match statement\n";
-        
+
         // Simple implementation: if-else chain
         for (size_t i = 0; i < patterns.size(); i++) {
-            std::string pattern = generate_expression(patterns[i].get());
+            auto pat_kind = patterns[i]->get_kind();
             std::string prefix = (i == 0) ? "if" : "else if";
-            
-            code_ << "    " << prefix << " (" << subject << " == " << pattern << ") {\n";
-            
+
+            if (pat_kind == ast::Pattern::Kind::Wildcard) {
+                code_ << "    " << prefix << " (1) { // wildcard\n";
+            } else if (pat_kind == ast::Pattern::Kind::Variable) {
+                auto* vp = static_cast<ast::VariablePattern*>(patterns[i].get());
+                code_ << "    " << prefix << " (1) { // bind " << vp->get_name() << "\n";
+                code_ << "        auto " << vp->get_name() << " = " << subject << ";\n";
+            } else {
+                std::string pattern = generate_pattern(patterns[i].get());
+                code_ << "    " << prefix << " (" << subject << " == " << pattern << ") {\n";
+            }
+
             if (i < bodies.size() && bodies[i]) {
                 generate_block_body(bodies[i].get());
             }
-            
+
             code_ << "    }\n";
         }
-        
-        // Handle default case (_)
-        // (Simplified - would need more complex handling for real implementation)
-        
+
         return true;
     }
     

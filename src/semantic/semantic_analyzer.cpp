@@ -468,14 +468,10 @@ void SemanticAnalyzer::visit_match(ast::MatchStmt* match) {
     if (match->get_expr()) {
         visit_expression(match->get_expr());
     }
-    
-    // Analyze each arm
-    const auto& patterns = match->get_patterns();
+
+    // Analyze each arm (patterns are no longer expressions, skip pattern visitor)
     const auto& bodies = match->get_bodies();
-    for (size_t i = 0; i < patterns.size() && i < bodies.size(); i++) {
-        if (patterns[i]) {
-            visit_expression(patterns[i].get());
-        }
+    for (size_t i = 0; i < bodies.size(); i++) {
         if (bodies[i]) {
             visit_statement(static_cast<ast::Statement*>(bodies[i].get()));
         }

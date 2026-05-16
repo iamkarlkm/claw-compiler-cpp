@@ -66,7 +66,9 @@ enum class TokenType {
     Kw_try,
     Kw_catch,
     Kw_throw,
-    
+    Kw_raise,
+    Kw_noraise,
+
     // Built-in types
     Type_u8, Type_u16, Type_u32, Type_u64, Type_usize,
     Type_i8, Type_i16, Type_i32, Type_i64, Type_isize,
@@ -97,6 +99,7 @@ enum class TokenType {
     Op_or,            // ||
     Op_arrow,         // ->
     Op_fat_arrow,     // =>
+    Op_at,            // @
     Op_eq_assign,     // =
     Op_plus_eq,       // +=
     Op_minus_eq,      // -=
@@ -331,6 +334,8 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::Kw_const: return "const";
         case TokenType::Kw_self: return "self";
         case TokenType::Kw_super: return "super";
+        case TokenType::Kw_raise: return "raise";
+        case TokenType::Kw_noraise: return "noraise";
 
         default: return "unknown";
     }
@@ -338,7 +343,7 @@ inline const char* token_type_to_string(TokenType type) {
 
 // Implementation of Token helper methods
 inline bool Token::is_keyword() const {
-    return type >= TokenType::Kw_name && type <= TokenType::Kw_throw;
+    return type >= TokenType::Kw_name && type <= TokenType::Kw_noraise;
 }
 
 inline bool Token::is_literal() const {

@@ -322,6 +322,13 @@ std::shared_ptr<ManifestParser::TomlValue> ManifestParser::parse_toml(
             }
         }
 
+        if (!value) {
+            // Try inline table
+            if (!value_str.empty() && value_str[0] == '{') {
+                value = parse_toml_inline_table(value_str);
+            }
+        }
+
         if (value) {
             (*current_table)[key] = value;
         }
@@ -383,6 +390,7 @@ std::shared_ptr<ManifestParser::TomlValue> ManifestParser::parse_toml_array(std:
                 auto val = parse_toml_scalar(trim(current));
                 if (val) result.push_back(val);
             }
+            current.clear();
             break;
         }
         if (c == ',' && in_brackets) {
@@ -399,6 +407,73 @@ std::shared_ptr<ManifestParser::TomlValue> ManifestParser::parse_toml_array(std:
     if (!current.empty()) {
         auto val = parse_toml_scalar(trim(current));
         if (val) result.push_back(val);
+    }
+
+    return std::make_shared<TomlValue>(std::move(result));
+}
+
+std::shared_ptr<ManifestParser::TomlValue> ManifestParser::parse_toml_inline_table(const std::string& raw) {
+    std::string s = trim(raw);
+    if (s.size() < 2 || s.front() != '{' || s.back() != '}') return nullptr;
+
+    TomlTable result;
+    std::string inner = s.substr(1, s.size() - 2);
+
+    size_t i = 0;
+    while (i < inner.size()) {
+        while (i < inner.size() && (std::isspace(inner[i]) || inner[i] == ',')) i++;
+        if (i >= inner.size()) break;
+
+        size_t eq = inner.find('=', i);
+        if (eq == std::string::npos) break;
+
+        std::string key = trim(inner.substr(i, eq - i));
+        i = eq + 1;
+
+        while (i < inner.size() && std::isspace(inner[i])) i++;
+        if (i >= inner.size()) break;
+
+        std::string value_str;
+        if (inner[i] == '"') {
+            value_str += inner[i++];
+            while (i < inner.size() && inner[i] != '"') {
+                value_str += inner[i++];
+            }
+            if (i < inner.size()) value_str += inner[i++];
+        } else if (inner[i] == '[') {
+            int depth = 0;
+            while (i < inner.size()) {
+                if (inner[i] == '[') depth++;
+                if (inner[i] == ']') depth--;
+                value_str += inner[i++];
+                if (depth == 0) break;
+            }
+        } else if (inner[i] == '{') {
+            int depth = 0;
+            while (i < inner.size()) {
+                if (inner[i] == '{') depth++;
+                if (inner[i] == '}') depth--;
+                value_str += inner[i++];
+                if (depth == 0) break;
+            }
+        } else {
+            while (i < inner.size() && inner[i] != ',') {
+                value_str += inner[i++];
+            }
+        }
+
+        value_str = trim(value_str);
+        auto val = parse_toml_scalar(value_str);
+        if (!val && !value_str.empty() && value_str[0] == '[') {
+            std::istringstream arr_stream(value_str);
+            val = parse_toml_array(arr_stream);
+        }
+        if (val) {
+            result[key] = val;
+        }
+
+        while (i < inner.size() && std::isspace(inner[i])) i++;
+        if (i < inner.size() && inner[i] == ',') i++;
     }
 
     return std::make_shared<TomlValue>(std::move(result));
@@ -572,6 +647,7 @@ std::unordered_map<std::string, std::vector<std::string>> ManifestParser::parse_
     std::unordered_map<std::string, std::vector<std::string>> result;
     for (const auto& [name, value] : features_table) {
         if (value->type == TomlValue::Type::Array) {
+            result[name]; // ensure entry exists even for empty arrays
             for (const auto& item : value->array) {
                 if (item->type == TomlValue::Type::Scalar) {
                     if (auto* s = std::get_if<std::string>(&item->scalar)) {

@@ -5,6 +5,7 @@
 #define CLAW_JIT_COMPILER_H
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "../emitter/x86_64_emitter.h"
 #include "../emitter/reg_alloc.h"
 #include "deoptimization.h"
+#include "optimizations.h"
 
 namespace claw {
 namespace jit {
@@ -146,6 +148,13 @@ private:
     std::vector<bytecode::ValueType> local_types_;
     std::unordered_map<std::string, bytecode::ValueType> global_types_;
     std::vector<bytecode::ValueType> type_stack_;
+
+    // 逃逸分析结果（指令索引 -> 逃逸结果）
+    std::unordered_map<size_t, EscapeAnalysisResult> escape_results_;
+    // 局部变量到分配指令索引的映射（用于JIT栈分配优化）
+    std::unordered_map<uint32_t, std::optional<size_t>> local_alloc_idx_;
+    // 模拟栈：跟踪每个栈槽是由哪个分配指令产生的
+    std::vector<std::optional<size_t>> sim_alloc_stack_;
     
     // 辅助方法 - 使用 X86_64Emitter
     void emit_prologue(void*& current, size_t local_count, uint32_t arity = 0);

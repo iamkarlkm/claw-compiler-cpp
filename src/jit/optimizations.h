@@ -41,9 +41,9 @@ public:
     /**
      * @brief 分析函数中局部变量的逃逸情况
      * @param func 要分析的函数
-     * @return 每个局部变量的逃逸分析结果
+     * @return 每个分配指令索引的逃逸分析结果
      */
-    std::unordered_map<uint32_t, EscapeAnalysisResult> analyze_function(
+    std::unordered_map<size_t, EscapeAnalysisResult> analyze_function(
         const bytecode::Function& func);
     
 private:
@@ -212,7 +212,7 @@ public:
      */
     bytecode::Function hoist_invariants(bytecode::Function& func,
                                          const LoopInfo& loop,
-                                         const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results = {});
+                                         const std::unordered_map<size_t, EscapeAnalysisResult>& escape_results = {});
     
     /**
      * @brief 执行循环合并
@@ -232,8 +232,9 @@ private:
     
     // 检查指令是否循环不变
     bool is_loop_invariant(const bytecode::Instruction& inst,
+                           size_t inst_idx,
                            const std::unordered_set<size_t>& loop_vars,
-                           const std::unordered_map<uint32_t, EscapeAnalysisResult>& escape_results = {});
+                           const std::unordered_map<size_t, EscapeAnalysisResult>& escape_results = {});
 };
 
 // ============================================================================
@@ -289,9 +290,9 @@ public:
 
     /**
      * @brief 获取最近一次逃逸分析的结果
-     * @return 变量ID到逃逸分析结果的映射
+     * @return 指令索引到逃逸分析结果的映射
      */
-    const std::unordered_map<uint32_t, EscapeAnalysisResult>& get_escape_results() const {
+    const std::unordered_map<size_t, EscapeAnalysisResult>& get_escape_results() const {
         return last_escape_results_;
     }
 
@@ -300,7 +301,7 @@ private:
     Stats stats_;
 
     // 最近一次逃逸分析结果（供JIT编译器查询）
-    std::unordered_map<uint32_t, EscapeAnalysisResult> last_escape_results_;
+    std::unordered_map<size_t, EscapeAnalysisResult> last_escape_results_;
 
     // 子优化器
     EscapeAnalyzer escape_analyzer_;

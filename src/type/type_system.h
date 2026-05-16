@@ -395,13 +395,13 @@ private:
     
     // Type coercion
     TypePtr coerce(TypePtr from, TypePtr to, const SourceSpan& span);
-    bool can_coerce(TypePtr from, TypePtr to);
-    
+
     // Error reporting
     void type_error(const std::string& msg, const SourceSpan& span);
     void mismatch_error(TypePtr expected, TypePtr found, const SourceSpan& span);
-    
+
 public:
+    static bool can_coerce(TypePtr from, TypePtr to);
     TypeChecker();
     
     // Entry point

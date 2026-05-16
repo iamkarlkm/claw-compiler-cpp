@@ -1,5 +1,6 @@
 // ir_generator.cpp - AST 到 IR 的转换器实现
 #include "ir_generator.h"
+#include "ast/pattern.h"
 #include <stdexcept>
 #include <iostream>
 
@@ -744,33 +745,27 @@ void IRGenerator::generate_expr_stmt(ast::ExprStmt* expr_stmt) {
 
 void IRGenerator::generate_match(ast::MatchStmt* match) {
     if (!match) return;
-    
+
     // match expr { pattern1 => body1, pattern2 => body2, _ => default }
     auto* match_expr = match->get_expr();
     const auto& patterns = match->get_patterns();
     const auto& bodies = match->get_bodies();
-    
+
     if (!match_expr || patterns.empty()) return;
-    
+
     // 生成匹配表达式
     auto expr_val = generate_expression(match_expr);
     if (!expr_val) return;
-    
+
     // 创建块
     std::vector<std::shared_ptr<ir::BasicBlock>> case_blocks;
     std::shared_ptr<ir::BasicBlock> default_block = nullptr;
     std::shared_ptr<ir::BasicBlock> after_block = create_block("match.after");
-    
+
     // 为每个 case 创建基本块
     for (size_t i = 0; i < patterns.size(); ++i) {
-        // 检查是否是通配符模式 (_)
-        bool is_wildcard = false;
-        if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(patterns[i].get())) {
-            if (ident->get_name() == "_") {
-                is_wildcard = true;
-            }
-        }
-        
+        bool is_wildcard = (patterns[i]->get_kind() == ast::Pattern::Kind::Wildcard);
+
         if (is_wildcard) {
             default_block = create_block("match.default");
             case_blocks.push_back(default_block);
@@ -778,49 +773,76 @@ void IRGenerator::generate_match(ast::MatchStmt* match) {
             case_blocks.push_back(create_block("match.case." + std::to_string(i)));
         }
     }
-    
+
     // 如果没有通配符，创建 after 块作为默认目标
     if (!default_block) {
         default_block = after_block;
     }
-    
+
     // 生成条件分支链
     auto current_cond_block = create_block("match.start");
     builder->create_br(current_cond_block);
     builder->set_insert_point(current_cond_block);
-    
+
     for (size_t i = 0; i < patterns.size(); ++i) {
-        auto pattern_val = generate_expression(patterns[i].get());
-        
-        // 比较: expr == pattern
-        auto cmp = builder->create_cmp(ir::OpCode::Eq, expr_val, pattern_val);
-        
-        // 决定目标块
-        std::shared_ptr<ir::BasicBlock> next_target;
-        if (i < patterns.size() - 1) {
-            next_target = case_blocks[i + 1];
+        auto pat_kind = patterns[i]->get_kind();
+
+        if (pat_kind == ast::Pattern::Kind::Wildcard || pat_kind == ast::Pattern::Kind::Variable) {
+            // Wildcard or variable: unconditional branch to case block
+            builder->create_br(case_blocks[i]);
+        } else if (pat_kind == ast::Pattern::Kind::Literal) {
+            auto* lp = static_cast<ast::LiteralPattern*>(patterns[i].get());
+            std::shared_ptr<ir::Value> pattern_val;
+            std::visit([&](auto&& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, int64_t>) {
+                    pattern_val = builder->create_constant(v);
+                } else if constexpr (std::is_same_v<T, double>) {
+                    pattern_val = builder->create_constant(v);
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                    pattern_val = builder->create_constant(v);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    pattern_val = builder->create_constant(v);
+                }
+            }, lp->get_value());
+
+            auto cmp = builder->create_cmp(ir::OpCode::Eq, expr_val, pattern_val);
+
+            std::shared_ptr<ir::BasicBlock> next_target;
+            if (i < patterns.size() - 1) {
+                next_target = case_blocks[i + 1];
+            } else {
+                next_target = default_block;
+            }
+            builder->create_cond_br(cmp, case_blocks[i], next_target);
         } else {
-            next_target = default_block;
+            // Constructor or other patterns: simplified fallback
+            builder->create_br(case_blocks[i]);
         }
-        
-        builder->create_cond_br(cmp, case_blocks[i], next_target);
-        
+
         // 生成 case 体
         builder->set_insert_point(case_blocks[i]);
         enter_scope();
-        
+
+        if (pat_kind == ast::Pattern::Kind::Variable) {
+            auto* vp = static_cast<ast::VariablePattern*>(patterns[i].get());
+            auto local = builder->create_alloca(expr_val->type, 1, vp->get_name());
+            builder->create_store(expr_val, local);
+            declare_variable(vp->get_name(), local);
+        }
+
         if (auto* block_stmt = dynamic_cast<ast::BlockStmt*>(bodies[i].get())) {
             generate_block(block_stmt);
         } else if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
             generate_statement(stmt);
         }
-        
+
         if (!current_block->terminator) {
             builder->create_br(after_block);
         }
         exit_scope();
     }
-    
+
     // 设置 after 块
     builder->set_insert_point(after_block);
 }

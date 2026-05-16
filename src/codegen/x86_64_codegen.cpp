@@ -357,19 +357,19 @@ void X86_64CodeGenerator::emitMOV_RI(X86Reg dst, int64_t imm) {
 }
 
 void X86_64CodeGenerator::emitMOV_RM(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8 || mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, false, false, regCode(dst) >= 8 || regCode(mem.mem_val.base) >= 8);
     emitByte(0x8B);  // MOV r64, r/m64
     encodeMemory(mem, regCode(dst));
 }
 
 void X86_64CodeGenerator::emitMOV_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x89);  // MOV r/m64, r64
     encodeMemory(mem, regCode(src));
 }
 
 void X86_64CodeGenerator::emitMOV_MI(const Operand& mem, int32_t imm) {
-    emitREX(true, false, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, false, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0xC7);  // MOV r/m64, imm32
     encodeMemory(mem, 0);  // reg = 0 for immediate
     emitDword(static_cast<uint32_t>(imm));
@@ -390,14 +390,14 @@ void X86_64CodeGenerator::emitMOVSX_RR(X86Reg dst, X86Reg src) {
 }
 
 void X86_64CodeGenerator::emitMOVSX_RM16(X86Reg dst, const Operand& mem) {
-    emitREX(true, regCode(dst) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x0F);
     emitByte(0xBF);  // MOVSX r64, r/m16
     encodeMemory(mem, regCode(dst));
 }
 
 void X86_64CodeGenerator::emitLEA(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8 || mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, false, false, regCode(dst) >= 8 || regCode(mem.mem_val.base) >= 8);
     emitByte(0x8D);  // LEA r64, m
     encodeMemory(mem, regCode(dst));
 }
@@ -444,7 +444,7 @@ void X86_64CodeGenerator::emitADD_RM(X86Reg dst, const Operand& mem) {
 }
 
 void X86_64CodeGenerator::emitADD_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x01);  // ADD r/m64, r64
     encodeMemory(mem, regCode(src));
 }
@@ -469,7 +469,7 @@ void X86_64CodeGenerator::emitSUB_RM(X86Reg dst, const Operand& mem) {
 }
 
 void X86_64CodeGenerator::emitSUB_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x29);  // SUB r/m64, r64
     encodeMemory(mem, regCode(src));
 }
@@ -482,7 +482,7 @@ void X86_64CodeGenerator::emitIMUL_RR(X86Reg dst, X86Reg src) {
 }
 
 void X86_64CodeGenerator::emitIMUL_RRI(X86Reg dst, const Operand& src, int32_t imm) {
-    emitREX(true, regCode(dst) >= 8, false, src.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(src.mem_val.base) >= 8);
     emitByte(0x69);  // IMUL r64, r/m64, imm32
     encodeMemory(src, regCode(dst));
     emitDword(static_cast<uint32_t>(imm));
@@ -514,7 +514,7 @@ void X86_64CodeGenerator::emitAND_RM(X86Reg dst, const Operand& mem) {
 }
 
 void X86_64CodeGenerator::emitAND_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x21);  // AND r/m64, r64
     encodeMemory(mem, regCode(src));
 }
@@ -539,7 +539,7 @@ void X86_64CodeGenerator::emitOR_RM(X86Reg dst, const Operand& mem) {
 }
 
 void X86_64CodeGenerator::emitOR_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x09);  // OR r/m64, r64
     encodeMemory(mem, regCode(src));
 }
@@ -564,7 +564,7 @@ void X86_64CodeGenerator::emitXOR_RM(X86Reg dst, const Operand& mem) {
 }
 
 void X86_64CodeGenerator::emitXOR_MR(const Operand& mem, X86Reg src) {
-    emitREX(true, regCode(src) >= 8, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, regCode(src) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x31);  // XOR r/m64, r64
     encodeMemory(mem, regCode(src));
 }
@@ -908,7 +908,7 @@ void X86_64CodeGenerator::emitPUSH_imm(int32_t imm) {
 }
 
 void X86_64CodeGenerator::emitPUSH_M(const Operand& mem) {
-    emitREX(true, false, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, false, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0xFF);  // PUSH r/m64
     encodeMemory(mem, 6);  // reg = 6 for PUSH
 }
@@ -919,7 +919,7 @@ void X86_64CodeGenerator::emitPOP(X86Reg reg) {
 }
 
 void X86_64CodeGenerator::emitPOP_M(const Operand& mem) {
-    emitREX(true, false, false, mem.mem_val.base >= X86Reg::R8);
+    emitREX(true, false, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x8F);  // POP r/m64
     encodeMemory(mem, 0);  // reg = 0 for POP
 }

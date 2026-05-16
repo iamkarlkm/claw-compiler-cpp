@@ -24,12 +24,14 @@ DocCommentParser::ParsedComment DocCommentParser::parse(const std::string& comme
     // Extract brief (first paragraph or @brief tag)
     result.brief = extract_tag(comment_text, "@brief");
     if (result.brief.empty()) {
-        // Use first line/paragraph as brief
-        size_t pos = comment_text.find('\n');
+        // Use first line/paragraph as brief (skip leading whitespace)
+        size_t content_start = comment_text.find_first_not_of(" \t\n\r");
+        if (content_start == std::string::npos) content_start = 0;
+        size_t pos = comment_text.find('\n', content_start);
         if (pos != std::string::npos) {
-            result.brief = comment_text.substr(0, pos);
+            result.brief = comment_text.substr(content_start, pos - content_start);
         } else {
-            result.brief = comment_text;
+            result.brief = comment_text.substr(content_start);
         }
         // Trim
         result.brief.erase(0, result.brief.find_first_not_of(" \t\n\r"));

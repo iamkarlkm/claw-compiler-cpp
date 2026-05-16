@@ -129,25 +129,39 @@ void BytecodeWriter::write_function(const Function& func) {
     for (const auto& name : func.local_names) {
         write_string(name);
     }
+
+    // Write exception handlers
+    write_uint32(static_cast<uint32_t>(func.exception_handlers.size()));
+    for (const auto& h : func.exception_handlers) {
+        write_uint32(h.start_ip);
+        write_uint32(h.end_ip);
+        write_uint32(h.catch_ip);
+        write_int64(h.catch_var);
+    }
 }
 
 void BytecodeWriter::write_constant_pool(const ConstantPool& cp) {
-    // Write integers
-    write_uint32(static_cast<uint32_t>(cp.integers.size()));
-    for (int64_t i : cp.integers) {
-        write_int64(i);
-    }
-
-    // Write floats
-    write_uint32(static_cast<uint32_t>(cp.floats.size()));
-    for (double f : cp.floats) {
-        write_double(f);
-    }
-
-    // Write strings
-    write_uint32(static_cast<uint32_t>(cp.strings.size()));
-    for (const auto& s : cp.strings) {
-        write_string(s);
+    // Write values vector (primary constant pool used by VM)
+    write_uint32(static_cast<uint32_t>(cp.values.size()));
+    for (const auto& v : cp.values) {
+        write_uint8(static_cast<uint8_t>(v.type));
+        switch (v.type) {
+            case ValueType::I64:
+                write_int64(v.data.i64);
+                break;
+            case ValueType::F64:
+                write_double(v.data.f64);
+                break;
+            case ValueType::STRING:
+                write_string(v.str);
+                break;
+            case ValueType::BOOL:
+                write_uint8(v.data.b ? 1 : 0);
+                break;
+            default:
+                // NIL and others have no payload
+                break;
+        }
     }
 }
 
@@ -313,31 +327,46 @@ Function BytecodeReader::read_function() {
         func.local_names.push_back(read_string());
     }
 
+    // Read exception handlers
+    uint32_t handler_count = read_uint32();
+    for (uint32_t i = 0; i < handler_count; i++) {
+        uint32_t start_ip = read_uint32();
+        uint32_t end_ip = read_uint32();
+        uint32_t catch_ip = read_uint32();
+        int32_t catch_var = static_cast<int32_t>(read_int64());
+        func.exception_handlers.emplace_back(start_ip, end_ip, catch_ip, catch_var);
+    }
+
     return func;
 }
 
 ConstantPool BytecodeReader::read_constant_pool() {
     ConstantPool cp;
 
-    // Read integers
-    uint32_t int_count = read_uint32();
-    cp.integers.reserve(int_count);
-    for (uint32_t i = 0; i < int_count; i++) {
-        cp.integers.push_back(read_int64());
-    }
-
-    // Read floats
-    uint32_t float_count = read_uint32();
-    cp.floats.reserve(float_count);
-    for (uint32_t i = 0; i < float_count; i++) {
-        cp.floats.push_back(read_double());
-    }
-
-    // Read strings
-    uint32_t str_count = read_uint32();
-    cp.strings.reserve(str_count);
-    for (uint32_t i = 0; i < str_count; i++) {
-        cp.strings.push_back(read_string());
+    uint32_t value_count = read_uint32();
+    cp.values.reserve(value_count);
+    for (uint32_t i = 0; i < value_count; i++) {
+        ValueType type = static_cast<ValueType>(read_uint8());
+        Value v;
+        v.type = type;
+        switch (type) {
+            case ValueType::I64:
+                v.data.i64 = read_int64();
+                break;
+            case ValueType::F64:
+                v.data.f64 = read_double();
+                break;
+            case ValueType::STRING:
+                v.str = read_string();
+                break;
+            case ValueType::BOOL:
+                v.data.b = (read_uint8() != 0);
+                break;
+            default:
+                // NIL and other types have no payload
+                break;
+        }
+        cp.values.push_back(v);
     }
 
     return cp;
@@ -392,9 +421,25 @@ std::string Disassembler::disassemble_function(const Function& func, uint32_t in
         result += "\n";
     }
 
+    if (!func.exception_handlers.empty()) {
+        result += "  Exception handlers:\n";
+        for (size_t i = 0; i < func.exception_handlers.size(); i++) {
+            const auto& h = func.exception_handlers[i];
+            result += "    [" + std::to_string(i) + "] try " +
+                      std::to_string(h.start_ip) + ".." + std::to_string(h.end_ip) +
+                      " catch @" + std::to_string(h.catch_ip);
+            if (h.catch_var >= 0) {
+                result += " var=" + std::to_string(h.catch_var);
+            } else {
+                result += " (bare)";
+            }
+            result += "\n";
+        }
+    }
+
     result += "  Code:\n";
     for (size_t i = 0; i < func.code.size(); i++) {
-        result += "    " + std::to_string(i) + ": " + 
+        result += "    " + std::to_string(i) + ": " +
                   disassemble_instruction(func.code[i], i) + "\n";
     }
 
@@ -577,6 +622,7 @@ std::string op_code_to_string(OpCode op) {
         case OpCode::HALT: return "HALT";
         case OpCode::INPUT: return "INPUT";
         case OpCode::TYPE_OF: return "TYPE_OF";
+        case OpCode::THROW: return "THROW";
         case OpCode::EXT: return "EXT";
         case OpCode::RESERVED: return "RESERVED";
         default: return "UNKNOWN_" + std::to_string(static_cast<int>(op));

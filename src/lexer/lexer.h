@@ -239,6 +239,7 @@ inline void Lexer::scan_token() {
         case '*': scan_star(); break;
         case '%': tokens.emplace_back(TokenType::Op_percent, make_span()); break;
         case ':': scan_colon(); break;
+        case '@': tokens.emplace_back(TokenType::Op_at, make_span()); break;
         
         // Multi-character operators
         case '/': scan_slash(); break;
@@ -728,6 +729,8 @@ inline void KeywordMap::init() {
     keywords["try"] = TokenType::Kw_try;
     keywords["catch"] = TokenType::Kw_catch;
     keywords["throw"] = TokenType::Kw_throw;
+    keywords["raise"] = TokenType::Kw_raise;
+    keywords["noraise"] = TokenType::Kw_noraise;
 }
 
 inline TokenType KeywordMap::lookup(const std::string& text) {

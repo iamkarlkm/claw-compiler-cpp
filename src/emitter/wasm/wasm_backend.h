@@ -560,14 +560,14 @@ public:
     WasmFunc* current_function() { return current_func_; }
     void set_current_function(WasmFunc* func) { current_func_ = func; }
 
+    // IR to WASM type mapping (public for testing)
+    WasmType map_type(const ir::Type* type);
+    WasmType map_type(std::shared_ptr<const ir::Type> type);
+
 private:
     WasmModule& module_;
     WasmFunc* current_func_ = nullptr;
     std::vector<size_t> block_stack_;  // Stack of block start positions
-
-    // IR to WASM type mapping
-    WasmType map_type(const ir::Type* type);
-    WasmType map_type(std::shared_ptr<const ir::Type> type);
 
     // Generate value/expression
     bool generate_expression(const ir::Value* value);

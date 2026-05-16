@@ -52,6 +52,7 @@ class TupleExpr;
 class LambdaExpr;
 class TensorLiteral;
 class Type;
+class Pattern;
 
 // ============================================================================
 // Node Type Enum (mirrored from ast.h)
@@ -187,6 +188,7 @@ private:
     std::string serializeLambdaExpr(const LambdaExpr& lambda);
     std::string serializeTensorLiteral(const TensorLiteral& tensor);
     
+    std::string serializePattern(const Pattern& pat);
     std::string serializeLocation(const SourceLocation& loc);
     std::string serializeType(const Type& type);
 };

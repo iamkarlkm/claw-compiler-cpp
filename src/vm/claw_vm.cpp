@@ -415,12 +415,12 @@ void GarbageCollector::sweep(VMRuntime& runtime) {
 
 bool ClawVM::load_module(const bytecode::Module& module) {
     current_module = module;
-    
+
     // Setup globals from module
     for (size_t i = 0; i < module.global_names.size(); i++) {
         runtime.define_global(module.global_names[i]);
     }
-    
+
     return true;
 }
 
@@ -744,7 +744,8 @@ bool ClawVM::dispatch() {
     if (op == static_cast<int32_t>(bytecode::OpCode::INPUT)) return op_input();
     if (op == static_cast<int32_t>(bytecode::OpCode::TYPE_OF)) return op_type_of();
     if (op == static_cast<int32_t>(bytecode::OpCode::EXT)) return op_ext();
-    
+    if (op == static_cast<int32_t>(bytecode::OpCode::THROW)) return op_throw();
+
     error("Unknown opcode: " + std::to_string(op));
     return false;
 }
@@ -1737,7 +1738,13 @@ bool ClawVM::op_range_create() {
         start = std::get<int64_t>(start_val.data);
     }
     
-    auto iter = IteratorValue::create_range_iterator(start, end, step);
+    auto iter = runtime.iterator_pool.acquire();
+    iter->kind = "range";
+    iter->start = start;
+    iter->end = end;
+    iter->step = step;
+    iter->index = start;
+    iter->size = (end - start + (step > 0 ? step - 1 : step + 1)) / (step > 0 ? step : -step);
     runtime.push(Value::iterator_v(iter));
     return true;
 }
@@ -1746,14 +1753,18 @@ bool ClawVM::op_enumerate_create() {
     // Create enumerate iterator
     // Stack: [array] -> [iterator]
     Value arr_val = runtime.pop();
-    
+
     if (!arr_val.is_array()) {
         error("enumerate requires an array");
         return false;
     }
-    
+
     auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
-    auto iter = IteratorValue::create_enumerate_iterator(arr->elements);
+    auto iter = runtime.iterator_pool.acquire();
+    iter->kind = "enumerate";
+    iter->size = static_cast<int64_t>(arr->elements.size());
+    iter->index = 0;
+    iter->outer_index = 0;
     runtime.push(Value::iterator_v(iter));
     return true;
 }
@@ -1763,14 +1774,14 @@ bool ClawVM::op_zip_create() {
     // Stack: [count, array1, array2, ...] -> [iterator]
     Value count_val = runtime.pop();
     int32_t count = 1;
-    
+
     if (count_val.is_int()) {
         count = static_cast<int32_t>(std::get<int64_t>(count_val.data));
     }
-    
+
     std::vector<std::vector<Value>> arrays;
     arrays.reserve(count);
-    
+
     for (int32_t i = 0; i < count; i++) {
         Value arr_val = runtime.pop();
         if (arr_val.is_array()) {
@@ -1781,8 +1792,17 @@ bool ClawVM::op_zip_create() {
             return false;
         }
     }
-    
-    auto iter = IteratorValue::create_zip_iterator(arrays);
+
+    auto iter = runtime.iterator_pool.acquire();
+    iter->kind = "zip";
+    iter->arrays = arrays;
+    iter->size = arrays.empty() ? 0 : static_cast<int64_t>(arrays[0].size());
+    for (const auto& arr : arrays) {
+        if (static_cast<int64_t>(arr.size()) < iter->size) {
+            iter->size = static_cast<int64_t>(arr.size());
+        }
+    }
+    iter->index = 0;
     runtime.push(Value::iterator_v(iter));
     return true;
 }
@@ -1792,7 +1812,10 @@ bool ClawVM::op_zip_create() {
 // ============================================================================
 
 bool ClawVM::op_alloc_obj() {
-    auto obj = std::make_shared<ObjectValue>();
+    auto obj = runtime.object_pool.acquire();
+    obj->type_name.clear();
+    obj->fields.clear();
+    obj->marked = false;
     runtime.push(Value::object_v(obj));
     return true;
 }
@@ -1869,19 +1892,19 @@ bool ClawVM::op_tensor_create() {
     std::string dtype = read_string();
     int32_t rank = read_byte();
     
-    auto tensor = std::make_shared<TensorValue>();
+    auto tensor = runtime.tensor_pool.acquire();
     tensor->element_type = dtype;
     tensor->shape.resize(rank);
-    
+
     // Read shape in reverse order
     for (int32_t i = rank - 1; i >= 0; i--) {
         tensor->shape[i] = runtime.pop().as_int();
     }
-    
+
     // Allocate data
     tensor->data.resize(tensor->total_size(), 0.0);
     tensor->int_data.resize(tensor->total_size(), 0);
-    
+
     runtime.push(Value{ValueTag::TENSOR, tensor});
     return true;
 }
@@ -1948,12 +1971,12 @@ bool ClawVM::op_tensor_matmul() {
         return false;
     }
     
-    auto result = std::make_shared<TensorValue>();
+    auto result = runtime.tensor_pool.acquire();
     result->element_type = ta->element_type;
     result->shape = {ta->shape[0], tb->shape[1]};
     result->data.resize(result->total_size(), 0.0);
     result->int_data.resize(result->total_size(), 0);
-    
+
     // Naive matrix multiply
     for (int64_t i = 0; i < ta->shape[0]; i++) {
         for (int64_t j = 0; j < tb->shape[1]; j++) {
@@ -1965,7 +1988,7 @@ bool ClawVM::op_tensor_matmul() {
             }
         }
     }
-    
+
     runtime.push(Value{ValueTag::TENSOR, result});
     return true;
 }
@@ -1973,20 +1996,21 @@ bool ClawVM::op_tensor_matmul() {
 bool ClawVM::op_tensor_reshape() {
     Value tensor_val = runtime.pop();
     int32_t new_rank = read_byte();
-    
+
     if (!tensor_val.is_tensor()) {
         error("Not a tensor");
         return false;
     }
-    
+
     auto tensor = std::get<std::shared_ptr<TensorValue>>(tensor_val.data);
-    auto result = std::make_shared<TensorValue>(*tensor);
-    
+    auto result = runtime.tensor_pool.acquire();
+    *result = *tensor;
+
     result->shape.resize(new_rank);
     for (int32_t i = new_rank - 1; i >= 0; i--) {
         result->shape[i] = runtime.pop().as_int();
     }
-    
+
     // Verify size matches
     if (result->total_size() != tensor->total_size()) {
         error("Cannot reshape: size mismatch");
@@ -2016,6 +2040,51 @@ bool ClawVM::op_println() {
 bool ClawVM::op_panic() {
     Value v = runtime.pop();
     error("Panic: " + v.to_string());
+    return false;
+}
+
+bool ClawVM::op_throw() {
+    Value exception = runtime.pop();
+
+    // Search for exception handler in current function
+    while (runtime.frame_count > 0) {
+        auto* func = current_function;
+        if (func) {
+            const auto* handler = func->find_handler(static_cast<uint32_t>(ip));
+            if (handler) {
+                // Jump to catch block
+                ip = static_cast<int32_t>(handler->catch_ip);
+                // Store exception in catch variable if specified
+                if (handler->catch_var >= 0) {
+                    uint32_t slot = runtime.call_frames[runtime.frame_count - 1].base_stack + handler->catch_var;
+                    if (slot < runtime.stack.size()) {
+                        runtime.stack[slot] = exception;
+                    } else if (slot == runtime.stack.size()) {
+                        runtime.stack.push_back(exception);
+                    } else {
+                        runtime.stack.resize(slot + 1, Value::nil());
+                        runtime.stack[slot] = exception;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // No handler in current function - unwind one frame
+        if (runtime.frame_count <= 1) break;
+        runtime.call_frames.pop_back();
+        runtime.frame_count--;
+        if (runtime.frame_count > 0) {
+            auto& frame = runtime.call_frames[runtime.frame_count - 1];
+            current_function_idx = frame.closure->function->func_id;
+            current_function = &current_module.functions[current_function_idx];
+            ip = frame.ip;
+        }
+    }
+
+    // No handler found - treat as panic
+    error("Uncaught exception: " + exception.to_string());
+    had_error = true;
     return false;
 }
 

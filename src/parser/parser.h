@@ -11,6 +11,7 @@
 #include "lexer/token.h"
 #include "lexer/lexer.h"
 #include "ast/ast.h"
+#include "ast/pattern.h"
 #include "common/common.h"
 
 namespace claw {
@@ -54,7 +55,12 @@ private:
     std::unique_ptr<ast::Expression> parse_unary();
     std::unique_ptr<ast::Expression> parse_postfix();
     std::unique_ptr<ast::Expression> parse_primary();
-    
+
+    // Pattern parsing
+    std::unique_ptr<ast::Pattern> parse_pattern();
+    std::unique_ptr<ast::Pattern> parse_or_pattern();
+    std::unique_ptr<ast::Pattern> parse_primary_pattern();
+
     // Type parsing
     std::string parse_type();
     
@@ -80,6 +86,7 @@ private:
     std::unique_ptr<ast::Statement> parse_subscribe_statement();
     std::unique_ptr<ast::Statement> parse_try_statement();
     std::unique_ptr<ast::Statement> parse_throw_statement();
+    std::unique_ptr<ast::Statement> parse_raise_statement();
     std::unique_ptr<ast::Statement> parse_struct_statement();
     std::unique_ptr<ast::Statement> parse_enum_statement();
     std::unique_ptr<ast::Statement> parse_impl_statement();
@@ -831,7 +838,7 @@ inline std::unique_ptr<ast::Statement> Parser::parse_match_statement() {
     
     // Parse match cases
     while (!check(TokenType::RBrace) && !is_at_end()) {
-        auto pattern = parse_expression();
+        auto pattern = parse_pattern();
         
         // Parse '=>' arrow
         if (!check(TokenType::Op_fat_arrow)) {
@@ -1069,6 +1076,29 @@ inline std::unique_ptr<ast::Statement> Parser::parse_throw_statement() {
     }
     
     return throw_stmt;
+}
+
+inline std::unique_ptr<ast::Statement> Parser::parse_raise_statement() {
+    if (!match(TokenType::Kw_raise)) {
+        return nullptr;
+    }
+
+    auto expr = parse_expression();
+    if (!expr) {
+        if (reporter) {
+            reporter->error("Expected expression after 'raise'", span_from(peek()), "P090");
+        }
+        return nullptr;
+    }
+
+    auto raise_stmt = std::make_unique<ast::RaiseStmt>(
+        std::move(expr), span_from(previous()));
+
+    if (check(TokenType::Semicolon)) {
+        advance();
+    }
+
+    return raise_stmt;
 }
 
 // Parse struct declaration
@@ -1622,6 +1652,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
         return parse_throw_statement();
     }
 
+    // Raise statement
+    if (check(TokenType::Kw_raise)) {
+        return parse_raise_statement();
+    }
+
     // Struct declaration
     if (check(TokenType::Kw_struct)) {
         return parse_struct_statement();
@@ -1899,6 +1934,176 @@ inline std::string Parser::parse_type() {
     return type;
 }
 
+// Pattern parsing
+
+inline std::unique_ptr<ast::Pattern> Parser::parse_pattern() {
+    return parse_or_pattern();
+}
+
+inline std::unique_ptr<ast::Pattern> Parser::parse_or_pattern() {
+    auto left = parse_primary_pattern();
+    if (!left) return nullptr;
+
+    while (check(TokenType::Op_or)) {
+        advance(); // consume '|'
+        auto right = parse_primary_pattern();
+        if (!right) return nullptr;
+        left = std::make_unique<ast::OrPattern>(std::move(left), std::move(right),
+                                                span_from(previous()));
+    }
+
+    return left;
+}
+
+inline std::unique_ptr<ast::Pattern> Parser::parse_primary_pattern() {
+    // Binding pattern: x @ Some(_)
+    if (check(TokenType::Identifier)) {
+        auto ident = peek().text;
+        // Look ahead for '@'
+        if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::Op_at) {
+            advance(); // consume identifier
+            advance(); // consume '@'
+            auto sub = parse_primary_pattern();
+            if (!sub) return nullptr;
+            return std::make_unique<ast::BindingPattern>(ident, std::move(sub),
+                                                         span_from(previous()));
+        }
+    }
+
+    // Wildcard: _
+    if (check(TokenType::Identifier) && peek().text == "_") {
+        advance();
+        return std::make_unique<ast::WildcardPattern>(span_from(previous()));
+    }
+
+    // Literal patterns: numbers, strings, booleans
+    if (check(TokenType::IntegerLiteral)) {
+        int64_t val = std::stoll(peek().text);
+        advance();
+        return std::make_unique<ast::LiteralPattern>(
+            ast::LiteralPattern::Value(val), span_from(previous()));
+    }
+    if (check(TokenType::FloatLiteral)) {
+        double val = std::stod(peek().text);
+        advance();
+        return std::make_unique<ast::LiteralPattern>(
+            ast::LiteralPattern::Value(val), span_from(previous()));
+    }
+    if (check(TokenType::StringLiteral)) {
+        std::string val = peek().text;
+        advance();
+        return std::make_unique<ast::LiteralPattern>(
+            ast::LiteralPattern::Value(val), span_from(previous()));
+    }
+    if (match(TokenType::Kw_true)) {
+        return std::make_unique<ast::LiteralPattern>(
+            true, span_from(previous()));
+    }
+    if (match(TokenType::Kw_false)) {
+        return std::make_unique<ast::LiteralPattern>(
+            false, span_from(previous()));
+    }
+
+    // Variable pattern (identifier that is not a constructor call)
+    if (check(TokenType::Identifier)) {
+        std::string name = peek().text;
+        advance();
+
+        // Constructor pattern: Some(x), Cons(a, b)
+        if (check(TokenType::LParen)) {
+            advance(); // consume '('
+            auto ctor = std::make_unique<ast::ConstructorPattern>(name, span_from(previous()));
+            while (!check(TokenType::RParen) && !is_at_end()) {
+                auto field = parse_pattern();
+                if (field) {
+                    ctor->add_field(std::move(field));
+                }
+                if (check(TokenType::Comma)) {
+                    advance();
+                } else {
+                    break;
+                }
+            }
+            if (!check(TokenType::RParen)) {
+                if (reporter) {
+                    reporter->error("Expected ')' in constructor pattern", span_from(peek()), "P060");
+                }
+            } else {
+                advance(); // consume ')'
+            }
+            return ctor;
+        }
+
+        return std::make_unique<ast::VariablePattern>(name, span_from(previous()));
+    }
+
+    // Tuple pattern: (a, b, c)
+    if (check(TokenType::LParen)) {
+        advance(); // consume '('
+        auto tuple = std::make_unique<ast::TuplePattern>(span_from(previous()));
+        while (!check(TokenType::RParen) && !is_at_end()) {
+            auto elem = parse_pattern();
+            if (elem) {
+                tuple->add_element(std::move(elem));
+            }
+            if (check(TokenType::Comma)) {
+                advance();
+            } else {
+                break;
+            }
+        }
+        if (!check(TokenType::RParen)) {
+            if (reporter) {
+                reporter->error("Expected ')' in tuple pattern", span_from(peek()), "P061");
+            }
+        } else {
+            advance(); // consume ')'
+        }
+        return tuple;
+    }
+
+    // Array pattern: [a, b, ..rest]
+    if (check(TokenType::LBracket)) {
+        advance(); // consume '['
+        auto arr = std::make_unique<ast::ArrayPattern>(span_from(previous()));
+        while (!check(TokenType::RBracket) && !is_at_end()) {
+            // Rest pattern: ..rest
+            if (check(TokenType::Op_range)) {
+                advance(); // consume '..'
+                std::string rest_name = "";
+                if (check(TokenType::Identifier)) {
+                    rest_name = peek().text;
+                    advance();
+                }
+                arr->add_element(std::make_unique<ast::RestPattern>(rest_name, span_from(previous())));
+            } else {
+                auto elem = parse_pattern();
+                if (elem) {
+                    arr->add_element(std::move(elem));
+                }
+            }
+            if (check(TokenType::Comma)) {
+                advance();
+            } else {
+                break;
+            }
+        }
+        if (!check(TokenType::RBracket)) {
+            if (reporter) {
+                reporter->error("Expected ']' in array pattern", span_from(peek()), "P062");
+            }
+        } else {
+            advance(); // consume ']'
+        }
+        return arr;
+    }
+
+    if (reporter) {
+        reporter->error("Unexpected token in pattern", span_from(peek()), "P063");
+    }
+    return nullptr;
+}
+
 // Expression parsing by precedence
 
 inline std::unique_ptr<ast::Expression> Parser::parse_expression() {
@@ -2116,7 +2321,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_unary() {
 
 inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
     auto expr = parse_primary();
-    
+
     while (true) {
         if (check(TokenType::LBracket)) {
             // Index or slice
@@ -2198,21 +2403,71 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
                 std::move(expr), member,
                 member_span
             );
+        } else if (check(TokenType::Op_lt)) {
+            // Potential explicit type arguments: id<Int>(42)
+            // Only valid if callee is an identifier. Use backtracking.
+            if (auto* ident = dynamic_cast<ast::IdentifierExpr*>(expr.get())) {
+                size_t saved_current = current;
+                advance(); // consume '<'
+                std::vector<std::string> type_args;
+                bool parse_ok = true;
+                while (!check(TokenType::Op_gt) && !is_at_end()) {
+                    if (check(TokenType::Identifier) || check_any({
+                        TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                        TokenType::Type_u64, TokenType::Type_usize,
+                        TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                        TokenType::Type_i64, TokenType::Type_isize,
+                        TokenType::Type_f32, TokenType::Type_f64,
+                        TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                        advance();
+                        type_args.push_back(previous().text);
+                    } else {
+                        parse_ok = false;
+                        break;
+                    }
+                    if (check(TokenType::Comma)) {
+                        advance();
+                    } else {
+                        break;
+                    }
+                }
+                if (parse_ok && check(TokenType::Op_gt)) {
+                    advance(); // consume '>'
+                    if (check(TokenType::LParen)) {
+                        // Confirmed generic call
+                        advance(); // consume '('
+                        auto call = std::make_unique<ast::CallExpr>(std::move(expr),
+                                                                    span_from(previous()));
+                        call->set_type_args(std::move(type_args));
+                        while (!check(TokenType::RParen) && !is_at_end()) {
+                            call->add_argument(parse_expression());
+                            if (check(TokenType::Comma)) advance();
+                        }
+                        if (check(TokenType::RParen)) advance();
+                        expr = std::move(call);
+                        continue;
+                    }
+                }
+                // Not a generic call: backtrack
+                current = saved_current;
+            }
+            // Fall through to comparison operator handling
+            break;
         } else if (check(TokenType::LParen)) {
             // Function call
             advance(); // consume '('
-            
+
             auto call = std::make_unique<ast::CallExpr>(std::move(expr),
                                                         span_from(previous()));
-            
+
             while (!check(TokenType::RParen) && !is_at_end()) {
                 call->add_argument(parse_expression());
-                
+
                 if (check(TokenType::Comma)) {
                     advance();
                 }
             }
-            
+
             if (!check(TokenType::RParen)) {
                 if (reporter) {
                     reporter->error("Expected ')'", span_from(peek()), "P042");
@@ -2220,7 +2475,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
             } else {
                 advance(); // consume ')'
             }
-            
+
             expr = std::move(call);
         } else {
             break;

@@ -210,6 +210,7 @@ private:
     std::shared_ptr<TomlValue> parse_toml_table(std::istringstream& stream);
     std::shared_ptr<TomlValue> parse_toml_array(std::istringstream& stream);
     std::shared_ptr<TomlValue> parse_toml_scalar(const std::string& raw);
+    std::shared_ptr<TomlValue> parse_toml_inline_table(const std::string& raw);
 
     // Manifest construction from parsed TOML
     Manifest build_manifest(const TomlTable& root, const std::filesystem::path& path);

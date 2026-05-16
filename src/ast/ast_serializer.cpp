@@ -1,5 +1,6 @@
 #include "ast_serializer.h"
 #include "ast.h"
+#include "pattern.h"
 #include "common/common.h"
 #include <cmath>
 
@@ -281,29 +282,44 @@ std::string ASTSerializer::serializeMatchStmt(const MatchStmt& match) {
     std::ostringstream oss;
     oss << "{\n";
     current_depth_++;
-    
+
     oss << indent() << quote("type") << ": " << quote("match") << ",\n";
-    oss << indent() << quote("target") << ": " << serializeExpr(*match.target) << ",\n";
-    
+    if (match.get_expr()) {
+        oss << indent() << quote("target") << ": " << serializeExpr(*match.get_expr()) << ",\n";
+    } else {
+        oss << indent() << quote("target") << ": null,\n";
+    }
+
+    const auto& patterns = match.get_patterns();
+    const auto& bodies = match.get_bodies();
     oss << indent() << quote("cases") << ": [";
-    for (size_t i = 0; i < match.cases.size(); i++) {
+    size_t case_count = std::min(patterns.size(), bodies.size());
+    for (size_t i = 0; i < case_count; i++) {
         oss << "{\n";
         current_depth_++;
-        oss << indent() << quote("pattern") << ": " << serializeExpr(*match.cases[i].pattern) << ",\n";
-        oss << indent() << quote("body") << ": " << serializeBlock(match.cases[i].body);
+        if (patterns[i]) {
+            oss << indent() << quote("pattern") << ": " << serializePattern(*patterns[i]) << ",\n";
+        } else {
+            oss << indent() << quote("pattern") << ": null,\n";
+        }
+        if (bodies[i]) {
+            oss << indent() << quote("body") << ": " << serializeNode(*bodies[i]);
+        } else {
+            oss << indent() << quote("body") << ": null";
+        }
         current_depth_--;
         oss << "\n" << indent() << "}";
-        if (i < match.cases.size() - 1) oss << ", ";
+        if (i + 1 < case_count) oss << ", ";
     }
     oss << "]";
-    
+
     if (options_.include_location) {
         oss << ",\n" << indent() << quote("location") << ": " << serializeLocation(match.location);
     }
-    
+
     current_depth_--;
     oss << "\n" << indent() << "}";
-    
+
     return oss.str();
 }
 
@@ -825,6 +841,109 @@ std::string ASTSerializer::serializeTensorLiteral(const TensorLiteral& tensor) {
     current_depth_--;
     oss << "\n" << indent() << "}";
     
+    return oss.str();
+}
+
+// ============================================================================
+// Pattern Serialization
+// ============================================================================
+
+std::string ASTSerializer::serializePattern(const Pattern& pat) {
+    node_count_++;
+    std::ostringstream oss;
+    oss << "{\n";
+    current_depth_++;
+
+    switch (pat.get_kind()) {
+        case Pattern::Kind::Wildcard: {
+            oss << indent() << quote("kind") << ": " << quote("wildcard");
+            break;
+        }
+        case Pattern::Kind::Variable: {
+            const auto& vp = static_cast<const VariablePattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("variable") << ",\n";
+            oss << indent() << quote("name") << ": " << quote(vp.get_name());
+            break;
+        }
+        case Pattern::Kind::Literal: {
+            const auto& lp = static_cast<const LiteralPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("literal") << ",\n";
+            oss << indent() << quote("value") << ": " << quote(lp.to_string());
+            break;
+        }
+        case Pattern::Kind::Constructor: {
+            const auto& cp = static_cast<const ConstructorPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("constructor") << ",\n";
+            oss << indent() << quote("name") << ": " << quote(cp.get_name()) << ",\n";
+            oss << indent() << quote("fields") << ": [";
+            const auto& fields = cp.get_fields();
+            for (size_t i = 0; i < fields.size(); i++) {
+                oss << serializePattern(*fields[i]);
+                if (i + 1 < fields.size()) oss << ", ";
+            }
+            oss << "]";
+            break;
+        }
+        case Pattern::Kind::Tuple: {
+            const auto& tp = static_cast<const TuplePattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("tuple") << ",\n";
+            oss << indent() << quote("elements") << ": [";
+            const auto& elems = tp.get_elements();
+            for (size_t i = 0; i < elems.size(); i++) {
+                oss << serializePattern(*elems[i]);
+                if (i + 1 < elems.size()) oss << ", ";
+            }
+            oss << "]";
+            break;
+        }
+        case Pattern::Kind::Array: {
+            const auto& ap = static_cast<const ArrayPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("array") << ",\n";
+            oss << indent() << quote("elements") << ": [";
+            const auto& elems = ap.get_elements();
+            for (size_t i = 0; i < elems.size(); i++) {
+                oss << serializePattern(*elems[i]);
+                if (i + 1 < elems.size()) oss << ", ";
+            }
+            oss << "]";
+            break;
+        }
+        case Pattern::Kind::Rest: {
+            const auto& rp = static_cast<const RestPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("rest") << ",\n";
+            oss << indent() << quote("name") << ": " << quote(rp.get_bind_name());
+            break;
+        }
+        case Pattern::Kind::Or: {
+            const auto& op = static_cast<const OrPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("or") << ",\n";
+            oss << indent() << quote("left") << ": " << serializePattern(*op.get_left()) << ",\n";
+            oss << indent() << quote("right") << ": " << serializePattern(*op.get_right());
+            break;
+        }
+        case Pattern::Kind::Range: {
+            const auto& rp = static_cast<const RangePattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("range") << ",\n";
+            oss << indent() << quote("start") << ": " << serializePattern(*rp.get_start()) << ",\n";
+            oss << indent() << quote("end") << ": " << serializePattern(*rp.get_end()) << ",\n";
+            oss << indent() << quote("inclusive") << ": " << boolStr(rp.is_inclusive());
+            break;
+        }
+        case Pattern::Kind::Binding: {
+            const auto& bp = static_cast<const BindingPattern&>(pat);
+            oss << indent() << quote("kind") << ": " << quote("binding") << ",\n";
+            oss << indent() << quote("name") << ": " << quote(bp.get_name()) << ",\n";
+            oss << indent() << quote("pattern") << ": " << serializePattern(*bp.get_sub_pattern());
+            break;
+        }
+    }
+
+    if (options_.include_location) {
+        oss << ",\n" << indent() << quote("location") << ": " << serializeLocation(pat.location);
+    }
+
+    current_depth_--;
+    oss << "\n" << indent() << "}";
     return oss.str();
 }
 

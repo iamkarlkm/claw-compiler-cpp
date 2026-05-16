@@ -379,10 +379,12 @@ struct VMRuntime {
     ObjectPool<ArrayValue> array_pool;
     ObjectPool<TupleValue> tuple_pool;
     ObjectPool<IteratorValue> iterator_pool;
+    ObjectPool<ObjectValue> object_pool;
+    ObjectPool<TensorValue> tensor_pool;
 
     VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE)
         : stack(stack_size), globals(MAX_GLOBALS),
-          array_pool(4), tuple_pool(2), iterator_pool(2) {
+          array_pool(4), tuple_pool(2), iterator_pool(2), object_pool(4), tensor_pool(2) {
         setup_builtins();
     }
     
@@ -628,7 +630,8 @@ private:
     bool op_input();
     bool op_type_of();
     bool op_ext();
-    
+    bool op_throw();
+
     // Iterator operations (NEW - 2026-04-26)
     bool op_iter_create();
     bool op_iter_next();

@@ -78,34 +78,40 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
     compile_state_.ip = 0;
     compile_state_.label_positions.clear();
     compile_state_.pending_jumps.clear();
-    
-    // First pass: resolve labels
-    for (size_t i = 0; i < func.code.size(); i++) {
-        const auto& inst = func.code[i];
-        (void)inst;
-        
-        // Jump targets are encoded in the instruction's operand
-        // Handle them in the second pass
-    }
-    
+
     // Generate function prologue
-    emit_prologue(func.local_count);
-    
-    // Second pass: emit machine code
+    emit_prologue(func.arity, func.local_count);
+
+    // Emit machine code and record label positions
     for (size_t i = 0; i < func.code.size(); i++) {
         compile_state_.ip = i;
+        // Record machine code position for this bytecode instruction
+        compile_state_.label_positions[i] = generator_.getCode().size();
         const auto& inst = func.code[i];
-        
+
         if (!compile_instruction(inst)) {
             return false;
         }
     }
-    
+
+    // Resolve pending jumps: patch relative offsets
+    for (const auto& [target_ip, positions] : compile_state_.pending_jumps) {
+        auto it = compile_state_.label_positions.find(target_ip);
+        if (it == compile_state_.label_positions.end()) {
+            set_error("Jump target out of range: " + std::to_string(target_ip));
+            return false;
+        }
+        size_t target_pos = it->second;
+        for (size_t jump_pos : positions) {
+            generator_.patchRelativeJump(jump_pos, static_cast<int64_t>(target_pos));
+        }
+    }
+
     // Apply optimizations
     if (config_.enable_optimizations) {
         optimize_peephole();
     }
-    
+
     return true;
 }
 
@@ -180,7 +186,9 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             generator_.emitMOV_RR(X86Reg::RAX, X86Reg::RDX);
             break;
         case Op::INEG:
+            generator_.emitPOP(X86Reg::RAX);
             generator_.emitNEG(X86Reg::RAX);
+            generator_.emitPUSH(X86Reg::RAX);
             break;
         case Op::IINC:
             generator_.emitADD_RI(X86Reg::RAX, 1);
@@ -196,9 +204,9 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             if (!compile_float_arithmetic(inst)) return false;
             break;
         case Op::FMOD:
-            // TODO: fmod requires runtime call
-            break;
-            
+            set_error("FMOD not yet supported in AOT");
+            return false;
+
         // Integer comparison
         case Op::IEQ:
         case Op::INE:
@@ -208,7 +216,7 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::IGE:
             if (!compile_comparison(inst)) return false;
             break;
-            
+
         // Float comparison
         case Op::FEQ:
         case Op::FNE:
@@ -218,16 +226,21 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::FGE:
             if (!compile_float_comparison(inst)) return false;
             break;
-            
+
         // Logical operations
         case Op::AND:
         case Op::OR:
             if (!compile_logical(inst)) return false;
             break;
         case Op::NOT:
-            generator_.emitNOT(X86Reg::RAX);
+            generator_.emitPOP(X86Reg::RAX);
+            generator_.emitTEST_RR(X86Reg::RAX, X86Reg::RAX);
+            generator_.emitMOV_RI(X86Reg::RAX, 1);
+            generator_.emitJcc_rel32(Condition::E, 3);
+            generator_.emitXOR_RR(X86Reg::RAX, X86Reg::RAX);
+            generator_.emitPUSH(X86Reg::RAX);
             break;
-            
+
         // Bitwise operations
         case Op::BAND:
         case Op::BOR:
@@ -247,7 +260,7 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::USHR:
             generator_.emitSHR_RI(X86Reg::RAX, 1);
             break;
-            
+
         // Type conversion
         case Op::I2F:
         case Op::F2I:
@@ -259,9 +272,9 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::F2S:
         case Op::S2I:
         case Op::S2F:
-            // String conversions require runtime support
-            break;
-            
+            set_error("String conversions not yet supported in AOT");
+            return false;
+
         // Local variables
         case Op::LOAD_LOCAL:
         case Op::LOAD_LOCAL_0:
@@ -269,14 +282,17 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::STORE_LOCAL:
             if (!compile_memory(inst)) return false;
             break;
-            
+
         // Global variables
         case Op::LOAD_GLOBAL:
+            // In AOT, function references are resolved at CALL time;
+            // non-function globals are not yet supported.
+            break;
         case Op::STORE_GLOBAL:
         case Op::DEFINE_GLOBAL:
-            // Global variables via runtime
-            break;
-            
+            set_error("Global variables not yet supported in AOT");
+            return false;
+
         // Control flow
         case Op::JMP:
         case Op::JMP_IF:
@@ -284,7 +300,7 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::LOOP:
             if (!compile_control_flow(inst)) return false;
             break;
-            
+
         // Function calls
         case Op::CALL:
         case Op::CALL_EXT:
@@ -292,40 +308,40 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::RET_NULL:
             if (!compile_call(inst)) return false;
             break;
-            
+
         // Function definition
         case Op::DEFINE_FUNC:
         case Op::CLOSURE:
         case Op::CLOSE_UPVALUE:
         case Op::GET_UPVALUE:
-            // Function/closure handling via runtime
-            break;
-            
+            set_error("Closures/upvalues not yet supported in AOT");
+            return false;
+
         // Arrays
         case Op::ALLOC_ARRAY:
         case Op::LOAD_INDEX:
         case Op::STORE_INDEX:
         case Op::ARRAY_LEN:
         case Op::ARRAY_PUSH:
-            // Array operations via runtime
-            break;
-            
+            set_error("Array operations not yet supported in AOT");
+            return false;
+
         // Tuples
         case Op::CREATE_TUPLE:
         case Op::LOAD_ELEM:
         case Op::STORE_ELEM:
-            // Tuple operations via runtime
-            break;
-            
+            set_error("Tuple operations not yet supported in AOT");
+            return false;
+
         // Tensors
         case Op::TENSOR_CREATE:
         case Op::TENSOR_LOAD:
         case Op::TENSOR_STORE:
         case Op::TENSOR_MATMUL:
         case Op::TENSOR_RESHAPE:
-            // Tensor operations via runtime
-            break;
-            
+            set_error("Tensor operations not yet supported in AOT");
+            return false;
+
         // System
         case Op::PRINT:
         case Op::PRINTLN:
@@ -334,14 +350,14 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
         case Op::INPUT:
         case Op::TYPE_OF:
         case Op::EXT:
-            // System operations via runtime
-            break;
-            
+            set_error("System intrinsics not yet supported in AOT");
+            return false;
+
         default:
-            // Unknown instruction - skip
-            break;
+            set_error("Unknown instruction in AOT: " + std::to_string(static_cast<int>(inst.op)));
+            return false;
     }
-    
+
     return true;
 }
 
@@ -584,8 +600,9 @@ bool NativeCodeGenerator::compile_bitwise(const bytecode::Instruction& inst) {
 
 bool NativeCodeGenerator::compile_control_flow(const bytecode::Instruction& inst) {
     using Op = bytecode::OpCode;
-    uint32_t target = inst.operand;
-    
+    // Bytecode jump operands are relative offsets from the next instruction
+    uint32_t target = compile_state_.ip + 1 + inst.operand;
+
     switch (inst.op) {
         case Op::JMP:
             // Unconditional jump
@@ -593,7 +610,7 @@ bool NativeCodeGenerator::compile_control_flow(const bytecode::Instruction& inst
             compile_state_.pending_jumps[target].push_back(
                 generator_.getCode().size() - 4);
             break;
-            
+
         case Op::JMP_IF:
             // Conditional jump if true
             generator_.emitPOP(X86Reg::RAX);
@@ -602,7 +619,7 @@ bool NativeCodeGenerator::compile_control_flow(const bytecode::Instruction& inst
             compile_state_.pending_jumps[target].push_back(
                 generator_.getCode().size() - 4);
             break;
-            
+
         case Op::JMP_IF_NOT:
             // Conditional jump if false
             generator_.emitPOP(X86Reg::RAX);
@@ -611,19 +628,19 @@ bool NativeCodeGenerator::compile_control_flow(const bytecode::Instruction& inst
             compile_state_.pending_jumps[target].push_back(
                 generator_.getCode().size() - 4);
             break;
-            
+
         case Op::LOOP:
             // Loop back
             generator_.emitJMP_rel32(0);
             compile_state_.pending_jumps[target].push_back(
                 generator_.getCode().size() - 4);
             break;
-            
+
         default:
             set_error("Unknown control flow instruction");
             return false;
     }
-    
+
     return true;
 }
 
@@ -635,14 +652,49 @@ bool NativeCodeGenerator::compile_call(const bytecode::Instruction& inst) {
     using Op = bytecode::OpCode;
     
     switch (inst.op) {
-        case Op::CALL:
-            // Call function at operand address
-            generator_.emitCALL_rel32(0);
-            compile_state_.pending_jumps[inst.operand].push_back(
-                generator_.getCode().size() - 4);
-            // Push return value placeholder
+        case Op::CALL: {
+            // AOT direct call: look back for LOAD_GLOBAL callee
+            std::string target_func;
+            if (compile_state_.func && compile_state_.ip > 0) {
+                const auto& prev = compile_state_.func->code[compile_state_.ip - 1];
+                if (prev.op == bytecode::OpCode::LOAD_GLOBAL) {
+                    uint32_t str_idx = prev.operand;
+                    if (current_module_ && str_idx < current_module_->constants.values.size()) {
+                        const auto& val = current_module_->constants.values[str_idx];
+                        if (val.type == bytecode::ValueType::STRING) {
+                            target_func = val.str;
+                        }
+                    }
+                }
+            }
+
+            uint32_t arg_count = inst.operand;
+            static const X86Reg arg_regs[] = {
+                X86Reg::RDI, X86Reg::RSI, X86Reg::RDX,
+                X86Reg::RCX, X86Reg::R8, X86Reg::R9
+            };
+            for (int i = static_cast<int>(arg_count) - 1; i >= 0; --i) {
+                if (i < 6) {
+                    generator_.emitPOP(arg_regs[i]);
+                } else {
+                    generator_.emitPOP(X86Reg::RAX); // discard extra args for now
+                }
+            }
+
+            if (!target_func.empty()) {
+                generator_.emitCALL_rel32(0);
+                current_external_calls_.push_back({
+                    generator_.getCode().size() - 4,
+                    "_" + target_func
+                });
+            } else {
+                set_error("AOT: dynamic or indirect function calls not yet supported");
+                return false;
+            }
+
             generator_.emitPUSH(X86Reg::RAX);
             break;
+        }
             
         case Op::CALL_EXT: {
             // Decode operands: lower 16 bits = str_idx, upper 16 bits = arg_count
@@ -814,16 +866,26 @@ bool NativeCodeGenerator::compile_conversion(const bytecode::Instruction& inst) 
 // Runtime Helpers
 // ============================================================================
 
-void NativeCodeGenerator::emit_prologue(int local_count) {
+void NativeCodeGenerator::emit_prologue(int arity, int local_count) {
     // Push rbp
     generator_.emitPUSH(X86Reg::RBP);
     // Move rsp to rbp
     generator_.emitMOV_RR(X86Reg::RBP, X86Reg::RSP);
-    
+
     // Allocate locals (subtract from rsp, aligned to 16 bytes)
     size_t locals_size = (local_count * 8 + 15) & ~15;
     if (locals_size > 0) {
         generator_.emitSUB_RI(X86Reg::RSP, locals_size);
+    }
+
+    // Save argument registers into local slots for ABI compliance
+    static const X86Reg arg_regs[] = {
+        X86Reg::RDI, X86Reg::RSI, X86Reg::RDX,
+        X86Reg::RCX, X86Reg::R8, X86Reg::R9
+    };
+    for (int i = 0; i < arity && i < 6; ++i) {
+        int offset = -8 * (i + 1);
+        generator_.emitMOV_MR(Operand::makeMem(X86Reg::RBP, X86Reg::NONE, offset), arg_regs[i]);
     }
 }
 

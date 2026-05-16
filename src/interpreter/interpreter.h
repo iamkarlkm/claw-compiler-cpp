@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <numeric>
 #include "ast/ast.h"
+#include "ast/pattern.h"
 #include "lexer/token.h"
 
 namespace claw {
@@ -1634,42 +1635,68 @@ public:
 
             bool matched = false;
 
-            // Wildcard: identifier '_' matches anything
-            if (pattern->get_kind() == claw::ast::Expression::Kind::Identifier) {
-                auto* ident = static_cast<claw::ast::IdentifierExpr*>(pattern);
-                if (ident->get_name() == "_") {
+            switch (pattern->get_kind()) {
+                case claw::ast::Pattern::Kind::Wildcard: {
                     matched = true;
-                } else {
-                    // Bind pattern: create variable with pattern name bound to match value
+                    break;
+                }
+
+                case claw::ast::Pattern::Kind::Variable: {
+                    auto* vp = static_cast<claw::ast::VariablePattern*>(pattern);
                     RuntimeValue rv;
                     rv.type_name = "auto";
                     rv.scalar = match_val;
-                    scoped_set(ident->get_name(), rv);
+                    scoped_set(vp->get_name(), rv);
                     matched = true;
+                    break;
                 }
-            } else if (pattern->get_kind() == claw::ast::Expression::Kind::Call) {
-                // Enum variant pattern: Some(v) or None()
-                auto* call = static_cast<claw::ast::CallExpr*>(pattern);
-                if (call->get_callee()->get_kind() == claw::ast::Expression::Kind::Identifier) {
-                    auto* ident = static_cast<claw::ast::IdentifierExpr*>(call->get_callee());
-                    std::string variant_name = ident->get_name();
+
+                case claw::ast::Pattern::Kind::Literal: {
+                    auto* lp = static_cast<claw::ast::LiteralPattern*>(pattern);
+                    Value pattern_val;
+                    std::visit([&](auto&& v) {
+                        using T = std::decay_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, int64_t>) pattern_val = Value(v);
+                        else if constexpr (std::is_same_v<T, double>) pattern_val = Value(v);
+                        else if constexpr (std::is_same_v<T, std::string>) pattern_val = Value(v);
+                        else if constexpr (std::is_same_v<T, bool>) pattern_val = Value(v);
+                        else if constexpr (std::is_same_v<T, char>) pattern_val = Value(std::string(1, v));
+                    }, lp->get_value());
+                    matched = (match_val == pattern_val);
+                    break;
+                }
+
+                case claw::ast::Pattern::Kind::Constructor: {
+                    auto* cp = static_cast<claw::ast::ConstructorPattern*>(pattern);
+                    std::string variant_name = cp->get_name();
                     if (match_rv && match_rv->is_enum() && match_rv->enum_variant_name == variant_name) {
                         matched = true;
-                        // Bind pattern arguments to payload
-                        const auto& args = call->get_arguments();
-                        if (!args.empty() && args[0]->get_kind() == claw::ast::Expression::Kind::Identifier) {
-                            auto* bind_ident = static_cast<claw::ast::IdentifierExpr*>(args[0].get());
+                        const auto& fields = cp->get_fields();
+                        if (!fields.empty() && fields[0]->get_kind() == claw::ast::Pattern::Kind::Variable) {
+                            auto* bind_vp = static_cast<claw::ast::VariablePattern*>(fields[0].get());
                             RuntimeValue bind_val;
                             bind_val.type_name = "auto";
                             bind_val.scalar = match_rv->scalar;
-                            scoped_set(bind_ident->get_name(), bind_val);
+                            scoped_set(bind_vp->get_name(), bind_val);
                         }
                     }
+                    break;
                 }
-            } else {
-                // Literal pattern: compare values
-                Value pattern_val = evaluate(pattern);
-                matched = (match_val == pattern_val);
+
+                case claw::ast::Pattern::Kind::Binding: {
+                    auto* bp = static_cast<claw::ast::BindingPattern*>(pattern);
+                    RuntimeValue rv;
+                    rv.type_name = "auto";
+                    rv.scalar = match_val;
+                    scoped_set(bp->get_name(), rv);
+                    // TODO: also match sub-pattern
+                    matched = true;
+                    break;
+                }
+
+                default:
+                    matched = true; // Conservative fallback
+                    break;
             }
 
             if (matched) {

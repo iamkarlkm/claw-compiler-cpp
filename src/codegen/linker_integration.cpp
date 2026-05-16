@@ -24,11 +24,59 @@ void claw_println(long long x) {
 }
 )";
 
-LinkerIntegration::LinkerIntegration() {}
+LinkerIntegration::LinkerIntegration()
+    : runtime_object_path_("/tmp/claw_aot_runtime.o"),
+      linker_cmd_(detect_fast_linker()) {}
 
 bool LinkerIntegration::has_system_linker() {
     int ret = std::system("cc --version > /dev/null 2>&1");
     return ret == 0;
+}
+
+static std::string get_cache_dir() {
+    const char* home = getenv("HOME");
+    if (!home) home = ".";
+    return std::string(home) + "/.claw/cache";
+}
+
+std::string LinkerIntegration::detect_fast_linker() {
+    // Prefer faster linkers: zld (macOS) > mold (Linux) > lld > system ld
+    // We probe by actually linking a tiny program because --version is
+    // handled by the compiler driver, not the linker.
+    // The result is cached to a file so we only probe once per system.
+    std::string cache_file = get_cache_dir() + "/linker";
+    {
+        std::ifstream in(cache_file);
+        if (in) {
+            std::string cached;
+            std::getline(in, cached);
+            if (!cached.empty()) return cached;
+        }
+    }
+
+    static const char* candidates[] = {
+        "cc -fuse-ld=zld",   // zld - fastest macOS linker
+        "cc -fuse-ld=mold",  // mold - fastest Linux linker
+        "cc -fuse-ld=lld",   // lld - LLVM linker
+    };
+    std::string chosen = "cc";
+    for (const char* candidate : candidates) {
+        std::string probe = "echo 'int main(){}' | " + std::string(candidate) +
+                            " -x c - -o /tmp/_claw_linker_probe > /dev/null 2>&1";
+        if (std::system(probe.c_str()) == 0) {
+            std::remove("/tmp/_claw_linker_probe");
+            chosen = candidate;
+            break;
+        }
+    }
+
+    // Write cache
+    std::string cmd = "mkdir -p " + get_cache_dir();
+    std::system(cmd.c_str());
+    std::ofstream out(cache_file);
+    if (out) out << chosen;
+
+    return chosen;
 }
 
 bool LinkerIntegration::compile_runtime_stub() {
@@ -63,7 +111,7 @@ bool LinkerIntegration::compile_runtime_stub() {
 }
 
 bool LinkerIntegration::invoke_linker(const std::vector<std::string>& args) {
-    std::string cmd = "cc";
+    std::string cmd = linker_cmd_;
     for (const auto& arg : args) {
         cmd += " ";
         cmd += arg;
