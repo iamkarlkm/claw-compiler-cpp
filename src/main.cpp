@@ -133,6 +133,7 @@ struct CompileOptions {
     bool verbose = false;
     bool show_time = false;
     bool show_ir = false;
+    bool diagnostics_json = false;
 };
 
 // ============================================================================
@@ -164,6 +165,7 @@ void print_usage(const char* prog) {
     std::cout << "  -v, --verbose       Verbose output\n";
     std::cout << "  --time              Show compilation time\n";
     std::cout << "  --show-ir           Show generated IR/code\n";
+    std::cout << "  --diagnostics-json  Output diagnostics as JSON\n";
     std::cout << "  -h, --help          Show this help\n";
 }
 
@@ -257,6 +259,9 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
         }
         else if (arg == "--show-ir") {
             opts.show_ir = true;
+        }
+        else if (arg == "--diagnostics-json") {
+            opts.diagnostics_json = true;
         }
         else if (arg == "--mode" || arg == "-m") {
             // 支持 --mode=xxx 或 -m xxx 格式
@@ -375,18 +380,23 @@ std::shared_ptr<ast::Program> parse(const std::vector<Token>& tokens,
 // 类型检查
 // ============================================================================
 
-bool type_check(ast::Program& program, bool verbose) {
+bool type_check(ast::Program& program, bool verbose,
+                std::vector<CompilerError>* out_errors = nullptr) {
     type::TypeChecker type_checker;
     type_checker.check(program);
-    
+
     if (type_checker.has_errors()) {
-        std::cerr << "=== Type Errors ===\n";
-        for (const auto& err : type_checker.errors()) {
-            std::cerr << "Error: " << err.what() << "\n";
+        if (out_errors) {
+            *out_errors = type_checker.errors();
+        } else {
+            std::cerr << "=== Type Errors ===\n";
+            for (const auto& err : type_checker.errors()) {
+                std::cerr << "Error: " << err.what() << "\n";
+            }
         }
         return false;
     }
-    
+
     if (verbose) {
         std::cout << "  Type checking passed\n";
     }
@@ -997,6 +1007,9 @@ int main(int argc, char** argv) {
         std::cout << "  Parse: " << duration_cast<microseconds>(t_parse_end - t_parse_start).count() / 1000.0 << " ms\n";
     }
     if (!program) {
+        if (opts.diagnostics_json) {
+            std::cout << reporter.to_json() << "\n";
+        }
         return 1;
     }
 
@@ -1016,7 +1029,15 @@ int main(int argc, char** argv) {
     auto t_type_start = high_resolution_clock::now();
     if (opts.mode != CompileOptions::Mode::Tokens &&
         opts.mode != CompileOptions::Mode::AST) {
-        if (!type_check(*program, opts.verbose)) {
+        std::vector<CompilerError> type_errors;
+        if (!type_check(*program, opts.verbose, opts.diagnostics_json ? &type_errors : nullptr)) {
+            if (opts.diagnostics_json) {
+                DiagnosticReporter type_reporter;
+                for (const auto& err : type_errors) {
+                    type_reporter.report_error(err);
+                }
+                std::cout << type_reporter.to_json() << "\n";
+            }
             return 1;
         }
     }

@@ -45,9 +45,11 @@ CORE_SOURCES = \
     src/parser/parser.h \
     src/ast/ast.h \
     src/ast/ast.cpp \
+    src/ast/ast_compact_repr.cpp \
     src/type/type_system.h \
     src/type/type_checker.cpp \
     src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
     src/semantic/semantic_analyzer.cpp \
     src/optimizer/tree_shaker.cpp \
     src/optimizer/constant_folder.cpp \
@@ -165,6 +167,8 @@ TEST_ALGEBRAIC_SIMPLIFIER_SOURCES = src/optimizer/algebraic_simplifier.cpp src/a
 TEST_PATTERN_CHECKER_SOURCES = src/type/type_checker.cpp src/type/pattern_checker.cpp src/test/test_pattern_checker.cpp
 TEST_MONOMORPHIZER_SOURCES = src/optimizer/monomorphizer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_monomorphizer.cpp
 TEST_ITERATOR_DESUGARER_SOURCES = src/optimizer/iterator_desugarer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_iterator_desugarer.cpp
+TEST_TYPE_INFERENCE_SOURCES = src/type/type_inference.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/ast/ast.cpp src/ast/clone.cpp src/test/test_type_inference.cpp
+TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/clone.cpp src/test/test_compact_ast.cpp
 
 # ============================================================================
 # Targets
@@ -173,7 +177,7 @@ TEST_ITERATOR_DESUGARER_SOURCES = src/optimizer/iterator_desugarer.cpp src/ast/c
 .PHONY: all clean test help \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
-    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer
+    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-type-inference test-compact-ast
 
 all: claw claw-lsp claw-repl
 
@@ -216,7 +220,7 @@ claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrate
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-aot
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-type-inference test-compact-ast test-aot
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -303,6 +307,14 @@ test-monomorphizer:
 test-iterator-desugarer:
 	$(CXX) $(CXXFLAGS) -o test_iterator_desugarer $(TEST_ITERATOR_DESUGARER_SOURCES)
 	@./test_iterator_desugarer
+
+test-type-inference:
+	$(CXX) $(CXXFLAGS) -o test_type_inference $(TEST_TYPE_INFERENCE_SOURCES)
+	@./test_type_inference
+
+test-compact-ast:
+	$(CXX) $(CXXFLAGS) -o test_compact_ast $(TEST_COMPACT_AST_SOURCES)
+	@./test_compact_ast
 
 test-aot: claw
 	@echo "=== AOT Native Codegen Tests ==="

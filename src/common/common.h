@@ -141,17 +141,20 @@ private:
     SourceSpan span;
     ErrorSeverity severity;
     std::string code;
-    
+    std::vector<std::string> suggestions;
+
 public:
     CompilerError(const std::string& message, const SourceSpan& span,
                   ErrorSeverity severity = ErrorSeverity::Error,
-                  const std::string& code = "")
-        : std::runtime_error(message), span(span), severity(severity), code(code) {}
-    
+                  const std::string& code = "",
+                  const std::vector<std::string>& suggestions = {})
+        : std::runtime_error(message), span(span), severity(severity), code(code), suggestions(suggestions) {}
+
     const SourceSpan& get_span() const { return span; }
     ErrorSeverity get_severity() const { return severity; }
     const std::string& get_code() const { return code; }
-    
+    const std::vector<std::string>& get_suggestions() const { return suggestions; }
+
     std::string format() const {
         std::string sev_str;
         switch (severity) {
@@ -161,14 +164,22 @@ public:
             case ErrorSeverity::Fatal: sev_str = "fatal error"; break;
             case ErrorSeverity::Bug: sev_str = "compiler bug"; break;
         }
-        
+
         std::string result = span.to_string() + ": " + sev_str;
         if (!code.empty()) {
             result += " [" + code + "]";
         }
         result += std::string(": ") + what();
+        if (!suggestions.empty()) {
+            result += "\n  help:";
+            for (const auto& s : suggestions) {
+                result += "\n    - " + s;
+            }
+        }
         return result;
     }
+
+    std::string to_json() const;
 };
 
 // Diagnostic reporter
@@ -199,10 +210,13 @@ public:
                  const std::string& code = "") {
         report_error(CompilerError(msg, span, ErrorSeverity::Warning, code));
     }
-    
+
     void note(const std::string& msg, const SourceSpan& span) {
         report_error(CompilerError(msg, span, ErrorSeverity::Note));
     }
+
+    // Structured JSON output for AI/IDE consumption
+    std::string to_json() const;
     
     bool has_errors() const { return error_count > 0; }
     size_t get_error_count() const { return error_count; }

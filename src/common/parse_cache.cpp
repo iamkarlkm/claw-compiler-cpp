@@ -350,4 +350,83 @@ void ParseCache::invalidate_all() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic JSON serialization
+// ---------------------------------------------------------------------------
+
+static std::string json_escape(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default: result += c; break;
+        }
+    }
+    return result;
+}
+
+static std::string severity_to_string(ErrorSeverity sev) {
+    switch (sev) {
+        case ErrorSeverity::Note: return "note";
+        case ErrorSeverity::Warning: return "warning";
+        case ErrorSeverity::Error: return "error";
+        case ErrorSeverity::Fatal: return "fatal";
+        case ErrorSeverity::Bug: return "bug";
+    }
+    return "error";
+}
+
+std::string CompilerError::to_json() const {
+    std::string json = "{";
+    json += "\"severity\":\"" + severity_to_string(severity) + "\",";
+    json += "\"code\":\"" + json_escape(code) + "\",";
+    json += "\"message\":\"" + json_escape(what()) + "\",";
+    json += "\"span\":{";
+    json += "\"file\":\"" + json_escape(span.start.filename) + "\",";
+    json += "\"line\":" + std::to_string(span.start.line) + ",";
+    json += "\"column\":" + std::to_string(span.start.column) + ",";
+    json += "\"end_line\":" + std::to_string(span.end.line) + ",";
+    json += "\"end_column\":" + std::to_string(span.end.column);
+    json += "}";
+    if (!suggestions.empty()) {
+        json += ",\"suggestions\":[";
+        for (size_t i = 0; i < suggestions.size(); ++i) {
+            if (i > 0) json += ",";
+            json += "\"" + json_escape(suggestions[i]) + "\"";
+        }
+        json += "]";
+    }
+    json += "}";
+    return json;
+}
+
+std::string DiagnosticReporter::to_json() const {
+    std::string json = "{";
+    json += "\"error_count\":" + std::to_string(error_count) + ",";
+    json += "\"warning_count\":" + std::to_string(warning_count) + ",";
+    json += "\"diagnostics\":[";
+
+    bool first = true;
+    for (const auto& w : warnings) {
+        if (!first) json += ",";
+        first = false;
+        json += w.to_json();
+    }
+    for (const auto& e : errors) {
+        if (!first) json += ",";
+        first = false;
+        json += e.to_json();
+    }
+
+    json += "]}";
+    return json;
+}
+
 } // namespace claw
