@@ -154,16 +154,16 @@ TEST_VM_EVALUATOR_SOURCES = src/auto_scheduler/vm_evaluator.cpp src/auto_schedul
 # Note: test-tensorir removed - no test file exists
 TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/test/test_wasm_ir.cpp
 TEST_ATTRIBUTE_SOURCES = src/frontend/attribute.cpp src/test/test_attribute.cpp
-TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/test/test_doc_generator.cpp
+TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/test/test_doc_generator.cpp
 TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp test/benchmark_ir_passes.cpp
 TEST_TREE_SHAKER_SOURCES = src/optimizer/tree_shaker.cpp src/test/test_tree_shaker.cpp
 TEST_CONSTANT_FOLDER_SOURCES = src/optimizer/constant_folder.cpp src/test/test_constant_folder.cpp
 TEST_CONTROL_FLOW_SIMPLIFIER_SOURCES = src/optimizer/control_flow_simplifier.cpp src/test/test_control_flow_simplifier.cpp
 TEST_DEAD_CODE_ELIMINATOR_SOURCES = src/optimizer/dead_code_eliminator.cpp src/test/test_dead_code_eliminator.cpp
 TEST_PEEPHOLE_OPTIMIZER_SOURCES = src/optimizer/peephole_optimizer.cpp src/test/test_peephole_optimizer.cpp
-TEST_FUNCTION_INLINER_SOURCES = src/optimizer/function_inliner.cpp src/ast/clone.cpp src/test/test_function_inliner.cpp
-TEST_TAIL_CALL_OPTIMIZER_SOURCES = src/optimizer/tail_call_optimizer.cpp src/ast/clone.cpp src/test/test_tail_call_optimizer.cpp
-TEST_ALGEBRAIC_SIMPLIFIER_SOURCES = src/optimizer/algebraic_simplifier.cpp src/ast/clone.cpp src/test/test_algebraic_simplifier.cpp
+TEST_FUNCTION_INLINER_SOURCES = src/optimizer/function_inliner.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_function_inliner.cpp
+TEST_TAIL_CALL_OPTIMIZER_SOURCES = src/optimizer/tail_call_optimizer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_tail_call_optimizer.cpp
+TEST_ALGEBRAIC_SIMPLIFIER_SOURCES = src/optimizer/algebraic_simplifier.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_algebraic_simplifier.cpp
 TEST_PATTERN_CHECKER_SOURCES = src/type/type_checker.cpp src/type/pattern_checker.cpp src/test/test_pattern_checker.cpp
 TEST_MONOMORPHIZER_SOURCES = src/optimizer/monomorphizer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_monomorphizer.cpp
 TEST_ITERATOR_DESUGARER_SOURCES = src/optimizer/iterator_desugarer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_iterator_desugarer.cpp
@@ -177,7 +177,7 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
 .PHONY: all clean test help \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
-    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-type-inference test-compact-ast
+    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast
 
 all: claw claw-lsp claw-repl
 
@@ -220,7 +220,7 @@ claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrate
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-type-inference test-compact-ast test-aot
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-aot
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -407,6 +407,18 @@ test-bytecode-opt: claw
 	@test "`./claw -b -O1 /tmp/_bc_range.claw 2>/dev/null | tail -2 | head -1`" = "10" || (echo "BC range iteration failed"; exit 1)
 	@rm -f /tmp/_bc_*.claw
 	@echo "Bytecode optimization tests passed"
+
+test-iterator-benchmark: claw
+	@echo "=== Iterator Zero-Cost Benchmark ==="
+	@echo "fn main() { let sum = 0; for x in [1, 2, 3, 4, 5] { sum = sum + x; } print(sum); }" > /tmp/_bench_for.claw
+	@echo "fn main() { let sum = 0; let _i = 0; loop { if _i >= len([1, 2, 3, 4, 5]) { break; } let x = [1, 2, 3, 4, 5][_i]; sum = sum + x; _i = _i + 1; } print(sum); }" > /tmp/_bench_loop.claw
+	@FOR_INSNS=`./claw -b -O1 -v /tmp/_bench_for.claw 2>&1 | grep "Total bytecode instructions" | awk '{print $$4}'`; \
+	 LOOP_INSNS=`./claw -b -O1 -v /tmp/_bench_loop.claw 2>&1 | grep "Total bytecode instructions" | awk '{print $$4}'`; \
+	 echo "For-loop:     $$FOR_INSNS instructions"; \
+	 echo "Hand-written: $$LOOP_INSNS instructions"; \
+	 test "$$FOR_INSNS" = "$$LOOP_INSNS" || (echo "BENCHMARK FAILED: zero-cost claim violated"; exit 1)
+	@rm -f /tmp/_bench_*.claw
+	@echo "Zero-cost iterator verified: both produce same instruction count"
 
 # ============================================================================
 # Clean
