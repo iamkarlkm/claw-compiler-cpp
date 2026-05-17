@@ -182,6 +182,33 @@ fn main() {
 - 17 种内置属性
 - 对象式/函数式宏 + 递归展开
 
+### 模式匹配与穷尽性检查
+- 专用 `Pattern` AST 层级（wildcard、variable、literal、constructor、tuple、array、or、range、binding）
+- 基于 Wadler/Leijen 算法的穷尽性检查
+- `match` 语句编译期覆盖验证，报告未覆盖分支
+
+### 泛型单态化（零开销泛型）
+- 编译期泛型实例化：`fn<T> id(x: T) -> T` → `id__Int`、`id__String`
+- 实参类型推断泛型参数（`id(42)` 自动推断 `T = Int`）
+- 实例缓存去重，避免代码膨胀
+
+### 精准错误处理（Error Effect Tracking）
+- 函数签名标注 `raise` / `noraise` / `raise?`
+- 编译期错误效应推导与传播检查
+- `try?` 表达式编译期脱糖为 `Result<T, E>`
+- 高阶函数错误多态性
+
+### 零开销迭代器
+- `for x in arr` 编译期脱糖为索引循环，消除 IteratorValue 堆分配
+- `for i in start..end` 范围迭代脱糖
+- `for x in enumerate(arr)` 枚举迭代脱糖
+- 脱糖后字节码与手写循环指令数一致（48 vs 48，0% 差异）
+
+### AI 原生设计
+- 结构化诊断输出（`--diagnostics-json`）：错误码、源码位置、修复建议
+- 增强类型推断： Hindley-Milner 风格泛型参数推导
+- 紧凑 AST 序列化（S-表达式风格），节省 30-50% tokens
+
 ---
 
 ## 项目结构
@@ -234,7 +261,13 @@ make test-attribute    # 属性/宏系统 (17 测试)
 make test-docgen       # 文档生成器 (16 测试)
 make test-ir-passes    # IR 优化遍
 make test-lexer        # 词法分析器 (29 测试)
-make test-aot          # AOT 端到端测试 (17 测试)
+make test-aot                 # AOT 端到端测试 (17 测试)
+make test-pattern-checker     # 模式匹配穷尽性检查
+make test-monomorphizer       # 泛型单态化
+make test-iterator-desugarer  # 迭代器脱糖
+make test-iterator-benchmark  # 零开销迭代器性能验证
+make test-type-inference      # 类型推断增强
+make test-compact-ast         # 紧凑 AST 序列化
 ```
 
 ---
@@ -262,12 +295,17 @@ make test-aot          # AOT 端到端测试 (17 测试)
 - [x] Phase 24: CUDA 代码生成器
 - [x] Phase 26: 属性与宏系统
 - [x] Phase 27: 文档生成器
+- [x] Phase 28: 模式匹配增强 + 穷尽性检查
+- [x] Phase 29: 泛型单态化（Monomorphization）
+- [x] Phase 30: 精准错误处理（Error Effect Tracking）
+- [x] Phase 31: 零开销迭代器（编译期脱糖）
+- [x] Phase 32: AI 原生设计（结构化诊断 / 类型推断 / 紧凑 AST）
 
 ### 进行中 / 待完善
 - [ ] WebAssembly 后端完整编译链
-- [ ] 完整异常处理 (try/catch/throw) — 前端已完成，后端待完善
-- [ ] 泛型类型完整后端支持
 - [ ] 结构体 / 枚举
+- [ ] 标准库泛型容器（`Array<T>`、`Map<K,V>` 完整后端支持）
+- [ ] 效果系统与异步/并发模型
 
 ---
 
