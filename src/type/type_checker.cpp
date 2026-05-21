@@ -114,6 +114,13 @@ TypePtr TypeCache::get_result(TypePtr ok, TypePtr err) {
     return result_types_[key];
 }
 
+TypePtr TypeCache::get_future(TypePtr inner) {
+    if (future_types_.count(inner) == 0) {
+        future_types_[inner] = std::make_shared<FutureType>(inner);
+    }
+    return future_types_[inner];
+}
+
 TypePtr TypeCache::get_primitive(TypeKind kind) {
     if (primitives_.count(kind) > 0) {
         return primitives_[kind];
@@ -407,6 +414,7 @@ static std::vector<std::unordered_map<std::string, TypePtr>> var_scopes;
 static std::unordered_map<std::string, std::vector<std::pair<std::string, TypePtr>>> struct_fields;
 static std::unordered_map<std::string, std::vector<std::string>> enum_variants;
 static std::unordered_map<std::string, TypePtr> function_sigs;
+static bool in_async_function = false;
 
 static void push_scope() { var_scopes.emplace_back(); }
 static void pop_scope() { if (!var_scopes.empty()) var_scopes.pop_back(); }
@@ -461,6 +469,9 @@ void TypeChecker::check(const ast::Program& program) {
         } else if (stmt->get_kind() == ast::Statement::Kind::Function) {
             auto* f = static_cast<const ast::FunctionStmt*>(stmt.get());
             TypePtr ret = parse_type_name(f->get_return_type());
+            if (f->is_async()) {
+                ret = TypeCache::instance().get_future(ret);
+            }
             function_sigs[f->get_name()] = ret;
         }
     }
@@ -640,6 +651,32 @@ TypePtr TypeChecker::check_expr(const ast::Expression* expr) {
             }
             if (!elem || elem->is_unknown()) elem = Type::int64();
             return TypeCache::instance().get_array(elem, arr->size());
+        }
+        case ast::Expression::Kind::Await: {
+            auto* await = static_cast<const ast::AwaitExpr*>(expr);
+            if (!in_async_function) {
+                type_error("await can only be used inside async functions", await->get_span());
+            }
+            TypePtr operand_type = check_expr(await->get_operand());
+            if (operand_type && operand_type->is_future()) {
+                auto* future = static_cast<FutureType*>(operand_type.get());
+                return future->inner_type;
+            }
+            if (operand_type && !operand_type->is_unknown()) {
+                type_error("await requires a Future type, found " + operand_type->to_string(), await->get_span());
+            }
+            return Type::unknown();
+        }
+        case ast::Expression::Kind::TryQuestion: {
+            auto* tq = static_cast<const ast::TryQuestionExpr*>(expr);
+            TypePtr operand_type = check_expr(tq->get_operand());
+            if (!operand_type || operand_type->is_unknown()) {
+                return Type::unknown();
+            }
+            // try? expr returns Result<T, Error> where T is the type of expr
+            // For now, use generic Error type
+            TypePtr error_type = TypeCache::instance().get_generic("Error");
+            return TypeCache::instance().get_result(operand_type, error_type);
         }
         default:
             return Type::unknown();
@@ -950,6 +987,8 @@ TypePtr TypeChecker::check_for(const ast::ForStmt& for_stmt) {
 }
 
 TypePtr TypeChecker::check_function(const ast::FunctionStmt& decl) {
+    bool prev_async = in_async_function;
+    in_async_function = decl.is_async();
     push_scope();
     TypePtr ret = parse_type_name(decl.get_return_type());
     for (const auto& param : decl.get_params()) {
@@ -958,6 +997,7 @@ TypePtr TypeChecker::check_function(const ast::FunctionStmt& decl) {
     auto* body = dynamic_cast<const ast::Statement*>(decl.get_body());
     if (body) check_stmt(body);
     pop_scope();
+    in_async_function = prev_async;
     return Type::unit();
 }
 
@@ -1182,6 +1222,21 @@ TypePtr ResultType::clone() const {
     return std::make_shared<ResultType>(ok_type->clone(), err_type->clone());
 }
 
+// FutureType
+bool FutureType::equals(const TypePtr& other) const {
+    if (!other || !other->is_future()) return false;
+    auto* o = static_cast<FutureType*>(other.get());
+    return inner_type->equals(o->inner_type);
+}
+
+std::string FutureType::to_string() const {
+    return "Future<" + inner_type->to_string() + ">";
+}
+
+TypePtr FutureType::clone() const {
+    return std::make_shared<FutureType>(inner_type->clone());
+}
+
 // TupleType
 bool TupleType::equals(const TypePtr& other) const {
     if (!other || (other->kind != TypeKind::TUPLE)) return false;
@@ -1335,6 +1390,7 @@ std::string type_kind_name(TypeKind kind) {
         case TypeKind::ALIAS: return "alias";
         case TypeKind::GENERIC: return "generic";  // NEW
         case TypeKind::TYPE_VAR: return "type_var";  // NEW
+        case TypeKind::FUTURE: return "future";
         case TypeKind::UNKNOWN: return "unknown";
         case TypeKind::NEVER: return "never";
         default: return "<?>";

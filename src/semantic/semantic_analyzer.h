@@ -239,7 +239,9 @@ private:
     void visit_lambda(ast::LambdaExpr* lambda);
     void visit_array(ast::ArrayExpr* arr);
     void visit_tuple(ast::TupleExpr* tup);
-    
+    void visit_await(ast::AwaitExpr* await);
+    void visit_try_question(ast::TryQuestionExpr* tq);
+
     // Type checking helpers
     claw::type::TypePtr infer_expression_type(ast::Expression* expr);
     bool check_assignment(claw::type::TypePtr target, claw::type::TypePtr source, const SourceSpan& span);

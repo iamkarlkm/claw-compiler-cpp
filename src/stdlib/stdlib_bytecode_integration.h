@@ -128,6 +128,16 @@ static const std::vector<StdlibFunctionSignature> BUILTIN_FUNCTIONS = {
     {"tensor_transpose", "tensor", {"t"}}, // EXT 106
     {"tensor_sum", "tensor", {"t", "axis"}}, // EXT 107
     {"tensor_mean", "float", {"t", "axis"}}, // EXT 108
+
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    // WebTransport 函数 (EXT 200-205)
+    {"wt_connect", "future", {"url"}},       // EXT 200
+    {"wt_send", "future", {"handle", "data"}}, // EXT 201
+    {"wt_recv", "future", {"handle"}},       // EXT 202
+    {"wt_recv_timeout", "future", {"handle", "ms"}}, // EXT 203
+    {"wt_close", "future", {"handle"}},      // EXT 204
+    {"wt_ready", "bool", {"handle"}},        // EXT 205
+#endif
 };
 
 // ============================================================================

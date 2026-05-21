@@ -32,11 +32,18 @@ public:
     }
 
     ~ObjectPool() {
+        is_shutdown_ = true;
         // Destroy any objects still in free_list
         for (T* obj : free_list_) {
             obj->~T();
         }
-        // Slab memory is freed automatically by vector dtor
+        free_list_.clear();
+        // Leak slab memory so that any late shared_ptr deleters
+        // (triggered by objects in other pools) can safely call
+        // ptr->~T() without use-after-free.
+        for (auto& slab : slabs_) {
+            slab.release();
+        }
     }
 
     // Non-copyable, non-movable
@@ -84,6 +91,17 @@ public:
         next_slot_ = 0;
     }
 
+    /** @brief Apply a function to every object in the free list.
+     *
+     * Useful for breaking cross-pool references before destruction.
+     */
+    template <typename Func>
+    void for_each_free(Func&& func) {
+        for (T* obj : free_list_) {
+            func(*obj);
+        }
+    }
+
 private:
     struct Slab {
         alignas(alignof(T)) char memory[SlabSize * sizeof(T)];
@@ -92,6 +110,7 @@ private:
     std::vector<std::unique_ptr<Slab>> slabs_;
     std::vector<T*> free_list_;
     size_t next_slot_ = 0;
+    bool is_shutdown_ = false;
 
     void add_slab() {
         slabs_.push_back(std::make_unique<Slab>());
@@ -108,6 +127,11 @@ private:
     }
 
     void release(T* ptr) {
+        if (is_shutdown_) {
+            // Pool is being destroyed; just leak the object.
+            // Slab memory is leaked so there is no use-after-free.
+            return;
+        }
         // Return to free list for reuse
         // Note: we don't call destructor here; it will be called
         // when the object is reused (placement-new overwrites it)

@@ -537,6 +537,10 @@ void SemanticAnalyzer::visit_expression(ast::Expression* expr) {
         visit_array(arr);
     } else if (auto* tup = dynamic_cast<ast::TupleExpr*>(expr)) {
         visit_tuple(tup);
+    } else if (auto* await = dynamic_cast<ast::AwaitExpr*>(expr)) {
+        visit_await(await);
+    } else if (auto* tq = dynamic_cast<ast::TryQuestionExpr*>(expr)) {
+        visit_try_question(tq);
     }
 }
 
@@ -638,6 +642,18 @@ void SemanticAnalyzer::visit_array(ast::ArrayExpr* arr) {
 void SemanticAnalyzer::visit_tuple(ast::TupleExpr* tup) {
     for (auto& elem : tup->get_elements()) {
         visit_expression(elem.get());
+    }
+}
+
+void SemanticAnalyzer::visit_await(ast::AwaitExpr* await) {
+    if (await->get_operand()) {
+        visit_expression(await->get_operand());
+    }
+}
+
+void SemanticAnalyzer::visit_try_question(ast::TryQuestionExpr* tq) {
+    if (tq->get_operand()) {
+        visit_expression(tq->get_operand());
     }
 }
 

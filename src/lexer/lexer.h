@@ -351,6 +351,7 @@ inline void Lexer::scan_identifier() {
         type == TokenType::Kw_publish ||
         type == TokenType::Kw_subscribe ||
         type == TokenType::Kw_await ||
+        type == TokenType::Kw_async ||
         type == TokenType::Kw_mut ||
         type == TokenType::Kw_true ||
         type == TokenType::Kw_false ||
@@ -697,7 +698,8 @@ inline void KeywordMap::init() {
     keywords["match"] = TokenType::Kw_match;
     keywords["unsafe"] = TokenType::Kw_unsafe;
     keywords["await"] = TokenType::Kw_await;
-    
+    keywords["async"] = TokenType::Kw_async;
+
     // Additional keywords
     keywords["let"] = TokenType::Kw_let;
     keywords["mut"] = TokenType::Kw_mut;

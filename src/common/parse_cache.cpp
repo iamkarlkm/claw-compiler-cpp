@@ -133,8 +133,9 @@ bool ParseCache::ensure_cache_dir() {
 
 std::string ParseCache::compute_key(const std::string& source,
                                     const std::string& filename) {
-    // Key = SHA256(source + "\0" + filename)
-    return sha256_string(source + "\0" + filename);
+    // Key = SHA256(source + "\0" + filename + "\0" + version)
+    // Bumping version invalidates stale caches when TokenType enum changes.
+    return sha256_string(source + "\0" + filename + "\0" + "v2");
 }
 
 std::string ParseCache::cache_path(const std::string& key) {

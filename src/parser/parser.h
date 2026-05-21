@@ -67,7 +67,7 @@ private:
     // Statement parsing
     std::unique_ptr<ast::Statement> parse_statement();
     std::unique_ptr<ast::Statement> parse_declaration();
-    std::unique_ptr<ast::Statement> parse_function_declaration(bool is_serial = false);
+    std::unique_ptr<ast::Statement> parse_function_declaration(bool is_serial = false, bool is_async = false);
     std::unique_ptr<ast::Statement> parse_name_statement();
     std::unique_ptr<ast::Statement> parse_serial_process_declaration();
     std::unique_ptr<ast::Statement> parse_let_statement();
@@ -234,6 +234,12 @@ inline std::unique_ptr<ast::Expression> Parser::parse_single_expression() {
 
 // Parse a top-level declaration
 inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
+    // Check for async function declaration
+    if (check(TokenType::Kw_async)) {
+        advance(); // consume 'async'
+        return parse_function_declaration(false, true);
+    }
+
     // Check for function declaration
     if (check(TokenType::Kw_fn)) {
         return parse_function_declaration();
@@ -309,17 +315,18 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
 }
 
 // Parse function declaration
-inline std::unique_ptr<ast::Statement> Parser::parse_function_declaration(bool is_serial) {
+inline std::unique_ptr<ast::Statement> Parser::parse_function_declaration(bool is_serial, bool is_async) {
     auto fn = std::make_unique<ast::FunctionStmt>(
         "",  // name to be set
         span_from(peek())
     );
     fn->set_is_serial(is_serial);
-    
-    // Check for async
-    if (check(TokenType::Kw_await)) {
+    fn->set_is_async(is_async);
+
+    // Check for async (legacy inline syntax: fn async foo - not standard but kept for compat)
+    if (check(TokenType::Kw_async)) {
         fn->set_is_async(true);
-        advance(); // consume 'await'
+        advance(); // consume 'async'
     }
     
     // Expect 'fn' keyword
@@ -427,7 +434,43 @@ inline std::unique_ptr<ast::Statement> Parser::parse_function_declaration(bool i
         advance(); // consume '->'
         fn->set_return_type(parse_type());
     }
-    
+
+    // Parse optional error effect annotation: raise Type | noraise | raise?
+    if (check(TokenType::Kw_noraise)) {
+        advance(); // consume 'noraise'
+        fn->set_noraise(true);
+        fn->set_error_effect(type::ErrorEffectInfo::no_error());
+    } else if (check(TokenType::Kw_raise)) {
+        advance(); // consume 'raise'
+        if (check(TokenType::Op_question)) {
+            advance(); // consume '?'
+            fn->set_error_effect(type::ErrorEffectInfo::generic_error(""));
+        } else {
+            // Parse error type: raise DivError
+            std::string error_type_name;
+            if (check(TokenType::Identifier)) {
+                advance();
+                error_type_name = previous().text;
+            } else if (check_any({TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                                  TokenType::Type_u64, TokenType::Type_usize,
+                                  TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                                  TokenType::Type_i64, TokenType::Type_isize,
+                                  TokenType::Type_f32, TokenType::Type_f64,
+                                  TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                advance();
+                error_type_name = previous().text;
+            }
+            if (!error_type_name.empty()) {
+                auto error_type = type::TypeCache::instance().get_generic(error_type_name);
+                fn->set_error_effect(type::ErrorEffectInfo::concrete_error(error_type));
+            } else {
+                if (reporter) {
+                    reporter->error("Expected error type after 'raise'", span_from(peek()), "P013");
+                }
+            }
+        }
+    }
+
     // Parse function body
     if (!check(TokenType::LBrace)) {
         if (reporter) {
@@ -1127,6 +1170,12 @@ inline std::unique_ptr<ast::Statement> Parser::parse_struct_statement() {
     advance(); // consume '{'
 
     while (!check(TokenType::RBrace) && !is_at_end()) {
+        bool is_pub = false;
+        if (check(TokenType::Kw_pub)) {
+            advance(); // consume 'pub'
+            is_pub = true;
+        }
+
         if (check(TokenType::Identifier)) {
             advance();
             std::string field_name = previous().text;
@@ -1149,8 +1198,15 @@ inline std::unique_ptr<ast::Statement> Parser::parse_struct_statement() {
             ast::StructField field;
             field.name = field_name;
             field.type = field_type;
+            field.is_pub = is_pub;
             field.span = span_from(previous());
             struct_stmt->add_field(field);
+        } else if (is_pub) {
+            // 'pub' was seen but not followed by field name - error
+            if (reporter) {
+                reporter->error("Expected field name after 'pub'", span_from(peek()), "P063");
+            }
+            break;
         }
 
         if (check(TokenType::Comma)) {
@@ -1642,8 +1698,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
         return parse_continue_statement();
     }
     
-    // Try statement
+    // Try statement (or try? expression)
     if (check(TokenType::Kw_try)) {
+        if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::Op_question) {
+            return parse_expression_statement();
+        }
         return parse_try_statement();
     }
     
@@ -2311,11 +2370,26 @@ inline std::unique_ptr<ast::Expression> Parser::parse_unary() {
         auto op = peek().type;
         advance();
         auto operand = parse_unary();
-        
+
         return std::make_unique<ast::UnaryExpr>(op, std::move(operand),
                                                 span_from(previous()));
     }
-    
+
+    // Await expression: await <expr>
+    if (check(TokenType::Kw_await)) {
+        advance(); // consume 'await'
+        auto operand = parse_unary();
+        return std::make_unique<ast::AwaitExpr>(std::move(operand), span_from(previous()));
+    }
+
+    // Try? expression: try? <expr>
+    if (check(TokenType::Kw_try) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::Op_question) {
+        advance(); // consume 'try'
+        advance(); // consume '?'
+        auto operand = parse_unary();
+        return std::make_unique<ast::TryQuestionExpr>(std::move(operand), span_from(previous()));
+    }
+
     return parse_postfix();
 }
 

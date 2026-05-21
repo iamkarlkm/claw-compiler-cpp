@@ -75,6 +75,16 @@ std::string Value::to_string() const {
             auto obj = std::get<std::shared_ptr<ObjectValue>>(data);
             return obj->type_name;
         }
+        case ValueTag::ITERATOR: return "iterator";
+        case ValueTag::COROUTINE: return "coroutine";
+        case ValueTag::FUTURE: {
+            auto fut = std::get<std::shared_ptr<FutureValue>>(data);
+            return fut->is_resolved ? "future(resolved)" : "future(pending)";
+        }
+        case ValueTag::WEBTRANSPORT: {
+            auto wt = std::get<std::shared_ptr<WebTransportValue>>(data);
+            return "webtransport(" + wt->url + ")";
+        }
         default: return "<unknown>";
     }
 }
@@ -93,6 +103,10 @@ std::string Value::type_name() const {
         case ValueTag::CLOSURE: return "closure";
         case ValueTag::USERDATA: return "userdata";
         case ValueTag::OBJECT: return "object";
+        case ValueTag::ITERATOR: return "iterator";
+        case ValueTag::COROUTINE: return "coroutine";
+        case ValueTag::FUTURE: return "future";
+        case ValueTag::WEBTRANSPORT: return "webtransport";
         default: return "unknown";
     }
 }
@@ -142,6 +156,11 @@ bool Value::equals(const Value& other) const {
                 if (it == o2->fields.end() || !v.equals(it->second)) return false;
             }
             return true;
+        }
+        case ValueTag::WEBTRANSPORT: {
+            auto w1 = std::get<std::shared_ptr<WebTransportValue>>(data);
+            auto w2 = std::get<std::shared_ptr<WebTransportValue>>(other.data);
+            return w1->url == w2->url;
         }
         default: return false;
     }
@@ -289,6 +308,114 @@ void VMRuntime::setup_builtins() {
         throw std::runtime_error(rt.peek().to_string());
         return Value::nil();
     };
+
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    // WebTransport mock builtins (async, return Future with WebTransport handle)
+    builtins["wt_connect"] = [](VMRuntime& rt) -> Value {
+        std::string url = "";
+        if (rt.stack_top > 0) {
+            url = rt.stack[rt.stack_top - 1].to_string();
+        }
+        auto wt = std::make_shared<WebTransportValue>();
+        wt->url = url;
+        wt->connected = true;
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = true;
+        future->resolved_value = Value::webtransport_v(wt);
+        return Value::future_v(future);
+    };
+    builtins["wt_send"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) {
+            auto future = rt.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(false);
+            return Value::future_v(future);
+        }
+        std::string data = rt.stack[rt.stack_top - 1].to_string();
+        Value handle = rt.stack[rt.stack_top - 2];
+        bool ok = false;
+        if (handle.is_webtransport()) {
+            auto wt = handle.as_webtransport();
+            {
+                std::lock_guard<std::mutex> lock(wt->queue_mutex);
+                wt->incoming_queue.push_back(data);
+            }
+            ok = true;
+        }
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = true;
+        future->resolved_value = Value::bool_v(ok);
+        return Value::future_v(future);
+    };
+    builtins["wt_recv"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) {
+            auto future = rt.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::string_v("");
+            return Value::future_v(future);
+        }
+        Value handle = rt.stack[rt.stack_top - 1];
+        std::string msg = "hello";
+        if (handle.is_webtransport()) {
+            auto wt = handle.as_webtransport();
+            std::lock_guard<std::mutex> lock(wt->queue_mutex);
+            if (!wt->incoming_queue.empty()) {
+                msg = wt->incoming_queue.front();
+                wt->incoming_queue.pop_front();
+            }
+        }
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = true;
+        future->resolved_value = Value::string_v(msg);
+        return Value::future_v(future);
+    };
+    builtins["wt_recv_timeout"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) {
+            auto future = rt.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::string_v("");
+            return Value::future_v(future);
+        }
+        Value handle = rt.stack[rt.stack_top - 2];
+        std::string msg = "hello";
+        if (handle.is_webtransport()) {
+            auto wt = handle.as_webtransport();
+            std::lock_guard<std::mutex> lock(wt->queue_mutex);
+            if (!wt->incoming_queue.empty()) {
+                msg = wt->incoming_queue.front();
+                wt->incoming_queue.pop_front();
+            }
+        }
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = true;
+        future->resolved_value = Value::string_v(msg);
+        return Value::future_v(future);
+    };
+    builtins["wt_close"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) {
+            auto future = rt.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(false);
+            return Value::future_v(future);
+        }
+        Value handle = rt.stack[rt.stack_top - 1];
+        if (handle.is_webtransport()) {
+            handle.as_webtransport()->closed = true;
+        }
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = true;
+        future->resolved_value = Value::bool_v(true);
+        return Value::future_v(future);
+    };
+    builtins["wt_ready"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        Value handle = rt.stack[rt.stack_top - 1];
+        if (handle.is_webtransport()) {
+            return Value::bool_v(handle.as_webtransport()->connected);
+        }
+        return Value::bool_v(false);
+    };
+#endif
 }
 
 // ============================================================================
@@ -317,6 +444,18 @@ void GarbageCollector::mark_value(Value& val) {
             break;
         case ValueTag::OBJECT:
             mark_object(std::get<std::shared_ptr<ObjectValue>>(val.data).get());
+            break;
+        case ValueTag::ITERATOR:
+            mark_iterator(std::get<std::shared_ptr<IteratorValue>>(val.data).get());
+            break;
+        case ValueTag::COROUTINE:
+            mark_coroutine(std::get<std::shared_ptr<CoroutineValue>>(val.data).get());
+            break;
+        case ValueTag::FUTURE:
+            mark_future(std::get<std::shared_ptr<FutureValue>>(val.data).get());
+            break;
+        case ValueTag::WEBTRANSPORT:
+            mark_webtransport(std::get<std::shared_ptr<WebTransportValue>>(val.data).get());
             break;
         default:
             break;
@@ -379,12 +518,45 @@ void GarbageCollector::mark_userdata(UserDataValue* ud) {
     ud->marked = true;
 }
 
+void GarbageCollector::mark_iterator(IteratorValue* iter) {
+    if (!iter || iter->marked) return;
+    iter->marked = true;
+    for (auto& arr : iter->arrays) {
+        for (auto& v : arr) {
+            mark_value(const_cast<Value&>(v));
+        }
+    }
+}
+
+void GarbageCollector::mark_coroutine(CoroutineValue* coro) {
+    if (!coro || coro->marked) return;
+    coro->marked = true;
+    for (auto& v : coro->saved_locals) mark_value(const_cast<Value&>(v));
+    for (auto& v : coro->saved_expr_stack) mark_value(const_cast<Value&>(v));
+    if (coro->parent_future) mark_future(coro->parent_future.get());
+    if (coro->waiting_on) mark_future(coro->waiting_on.get());
+}
+
+void GarbageCollector::mark_future(FutureValue* fut) {
+    if (!fut || fut->marked) return;
+    fut->marked = true;
+    mark_value(const_cast<Value&>(fut->resolved_value));
+    for (auto& coro : fut->waiting_coroutines) {
+        if (coro) mark_coroutine(coro.get());
+    }
+}
+
+void GarbageCollector::mark_webtransport(WebTransportValue* wt) {
+    if (!wt || wt->marked) return;
+    wt->marked = true;
+}
+
 void GarbageCollector::collect(VMRuntime& runtime) {
     // Mark phase
     // Mark all values in call frames
     for (auto& frame : runtime.call_frames) {
         if (frame.closure) {
-            mark_closure(frame.closure);
+            mark_closure(frame.closure.get());
         }
     }
     
@@ -476,7 +648,7 @@ Value ClawVM::execute() {
 
         // Push initial frame for main
         CallFrame frame;
-        frame.closure = main_closure.get();
+        frame.closure = main_closure;
         frame.ip = 0;
         frame.base_stack = 0;
         frame.slot_count = 256;
@@ -653,7 +825,9 @@ bool ClawVM::dispatch() {
     if (op == static_cast<int32_t>(bytecode::OpCode::ILE)) return op_ile();
     if (op == static_cast<int32_t>(bytecode::OpCode::IGT)) return op_igt();
     if (op == static_cast<int32_t>(bytecode::OpCode::IGE)) return op_ige();
-    
+    if (op == static_cast<int32_t>(bytecode::OpCode::EQ)) return op_eq();
+    if (op == static_cast<int32_t>(bytecode::OpCode::NE)) return op_ne();
+
     if (op == static_cast<int32_t>(bytecode::OpCode::FEQ)) return op_feq();
     if (op == static_cast<int32_t>(bytecode::OpCode::FNE)) return op_fne();
     if (op == static_cast<int32_t>(bytecode::OpCode::FLT)) return op_flt();
@@ -941,6 +1115,46 @@ bool ClawVM::op_ige() {
     int64_t b = runtime.pop().as_int();
     int64_t a = runtime.pop().as_int();
     runtime.push(Value::bool_v(a >= b));
+    return true;
+}
+
+bool ClawVM::op_eq() {
+    Value b = runtime.pop();
+    Value a = runtime.pop();
+    bool result = false;
+    if (a.is_int() && b.is_int()) {
+        result = std::get<int64_t>(a.data) == std::get<int64_t>(b.data);
+    } else if (a.is_float() && b.is_float()) {
+        result = std::get<double>(a.data) == std::get<double>(b.data);
+    } else if (a.is_bool() && b.is_bool()) {
+        result = std::get<bool>(a.data) == std::get<bool>(b.data);
+    } else if (a.is_string() && b.is_string()) {
+        result = std::get<std::string>(a.data) == std::get<std::string>(b.data);
+    } else if (a.is_nil() && b.is_nil()) {
+        result = true;
+    }
+    runtime.push(Value::bool_v(result));
+    return true;
+}
+
+bool ClawVM::op_ne() {
+    Value b = runtime.pop();
+    Value a = runtime.pop();
+    bool result = false;
+    if (a.is_int() && b.is_int()) {
+        result = std::get<int64_t>(a.data) != std::get<int64_t>(b.data);
+    } else if (a.is_float() && b.is_float()) {
+        result = std::get<double>(a.data) != std::get<double>(b.data);
+    } else if (a.is_bool() && b.is_bool()) {
+        result = std::get<bool>(a.data) != std::get<bool>(b.data);
+    } else if (a.is_string() && b.is_string()) {
+        result = std::get<std::string>(a.data) != std::get<std::string>(b.data);
+    } else if (a.is_nil() && b.is_nil()) {
+        result = false;
+    } else {
+        result = true; // Different types are not equal
+    }
+    runtime.push(Value::bool_v(result));
     return true;
 }
 
@@ -1262,7 +1476,7 @@ bool ClawVM::op_call() {
     }
 
     CallFrame frame;
-    frame.closure = closure.get();
+    frame.closure = closure;
     frame.ip = 0;
     frame.base_stack = runtime.stack_top - arg_count;
     frame.slot_count = func->max_stack > 0 ? func->max_stack : 256;
@@ -1808,6 +2022,383 @@ bool ClawVM::op_zip_create() {
 }
 
 // ============================================================================
+// Coroutine Operations
+// ============================================================================
+
+void ClawVM::save_coroutine_frame(std::shared_ptr<CoroutineValue> coro) {
+    if (runtime.call_frames.empty()) return;
+
+    auto& frame = runtime.call_frames.back();
+    coro->func_id = current_function_idx;
+    coro->saved_ip = ip;
+    coro->saved_base_stack = frame.base_stack;
+    coro->saved_stack_top = runtime.stack_top;
+
+    // Save locals (base_stack to base_stack + local_count)
+    coro->saved_locals.clear();
+    for (int32_t i = frame.base_stack; i < frame.base_stack + frame.local_count; i++) {
+        coro->saved_locals.push_back(runtime.stack[i]);
+    }
+
+    // Save expression stack (above locals up to stack_top)
+    coro->saved_expr_stack.clear();
+    for (int32_t i = frame.base_stack + frame.local_count; i < runtime.stack_top; i++) {
+        coro->saved_expr_stack.push_back(runtime.stack[i]);
+    }
+}
+
+void ClawVM::restore_coroutine_frame(std::shared_ptr<CoroutineValue> coro) {
+    if (coro->func_id < 0) return;
+
+    // Set current function context
+    current_function_idx = coro->func_id;
+    if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+        current_function = &current_module.functions[current_function_idx];
+    }
+
+    ip = coro->saved_ip;
+
+    // Create a synthetic closure for the coroutine
+    auto func = std::make_shared<FunctionValue>();
+    func->func_id = coro->func_id;
+    func->name = current_function ? current_function->name : "coro";
+    func->arity = current_function ? current_function->arity : 0;
+    func->local_count = current_function ? current_function->local_count : 0;
+    func->max_stack = func->local_count + func->arity + 16;
+
+    auto closure = std::make_shared<ClosureValue>();
+    closure->function = func;
+
+    // Setup call frame at current stack top
+    CallFrame frame;
+    frame.closure = closure;
+    frame.ip = coro->saved_ip;
+    frame.base_stack = runtime.stack_top;
+    frame.slot_count = func->max_stack;
+    frame.local_count = func->local_count;
+
+    // Ensure stack capacity
+    int32_t required_top = frame.base_stack + func->local_count + static_cast<int32_t>(coro->saved_expr_stack.size()) + 16;
+    if (required_top > static_cast<int32_t>(runtime.stack.size())) {
+        runtime.stack.resize(runtime.stack.size() * 2);
+    }
+
+    // Restore locals
+    for (size_t i = 0; i < coro->saved_locals.size() && i < static_cast<size_t>(func->local_count); i++) {
+        runtime.stack[frame.base_stack + i] = coro->saved_locals[i];
+    }
+    for (int32_t i = static_cast<int32_t>(coro->saved_locals.size()); i < func->local_count; i++) {
+        runtime.stack[frame.base_stack + i] = Value::nil();
+    }
+
+    // Restore expression stack
+    for (size_t i = 0; i < coro->saved_expr_stack.size(); i++) {
+        runtime.stack[frame.base_stack + func->local_count + i] = coro->saved_expr_stack[i];
+    }
+
+    runtime.stack_top = frame.base_stack + func->local_count + static_cast<int32_t>(coro->saved_expr_stack.size());
+
+    runtime.call_frames.push_back(frame);
+    runtime.frame_count++;
+}
+
+Value ClawVM::resume_coroutine(std::shared_ptr<CoroutineValue> coro) {
+    if (coro->is_complete) {
+        if (coro->parent_future && coro->parent_future->is_resolved) {
+            return coro->parent_future->resolved_value;
+        }
+        return Value::nil();
+    }
+
+    restore_coroutine_frame(coro);
+
+    // If this coroutine was waiting on a resolved future, push the value
+    // as if CO_AWAIT had resolved it immediately
+    if (coro->waiting_on && coro->waiting_on->is_resolved) {
+        runtime.push(coro->waiting_on->resolved_value);
+        coro->waiting_on = nullptr;
+    }
+
+    running = true;
+
+    // Run until completion or next suspension
+    while (running && dispatch()) {
+        instructions_executed++;
+    }
+
+    // If the coroutine finished (frame_count == 0), mark it complete
+    if (runtime.frame_count == 0 || !running) {
+        coro->is_complete = true;
+    }
+
+    if (coro->parent_future && coro->parent_future->is_resolved) {
+        return coro->parent_future->resolved_value;
+    }
+    return Value::nil();
+}
+
+bool ClawVM::op_co_create() {
+    // Stack: [closure] -> [coroutine]
+    Value callee = runtime.pop();
+    if (!callee.is_closure()) {
+        error("CO_CREATE requires a closure");
+        return false;
+    }
+
+    auto closure = std::get<std::shared_ptr<ClosureValue>>(callee.data);
+    auto& func = closure->function;
+
+    auto coro = runtime.coroutine_pool.acquire();
+    coro->func_id = func->func_id;
+    coro->saved_ip = 0;
+    coro->saved_base_stack = 0;
+    coro->saved_stack_top = 0;
+    coro->saved_locals.clear();
+    coro->saved_expr_stack.clear();
+    coro->is_complete = false;
+
+    runtime.push(Value::coroutine_v(coro));
+    return true;
+}
+
+bool ClawVM::op_co_yield() {
+    // General coroutine yield - save current frame and suspend
+    // For async/await, CO_AWAIT is used instead
+    if (!runtime.call_frames.empty()) {
+        // Create a temporary coroutine to save state
+        auto coro = runtime.coroutine_pool.acquire();
+        save_coroutine_frame(coro);
+        // Note: the caller of CO_RESUME should hold onto this coroutine
+    }
+    running = false;
+    return true;
+}
+
+bool ClawVM::op_co_resume() {
+    // Stack: [coroutine] -> [result]
+    Value coro_val = runtime.pop();
+    if (!coro_val.is_coroutine()) {
+        error("CO_RESUME requires a coroutine");
+        return false;
+    }
+
+    auto coro = std::get<std::shared_ptr<CoroutineValue>>(coro_val.data);
+    resume_coroutine(coro);
+
+    if (coro->parent_future && coro->parent_future->is_resolved) {
+        runtime.push(coro->parent_future->resolved_value);
+    } else {
+        runtime.push(Value::nil());
+    }
+    return true;
+}
+
+bool ClawVM::op_co_await() {
+    // Stack: [future] -> [value]  (if resolved)
+    //        [future] -> []       (if pending, suspends)
+    if (runtime.stack_top <= 0) {
+        error("Stack underflow in CO_AWAIT");
+        return false;
+    }
+
+    Value future_val = runtime.pop();
+    if (!future_val.is_future()) {
+        error("CO_AWAIT requires a Future");
+        return false;
+    }
+
+    auto future = std::get<std::shared_ptr<FutureValue>>(future_val.data);
+
+    if (future->is_resolved) {
+        // Future already resolved - push value and continue
+        runtime.push(future->resolved_value);
+        return true;
+    }
+
+    // Future pending - save state and suspend
+    auto coro = runtime.coroutine_pool.acquire();
+    coro->waiting_on = future;
+    save_coroutine_frame(coro);
+
+    // Register as waiting on this future
+    future->waiting_coroutines.push_back(coro);
+
+    // Pop current call frame without returning a value (suspend)
+    if (runtime.frame_count > 0) {
+        runtime.call_frames.pop_back();
+        runtime.frame_count--;
+    }
+
+    // Reset stack to caller's reserved state
+    int32_t caller_base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
+    int32_t caller_locals = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().local_count;
+    runtime.stack_top = caller_base + caller_locals;
+
+    if (runtime.frame_count == 0) {
+        running = false;
+    } else {
+        // Restore caller context
+        ip = runtime.call_frames.back().ip;
+        auto caller_closure = runtime.call_frames.back().closure;
+        if (caller_closure && caller_closure->function) {
+            current_function_idx = caller_closure->function->func_id;
+            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+                current_function = &current_module.functions[current_function_idx];
+            }
+        }
+    }
+
+    return true;
+}
+
+bool ClawVM::op_async_call(int32_t arg_count) {
+    // Like op_call but schedules the function asynchronously
+    // Stack: [closure, arg1, ..., argN] -> [future]
+    if (arg_count < 0) arg_count = 0;
+
+    Value callee = runtime.pop();
+    if (!callee.is_closure()) {
+        error("ASYNC_CALL requires a closure");
+        return false;
+    }
+
+    auto closure = std::get<std::shared_ptr<ClosureValue>>(callee.data);
+    auto& func = closure->function;
+
+    // Collect arguments from stack
+    std::vector<Value> args;
+    int32_t args_base = runtime.stack_top - arg_count;
+    for (int32_t i = 0; i < arg_count; i++) {
+        args.push_back(runtime.stack[args_base + i]);
+    }
+
+    // Create future for the async function's result
+    auto future = runtime.future_pool.acquire();
+    future->is_resolved = false;
+
+    // Create coroutine with initial locals (future in slot 0, then args, then nil padding)
+    auto coro = runtime.coroutine_pool.acquire();
+    coro->func_id = func->func_id;
+    coro->parent_future = future;
+    coro->saved_ip = 0;
+    coro->saved_base_stack = 0;
+    coro->saved_stack_top = func->local_count;
+    coro->is_complete = false;
+
+    // Slot 0 = future (injected so FUTURE_RESOLVE resolves the caller's future)
+    coro->saved_locals.push_back(Value::future_v(future));
+    for (int32_t i = 0; i < arg_count; i++) {
+        coro->saved_locals.push_back(args[i]);
+    }
+    for (int32_t i = arg_count + 1; i < func->local_count; i++) {
+        coro->saved_locals.push_back(Value::nil());
+    }
+    coro->saved_expr_stack.clear();
+
+    // Remove args from stack and push future
+    runtime.stack_top = args_base;
+    runtime.push(Value::future_v(future));
+
+    // Schedule coroutine for execution by the event loop
+    runtime.ready_coroutines.push_back(coro);
+
+    return true;
+}
+
+bool ClawVM::op_future_create() {
+    // Create a future and store it in local slot 0 (hidden __future for async fn)
+    // If slot 0 already has a Future (injected by ASYNC_CALL), keep it
+    if (runtime.call_frames.empty()) {
+        error("FUTURE_CREATE outside of function");
+        return false;
+    }
+
+    auto& frame = runtime.call_frames.back();
+    if (frame.local_count > 0 && runtime.stack[frame.base_stack].is_future()) {
+        return true; // Future already injected by ASYNC_CALL
+    }
+
+    auto future = runtime.future_pool.acquire();
+    future->is_resolved = false;
+    runtime.stack[frame.base_stack] = Value::future_v(future);
+    return true;
+}
+
+bool ClawVM::op_future_resolve() {
+    // Stack: [value] -> []
+    // Resolve the current async function's future (in local slot 0) and return
+    if (runtime.stack_top <= 0) {
+        error("Stack underflow in FUTURE_RESOLVE");
+        return false;
+    }
+
+    Value result = runtime.pop();
+
+    if (runtime.call_frames.empty()) {
+        error("FUTURE_RESOLVE outside of function");
+        return false;
+    }
+
+    auto& frame = runtime.call_frames.back();
+    Value future_val = runtime.stack[frame.base_stack];
+
+    if (!future_val.is_future()) {
+        error("FUTURE_RESOLVE: slot 0 is not a Future");
+        return false;
+    }
+
+    auto future = std::get<std::shared_ptr<FutureValue>>(future_val.data);
+    future->is_resolved = true;
+    future->resolved_value = result;
+
+    // Wake up waiting coroutines via callback
+    if (runtime.on_future_resolved) {
+        runtime.on_future_resolved(future);
+    }
+
+    // Pop current frame (return from async function without pushing result)
+    runtime.call_frames.pop_back();
+    runtime.frame_count--;
+
+    int32_t caller_base = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().base_stack;
+    int32_t caller_locals = runtime.call_frames.empty() ? 0 : runtime.call_frames.back().local_count;
+    runtime.stack_top = caller_base + caller_locals;
+
+    if (runtime.frame_count == 0) {
+        running = false;
+    } else {
+        ip = runtime.call_frames.back().ip;
+        auto caller_closure = runtime.call_frames.back().closure;
+        if (caller_closure && caller_closure->function) {
+            current_function_idx = caller_closure->function->func_id;
+            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+                current_function = &current_module.functions[current_function_idx];
+            }
+        }
+    }
+
+    return true;
+}
+
+bool ClawVM::op_future_is_ready() {
+    // Stack: [future] -> [bool]
+    if (runtime.stack_top <= 0) {
+        error("Stack underflow in FUTURE_IS_READY");
+        return false;
+    }
+
+    Value future_val = runtime.pop();
+    if (!future_val.is_future()) {
+        error("FUTURE_IS_READY requires a Future");
+        return false;
+    }
+
+    auto future = std::get<std::shared_ptr<FutureValue>>(future_val.data);
+    runtime.push(Value::bool_v(future->is_resolved));
+    return true;
+}
+
+// ============================================================================
 // Object Operations (simplified)
 // ============================================================================
 
@@ -2102,9 +2693,13 @@ bool ClawVM::op_type_of() {
 }
 
 bool ClawVM::op_ext() {
-    // Extension opcode - for stdlib function calls
-    // Format: EXT <opcode>
-    int opcode = static_cast<int>(current_function->code[ip - 1].operand);
+    // Extension opcode - for stdlib function calls and coroutine ops
+    // Format: EXT <packed>
+    //   packed & 0xFF      = sub-opcode
+    //   (packed >> 8)      = extended argument (e.g. arg_count for ASYNC_CALL)
+    int packed = static_cast<int>(current_function->code[ip - 1].operand);
+    int opcode = packed & 0xFF;
+    int ext_arg = (packed >> 8) & 0xFFFFFF;
 
     auto& stack = runtime.stack;
     
@@ -3047,6 +3642,144 @@ bool ClawVM::op_ext() {
             return true;
         }
         
+        // ========== 协程操作 (150-157) ==========
+        case 150: return op_co_create();
+        case 151: return op_co_yield();
+        case 152: return op_co_resume();
+        case 153: return op_co_await();
+        case 154: return op_async_call(ext_arg);
+        case 155: return op_future_create();
+        case 156: return op_future_resolve();
+        case 157: return op_future_is_ready();
+
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+        // ========== WebTransport 函数 (200-205) ==========
+        case 200: { // wt_connect
+            std::string url = "";
+            if (!stack.empty()) {
+                url = stack.back().to_string();
+                stack.pop_back();
+            }
+            auto wt = std::make_shared<WebTransportValue>();
+            wt->url = url;
+            wt->connected = true;
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::webtransport_v(wt);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case 201: { // wt_send
+            if (stack.size() < 2) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::bool_v(false);
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            std::string data = stack.back().to_string();
+            stack.pop_back();
+            Value handle = stack.back();
+            stack.pop_back();
+            bool ok = false;
+            if (handle.is_webtransport()) {
+                auto wt = handle.as_webtransport();
+                std::lock_guard<std::mutex> lock(wt->queue_mutex);
+                wt->incoming_queue.push_back(data);
+                ok = true;
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(ok);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case 202: { // wt_recv
+            if (stack.empty()) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::string_v("");
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = stack.back();
+            stack.pop_back();
+            std::string msg = "hello";
+            if (handle.is_webtransport()) {
+                auto wt = handle.as_webtransport();
+                std::lock_guard<std::mutex> lock(wt->queue_mutex);
+                if (!wt->incoming_queue.empty()) {
+                    msg = wt->incoming_queue.front();
+                    wt->incoming_queue.pop_front();
+                }
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::string_v(msg);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case 203: { // wt_recv_timeout
+            if (stack.size() < 2) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::string_v("");
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            stack.pop_back(); // timeout ms
+            Value handle = stack.back();
+            stack.pop_back();
+            std::string msg = "hello";
+            if (handle.is_webtransport()) {
+                auto wt = handle.as_webtransport();
+                std::lock_guard<std::mutex> lock(wt->queue_mutex);
+                if (!wt->incoming_queue.empty()) {
+                    msg = wt->incoming_queue.front();
+                    wt->incoming_queue.pop_front();
+                }
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::string_v(msg);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case 204: { // wt_close
+            if (stack.empty()) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::bool_v(false);
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = stack.back();
+            stack.pop_back();
+            if (handle.is_webtransport()) {
+                handle.as_webtransport()->closed = true;
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(true);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case 205: { // wt_ready
+            if (stack.empty()) {
+                runtime.push(Value::bool_v(false));
+                return true;
+            }
+            Value handle = stack.back();
+            stack.pop_back();
+            if (handle.is_webtransport()) {
+                runtime.push(Value::bool_v(handle.as_webtransport()->connected));
+            } else {
+                runtime.push(Value::bool_v(false));
+            }
+            return true;
+        }
+#endif
+
         default:
             std::cerr << "Unknown EXT opcode: " << opcode << "\n";
             return false;

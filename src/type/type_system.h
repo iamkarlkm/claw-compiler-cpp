@@ -79,16 +79,19 @@ enum class TypeKind {
     // Function types
     FUNCTION,   // Function type (Fn)
     PROCESS,    // Serial process (Process)
-    
+
     // Custom types
     STRUCT,     // Struct type
     ENUM,       // Enum type
     ALIAS,      // Type alias
-    
+
     // Generic types
     GENERIC,    // Generic type placeholder (e.g., Array<T>)
     TYPE_VAR,   // Type variable (e.g., T, U, V)
-    
+
+    // Async types
+    FUTURE,     // Future type (Future<T>)
+
     // Special
     UNKNOWN,    // Unknown/inferred type
     NEVER       // Never returns (diverges)
@@ -136,6 +139,7 @@ public:
     virtual bool is_generic() const;  // NEW: check if generic/type variable
     virtual bool is_type_var() const; // NEW: check if type variable
     virtual bool is_unknown() const;  // NEW: check if unknown type
+    virtual bool is_future() const;   // NEW: check if future type
     virtual bool can_be_zero() const;
     virtual bool is_copyable() const;
     
@@ -174,6 +178,7 @@ private:
     std::map<std::pair<TypePtr, TypePtr>, TypePtr> function_types_;
     std::map<TypePtr, TypePtr> optional_types_;
     std::map<std::pair<TypePtr, TypePtr>, TypePtr> result_types_;
+    std::map<TypePtr, TypePtr> future_types_;            // NEW: FutureType cache
     std::map<std::string, TypePtr> generic_types_;       // NEW: GenericType cache (e.g., Array<T>)
     std::map<std::string, TypePtr> type_vars_;           // NEW: TypeVar cache
     
@@ -208,7 +213,8 @@ public:
     TypePtr get_function(TypePtr input, TypePtr output);
     TypePtr get_optional(TypePtr inner);
     TypePtr get_result(TypePtr ok, TypePtr err);
-    
+    TypePtr get_future(TypePtr inner);
+
     // NEW: Generic type methods
     TypePtr get_generic(const std::string& base_name, std::vector<TypePtr> params = {});
     TypePtr get_type_var(const std::string& name, std::optional<TypePtr> bound = std::nullopt);
@@ -576,17 +582,36 @@ class ResultType : public Type {
 public:
     TypePtr ok_type;
     TypePtr err_type;
-    
+
     ResultType(TypePtr ok, TypePtr err)
         : Type(TypeKind::RESULT, "Result"),
           ok_type(std::move(ok)), err_type(std::move(err)) {
         name = "Result<" + ok_type->name + ", " + err_type->name + ">";
     }
-    
+
     bool is_result() const override { return true; }
     bool can_be_zero() const override { return false; }
     bool is_copyable() const override { return true; }
-    
+
+    bool equals(const TypePtr& other) const override;
+    std::string to_string() const override;
+    TypePtr clone() const override;
+};
+
+class FutureType : public Type {
+public:
+    TypePtr inner_type;
+
+    explicit FutureType(TypePtr inner)
+        : Type(TypeKind::FUTURE, "Future"),
+          inner_type(std::move(inner)) {
+        name = "Future<" + inner_type->name + ">";
+    }
+
+    bool is_future() const override { return true; }
+    bool can_be_zero() const override { return false; }
+    bool is_copyable() const override { return true; }
+
     bool equals(const TypePtr& other) const override;
     std::string to_string() const override;
     TypePtr clone() const override;
@@ -825,6 +850,7 @@ inline bool Type::is_copyable() const { return true; }
 inline bool Type::is_generic() const { return kind == TypeKind::GENERIC || kind == TypeKind::TYPE_VAR; }
 inline bool Type::is_type_var() const { return kind == TypeKind::TYPE_VAR; }
 inline bool Type::is_unknown() const { return kind == TypeKind::UNKNOWN; }
+inline bool Type::is_future() const { return kind == TypeKind::FUTURE; }
 
 inline bool Type::can_be_zero() const {
     return is_numeric() || is_string() || is_optional();

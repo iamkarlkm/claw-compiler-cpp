@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <stack>
 #include <memory>
 #include "../ast/ast.h"
@@ -91,6 +92,9 @@ private:
     void compilePublishStmt(const ast::PublishStmt& stmt);
     void compileSubscribeStmt(const ast::SubscribeStmt& stmt);
     void compileStructStmt(const ast::StructStmt& stmt);
+    void compileEnumStmt(const ast::EnumStmt& stmt);
+    void compileTraitStmt(const ast::TraitStmt& stmt);
+    void compileImplStmt(const ast::ImplStmt& stmt);
     void compileTryStmt(const ast::TryStmt& stmt);
     void compileThrowStmt(const ast::ThrowStmt& stmt);
 
@@ -144,6 +148,12 @@ private:
     int nextGlobalSlot_ = 0;
     std::unordered_map<std::string, int> globalVars_;
     std::unordered_map<std::string, std::vector<std::string>> structRegistry_;
+    std::unordered_map<std::string, std::vector<ast::EnumVariant>> enumRegistry_;
+    std::unordered_map<std::string, ast::TraitStmt*> traitRegistry_;
+    std::unordered_map<std::string, std::vector<ast::ImplMethod>> implRegistry_;
+    std::unordered_map<std::string, std::string> variantToEnum_; // variant name -> enum name
+    std::unordered_set<std::string> async_functions_;
+    bool in_async_function_ = false;
 };
 
 } // namespace claw

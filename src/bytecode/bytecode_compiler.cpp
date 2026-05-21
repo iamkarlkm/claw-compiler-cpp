@@ -36,10 +36,26 @@ std::shared_ptr<BytecodeModule> BytecodeCompiler::compile(const ast::Program& mo
 void BytecodeCompiler::compileModule(const ast::Program& module) {
     const auto& decls = module.get_declarations();
 
-    // 第零遍: 注册所有 struct/enum 定义
+    // 第零遍: 注册所有 struct/enum/trait/impl 定义
     for (const auto& stmt : decls) {
         if (stmt->get_kind() == ast::Statement::Kind::Struct) {
             compileStructStmt(static_cast<const ast::StructStmt&>(*stmt));
+        } else if (stmt->get_kind() == ast::Statement::Kind::Enum) {
+            compileEnumStmt(static_cast<const ast::EnumStmt&>(*stmt));
+        } else if (stmt->get_kind() == ast::Statement::Kind::Trait) {
+            compileTraitStmt(static_cast<const ast::TraitStmt&>(*stmt));
+        } else if (stmt->get_kind() == ast::Statement::Kind::Impl) {
+            compileImplStmt(static_cast<const ast::ImplStmt&>(*stmt));
+        }
+    }
+
+    // 预先收集 async 函数名
+    for (const auto& stmt : decls) {
+        if (stmt->get_kind() == ast::Statement::Kind::Function) {
+            const auto& func = static_cast<const ast::FunctionStmt&>(*stmt);
+            if (func.is_async()) {
+                async_functions_.insert(func.get_name());
+            }
         }
     }
 
@@ -105,18 +121,25 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
 
     // 保存旧上下文
     auto prevCtx = std::move(ctx_);
+    bool prevInAsync = in_async_function_;
     ctx_ = std::make_unique<CompilationContext>();
     ctx_->currentFunction = std::make_shared<bytecode::Function>(byteFunc);
     ctx_->isClosure = false;
     ctx_->scopeStack.emplace_back();
     ctx_->nextSlot = 0;
+    in_async_function_ = func.is_async();
 
-    // 分配参数槽位
-    int slot = 0;
+    // 分配参数槽位 (async 函数 slot 0 预留给 future)
+    int slot = func.is_async() ? 1 : 0;
     for (const auto& param : func.get_params()) {
         ctx_->scopeStack.back()[param.first] = slot++;
     }
     ctx_->nextSlot = slot;
+
+    // async 函数开头创建 Future (VM stores it directly in slot 0)
+    if (func.is_async()) {
+        emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_CREATE));
+    }
 
     // 编译函数体
     if (func.get_body()) {
@@ -144,6 +167,7 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
 
     // 恢复旧上下文
     ctx_ = std::move(prevCtx);
+    in_async_function_ = prevInAsync;
 }
 
 // ========== 语句编译 ==========
@@ -194,6 +218,15 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
             break;
         case ast::Statement::Kind::Struct:
             compileStructStmt(static_cast<const ast::StructStmt&>(stmt));
+            break;
+        case ast::Statement::Kind::Enum:
+            compileEnumStmt(static_cast<const ast::EnumStmt&>(stmt));
+            break;
+        case ast::Statement::Kind::Trait:
+            compileTraitStmt(static_cast<const ast::TraitStmt&>(stmt));
+            break;
+        case ast::Statement::Kind::Impl:
+            compileImplStmt(static_cast<const ast::ImplStmt&>(stmt));
             break;
         case ast::Statement::Kind::Try:
             compileTryStmt(static_cast<const ast::TryStmt&>(stmt));
@@ -416,7 +449,7 @@ void BytecodeCompiler::compileMatchStmt(const ast::MatchStmt& stmt) {
                     emitConst(std::string(1, v));
                 }
             }, lp->get_value());
-            emitOp(bytecode::OpCode::IEQ);
+            emitOp(bytecode::OpCode::EQ);
 
             int nextCaseIdx = ctx_->currentFunction->code.size();
             emitOp(bytecode::OpCode::JMP_IF_NOT);
@@ -444,8 +477,60 @@ void BytecodeCompiler::compileMatchStmt(const ast::MatchStmt& stmt) {
             continue;
         }
 
-        // Constructor pattern: simplified handling (just wildcard-like for now)
-        // TODO: proper constructor pattern bytecode compilation
+        // Constructor pattern: enum variant matching
+        if (pat_kind == ast::Pattern::Kind::Constructor) {
+            auto* cp = static_cast<const ast::ConstructorPattern*>(patterns[i].get());
+            std::string variant_name = cp->get_name();
+
+            // DUP scrutinee, load __variant field, compare
+            emitOp(bytecode::OpCode::DUP);
+            emitConst("__variant");
+            emitOp(bytecode::OpCode::LOAD_FIELD);
+            emitConst(variant_name);
+            emitOp(bytecode::OpCode::EQ);
+
+            int nextCaseIdx = ctx_->currentFunction->code.size();
+            emitOp(bytecode::OpCode::JMP_IF_NOT);
+            ctx_->pendingJumps.push_back({nextCaseIdx, 0, true});
+
+            // Matched: bind fields, compile body, then pop scrutinee
+            if (i < bodies.size() && bodies[i]) {
+                enterScope();
+                // Bind pattern fields to payload
+                const auto& fields = cp->get_fields();
+                if (!fields.empty()) {
+                    // Load payload field
+                    emitOp(bytecode::OpCode::DUP); // duplicate object for payload load
+                    emitConst("__payload");
+                    emitOp(bytecode::OpCode::LOAD_FIELD);
+                    // If field is a VariablePattern, bind it
+                    if (fields[0]->get_kind() == ast::Pattern::Kind::Variable) {
+                        auto* vp = static_cast<const ast::VariablePattern*>(fields[0].get());
+                        int slot = allocateLocal(vp->get_name());
+                        emitOp1(bytecode::OpCode::STORE_LOCAL, slot);
+                    }
+                    emitOp(bytecode::OpCode::POP); // remove duplicated object
+                }
+                emitOp(bytecode::OpCode::POP); // pop original scrutinee
+                if (auto* stmt = dynamic_cast<ast::Statement*>(bodies[i].get())) {
+                    compileStatement(*stmt);
+                } else if (auto* expr = dynamic_cast<ast::Expression*>(bodies[i].get())) {
+                    compileExpression(*expr);
+                    emitOp(bytecode::OpCode::POP);
+                }
+                exitScope();
+            }
+
+            int endJump = ctx_->currentFunction->code.size();
+            emitOp(bytecode::OpCode::JMP);
+            endJumps.push_back(endJump);
+
+            // Patch next-case jump to here
+            patchJump(nextCaseIdx, ctx_->currentFunction->code.size());
+            continue;
+        }
+
+        // Fallback: wildcard-like for unhandled patterns
         emitOp(bytecode::OpCode::POP);
         if (i < bodies.size() && bodies[i]) {
             enterScope();
@@ -776,6 +861,10 @@ void BytecodeCompiler::compileReturnStmt(const ast::ReturnStmt& stmt) {
         emitOp(bytecode::OpCode::PUSH);
         emitOp1(bytecode::OpCode::PUSH, 0);
     }
+    // async 函数返回前解析 Future
+    if (in_async_function_) {
+        emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_RESOLVE));
+    }
     emitOp(bytecode::OpCode::RET);
 }
 
@@ -866,6 +955,26 @@ void BytecodeCompiler::compileStructStmt(const ast::StructStmt& stmt) {
         field_names.push_back(field.name);
     }
     structRegistry_[stmt.get_name()] = field_names;
+}
+
+void BytecodeCompiler::compileEnumStmt(const ast::EnumStmt& stmt) {
+    enumRegistry_[stmt.get_name()] = stmt.get_variants();
+    for (const auto& variant : stmt.get_variants()) {
+        variantToEnum_[variant.name] = stmt.get_name();
+    }
+}
+
+void BytecodeCompiler::compileTraitStmt(const ast::TraitStmt& stmt) {
+    traitRegistry_[stmt.get_name()] = const_cast<ast::TraitStmt*>(&stmt);
+}
+
+void BytecodeCompiler::compileImplStmt(const ast::ImplStmt& stmt) {
+    std::string key = stmt.is_trait_impl()
+        ? stmt.get_trait_name() + " for " + stmt.get_target_type()
+        : stmt.get_target_type();
+    for (const auto& method : stmt.get_methods()) {
+        implRegistry_[key].push_back(method);
+    }
 }
 
 void BytecodeCompiler::compileTryStmt(const ast::TryStmt& stmt) {
@@ -960,6 +1069,10 @@ void BytecodeCompiler::compileExpression(const Expr& expr) {
         case ast::Expression::Kind::Lambda:
             compileLambdaExpr(static_cast<const ast::LambdaExpr&>(expr));
             break;
+        case ast::Expression::Kind::Await:
+            compileExpression(*static_cast<const ast::AwaitExpr&>(expr).get_operand());
+            emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::CO_AWAIT));
+            break;
         default:
             errorf("Unknown expression type: %d", (int)expr.get_kind());
     }
@@ -1039,7 +1152,10 @@ void BytecodeCompiler::compileUnaryExpr(const ast::UnaryExpr& expr) {
 
 void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
     static const std::unordered_set<std::string> builtins = {
-        "print", "println", "len", "type", "int", "float", "string", "bool", "input", "array", "range", "panic"
+        "print", "println", "len", "type", "int", "float", "string", "bool", "input", "array", "range", "panic",
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+        "wt_connect", "wt_send", "wt_recv", "wt_recv_timeout", "wt_close", "wt_ready"
+#endif
     };
 
     if (expr.get_callee()->get_kind() == ast::Expression::Kind::Identifier) {
@@ -1066,13 +1182,51 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
             }
             return;
         }
+        // Enum variant constructor: Some(42), None
+        auto vit = variantToEnum_.find(name);
+        if (vit != variantToEnum_.end()) {
+            const std::string& enum_name = vit->second;
+            emitOp(bytecode::OpCode::ALLOC_OBJ);
+            // Set __enum field
+            emitConst(enum_name);
+            emitConst("__enum");
+            emitOp(bytecode::OpCode::STORE_FIELD);
+            // Set __variant field
+            emitConst(name);
+            emitConst("__variant");
+            emitOp(bytecode::OpCode::STORE_FIELD);
+            // Set payload if any
+            const auto& args = expr.get_arguments();
+            const auto& variants = enumRegistry_[enum_name];
+            for (const auto& variant : variants) {
+                if (variant.name == name && !variant.associated_types.empty() && !args.empty()) {
+                    compileExpression(*args[0]);
+                    emitConst("__payload");
+                    emitOp(bytecode::OpCode::STORE_FIELD);
+                    break;
+                }
+            }
+            return;
+        }
     }
 
     for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
         compileExpression(**it);
     }
     compileExpression(*expr.get_callee());
-    emitOp1(bytecode::OpCode::CALL, static_cast<int>(expr.get_arguments().size()));
+
+    int arg_count = static_cast<int>(expr.get_arguments().size());
+    // Check if callee is an async function
+    if (expr.get_callee()->get_kind() == ast::Expression::Kind::Identifier) {
+        const auto& name = static_cast<const ast::IdentifierExpr&>(*expr.get_callee()).get_name();
+        if (async_functions_.count(name)) {
+            int async_operand = (arg_count << 8) | static_cast<int>(bytecode::ExtOpCode::ASYNC_CALL);
+            emitOp1(bytecode::OpCode::EXT, async_operand);
+            return;
+        }
+    }
+
+    emitOp1(bytecode::OpCode::CALL, arg_count);
 }
 
 void BytecodeCompiler::compileIndexExpr(const ast::IndexExpr& expr) {

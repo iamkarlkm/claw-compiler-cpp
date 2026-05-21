@@ -135,36 +135,59 @@ std::shared_ptr<bytecode::Module> BytecodeExecutor::compile_to_bytecode(
 }
 
 vm::Value BytecodeExecutor::execute_in_vm(
-    const bytecode::Module& module, 
+    const bytecode::Module& module,
     BytecodeExecutionResult& result) {
-    
+
     try {
         // 创建虚拟机
         vm::ClawVM vm;
-        
+
         // 加载模块
         if (!vm.load_module(module)) {
             result.error_message = "Failed to load module into VM: " + vm.last_error;
             return vm::Value::nil();
         }
-        
+
         if (debug_) {
             std::cout << "[BytecodeExecutor] Loaded module into VM\n";
         }
-        
-        // 执行
+
+        // Setup async event loop callback
+        vm.runtime.on_future_resolved = [&](std::shared_ptr<vm::FutureValue> future) {
+            for (auto& coro : future->waiting_coroutines) {
+                if (coro) {
+                    vm.runtime.ready_coroutines.push_back(coro);
+                }
+            }
+            future->waiting_coroutines.clear();
+        };
+
+        // 执行 main (or initial entry point)
         vm::Value return_value = vm.execute();
-        
+
+        // Event loop: process ready coroutines until all complete
+        while (!vm.runtime.ready_coroutines.empty()) {
+            auto coro = vm.runtime.ready_coroutines.front();
+            vm.runtime.ready_coroutines.pop_front();
+
+            if (!coro || coro->is_complete) continue;
+
+            vm.resume_coroutine(coro);
+
+            // If resuming produced more ready coroutines (e.g. chained awaits),
+            // they were added by on_future_resolved in FUTURE_RESOLVE
+        }
+
         // 获取执行统计
         result.stats.vm_instructions_executed = vm.instructions_executed;
-        
+
         if (debug_) {
-            std::cout << "[BytecodeExecutor] Executed " << vm.instructions_executed 
+            std::cout << "[BytecodeExecutor] Executed " << vm.instructions_executed
                       << " VM instructions\n";
         }
-        
+
         return return_value;
-        
+
     } catch (const std::exception& e) {
         result.error_message = std::string("Runtime exception: ") + e.what();
         return vm::Value::nil();

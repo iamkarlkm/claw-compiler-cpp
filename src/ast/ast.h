@@ -10,6 +10,7 @@
 #include <variant>
 #include "common/common.h"
 #include "lexer/token.h"
+#include "type/error_effect.h"
 
 namespace claw {
 namespace ast {
@@ -71,6 +72,8 @@ public:
         Ref,
         MutRef,
         Borrow,
+        Await,
+        TryQuestion,
     };
     
     Expression(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -167,22 +170,58 @@ private:
 // Unary expression (op expr)
 class UnaryExpr : public Expression {
 public:
-    UnaryExpr(TokenType op, std::unique_ptr<Expression> operand, 
+    UnaryExpr(TokenType op, std::unique_ptr<Expression> operand,
               const SourceSpan& span)
         : Expression(Kind::Unary, span), op_(op), operand_(std::move(operand)) {}
-    
+
     TokenType get_operator() const { return op_; }
     Expression* get_operand() const { return operand_.get(); }
     std::unique_ptr<Expression> release_operand() { return std::move(operand_); }
     std::unique_ptr<Expression>& mutable_operand() { return operand_; }
 
     std::string to_string() const override {
-        return "(" + std::string(token_type_to_string(op_)) + 
+        return "(" + std::string(token_type_to_string(op_)) +
                operand_->to_string() + ")";
     }
-    
+
 private:
     TokenType op_;
+    std::unique_ptr<Expression> operand_;
+};
+
+// Await expression (await expr)
+class AwaitExpr : public Expression {
+public:
+    AwaitExpr(std::unique_ptr<Expression> operand, const SourceSpan& span)
+        : Expression(Kind::Await, span), operand_(std::move(operand)) {}
+
+    Expression* get_operand() const { return operand_.get(); }
+    std::unique_ptr<Expression> release_operand() { return std::move(operand_); }
+    std::unique_ptr<Expression>& mutable_operand() { return operand_; }
+
+    std::string to_string() const override {
+        return "await " + operand_->to_string();
+    }
+
+private:
+    std::unique_ptr<Expression> operand_;
+};
+
+// Try? expression (try? expr) - converts raising expression to Result<T, E>
+class TryQuestionExpr : public Expression {
+public:
+    TryQuestionExpr(std::unique_ptr<Expression> operand, const SourceSpan& span)
+        : Expression(Kind::TryQuestion, span), operand_(std::move(operand)) {}
+
+    Expression* get_operand() const { return operand_.get(); }
+    std::unique_ptr<Expression> release_operand() { return std::move(operand_); }
+    std::unique_ptr<Expression>& mutable_operand() { return operand_; }
+
+    std::string to_string() const override {
+        return "try? " + (operand_ ? operand_->to_string() : "()");
+    }
+
+private:
     std::unique_ptr<Expression> operand_;
 };
 
@@ -889,6 +928,13 @@ public:
     void set_is_async(bool is_async) { is_async_ = is_async; }
     void set_noraise(bool noraise) { noraise_ = noraise; }
 
+    // Error effect tracking
+    void set_error_effect(const type::ErrorEffectInfo& info) { error_effect_ = info; }
+    const type::ErrorEffectInfo& get_error_effect() const { return error_effect_; }
+    bool can_raise() const {
+        return error_effect_.can_raise() && !noraise_;
+    }
+
     const std::string& get_name() const { return name_; }
     const auto& get_type_params() const { return type_params_; }
     const auto& get_params() const { return params_; }
@@ -897,7 +943,7 @@ public:
     std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
     bool is_serial() const { return is_serial_; }
     bool is_async() const { return is_async_; }
-    bool is_noraise() const { return noraise_; }
+    bool is_noraise() const { return noraise_ || error_effect_.is_no_error(); }
     bool has_type_params() const { return !type_params_.empty(); }
     
     std::string to_string() const override {
@@ -933,6 +979,7 @@ private:
     bool is_serial_ = false;
     bool is_async_ = false;
     bool noraise_ = false;
+    type::ErrorEffectInfo error_effect_;
 };
 
 // Publish statement (event system)

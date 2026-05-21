@@ -36,6 +36,7 @@ enum class TokenType {
     Kw_match,
     Kw_unsafe,
     Kw_await,
+    Kw_async,
     Kw_let,
     Kw_mut,
     Kw_true,
@@ -225,6 +226,7 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::Kw_match: return "match";
         case TokenType::Kw_unsafe: return "unsafe";
         case TokenType::Kw_await: return "await";
+        case TokenType::Kw_async: return "async";
         case TokenType::Kw_let: return "let";
         case TokenType::Kw_mut: return "mut";
         case TokenType::Kw_true: return "true";

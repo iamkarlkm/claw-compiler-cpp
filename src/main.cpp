@@ -16,6 +16,7 @@
 #include "parser/parser.h"
 #include "common/common.h"
 #include "type/type_system.h"
+#include "type/error_effect_analyzer.h"
 #include "interpreter/interpreter.h"
 #include "bytecode/bytecode.h"
 #include "bytecode/bytecode_compiler.h"
@@ -397,6 +398,24 @@ bool type_check(ast::Program& program, bool verbose,
         return false;
     }
 
+    // Error effect analysis
+    type::ErrorEffectAnalyzer eef_analyzer;
+    eef_analyzer.analyze(program);
+
+    if (eef_analyzer.has_errors()) {
+        if (out_errors) {
+            for (const auto& err : eef_analyzer.errors()) {
+                out_errors->push_back(err);
+            }
+        } else {
+            std::cerr << "=== Error Effect Errors ===\n";
+            for (const auto& err : eef_analyzer.errors()) {
+                std::cerr << "Error: " << err.what() << "\n";
+            }
+        }
+        return false;
+    }
+
     if (verbose) {
         std::cout << "  Type checking passed\n";
     }
@@ -491,7 +510,27 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         return false;
     }
 
+    // Setup async event loop callback
+    vm.runtime.on_future_resolved = [&rt = vm.runtime](std::shared_ptr<vm::FutureValue> future) {
+        for (auto& coro : future->waiting_coroutines) {
+            if (coro) {
+                rt.ready_coroutines.push_back(coro);
+            }
+        }
+        future->waiting_coroutines.clear();
+    };
+
     vm::Value result = vm.execute();
+
+    // Event loop: process ready coroutines until all complete
+    while (!vm.runtime.ready_coroutines.empty()) {
+        auto coro = vm.runtime.ready_coroutines.front();
+        vm.runtime.ready_coroutines.pop_front();
+
+        if (!coro || coro->is_complete) continue;
+
+        vm.resume_coroutine(coro);
+    }
 
     // 输出返回值或错误信息
     if (result.tag != vm::ValueTag::NIL) {

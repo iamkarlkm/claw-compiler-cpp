@@ -108,6 +108,19 @@ std::unique_ptr<Expression> clone_expr(const Expression& expr) {
             return result;
         }
 
+        case Expression::Kind::Await: {
+            auto& await = static_cast<const AwaitExpr&>(expr);
+            return std::make_unique<AwaitExpr>(
+                clone_expr(*await.get_operand()),
+                expr.get_span());
+        }
+        case Expression::Kind::TryQuestion: {
+            auto& tq = static_cast<const TryQuestionExpr&>(expr);
+            return std::make_unique<TryQuestionExpr>(
+                clone_expr(*tq.get_operand()),
+                expr.get_span());
+        }
+
         default:
             return nullptr;
     }

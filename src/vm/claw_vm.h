@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
+#include <deque>
 
 #include "bytecode/bytecode.h"
 #include "common/object_pool.h"
@@ -56,7 +57,10 @@ enum class ValueTag {
     CLOSURE,
     USERDATA,
     OBJECT,    // Struct/object with named fields
-    ITERATOR  // NEW - Iterator type
+    ITERATOR,  // NEW - Iterator type
+    COROUTINE, // NEW - Coroutine type
+    FUTURE,    // NEW - Future type
+    WEBTRANSPORT // NEW - WebTransport handle type
 };
 
 struct Value;
@@ -67,6 +71,9 @@ struct FunctionValue;
 struct ClosureValue;
 struct UserDataValue;
 struct ObjectValue;
+struct CoroutineValue;
+struct FutureValue;
+struct WebTransportValue;
 
 // Iterator value structure (NEW - 2026-04-26)
 struct IteratorValue {
@@ -80,7 +87,8 @@ struct IteratorValue {
     std::vector<int64_t> indices;     // Current indices for nested iteration
     std::vector<int64_t> sizes;       // Sizes of multiple iterables (for zip)
     std::vector<std::vector<Value>> arrays; // For zip: multiple arrays
-    
+    bool marked = false;
+
     static std::shared_ptr<IteratorValue> create_array_iterator(const std::vector<Value>& arr) {
         auto iter = std::make_shared<IteratorValue>();
         iter->kind = "array";
@@ -137,7 +145,10 @@ using ValueData = std::variant<
     std::shared_ptr<ClosureValue>,  // CLOSURE
     std::shared_ptr<UserDataValue>, // USERDATA
     std::shared_ptr<ObjectValue>,   // OBJECT
-    std::shared_ptr<IteratorValue>  // ITERATOR
+    std::shared_ptr<IteratorValue>, // ITERATOR
+    std::shared_ptr<CoroutineValue>,    // COROUTINE
+    std::shared_ptr<FutureValue>,       // FUTURE
+    std::shared_ptr<WebTransportValue>  // WEBTRANSPORT
 >;
 
 struct Value {
@@ -162,6 +173,9 @@ struct Value {
     static Value tensor_v(std::shared_ptr<TensorValue> t) { Value v; v.tag = ValueTag::TENSOR; v.data = t; return v; }
     static Value iterator_v(std::shared_ptr<IteratorValue> iter) { Value v; v.tag = ValueTag::ITERATOR; v.data = iter; return v; }
     static Value object_v(std::shared_ptr<ObjectValue> obj) { Value v; v.tag = ValueTag::OBJECT; v.data = obj; return v; }
+    static Value coroutine_v(std::shared_ptr<CoroutineValue> c) { Value v; v.tag = ValueTag::COROUTINE; v.data = c; return v; }
+    static Value future_v(std::shared_ptr<FutureValue> f) { Value v; v.tag = ValueTag::FUTURE; v.data = f; return v; }
+    static Value webtransport_v(std::shared_ptr<WebTransportValue> wt) { Value v; v.tag = ValueTag::WEBTRANSPORT; v.data = wt; return v; }
 
     // Type checking
     bool is_nil() const { return tag == ValueTag::NIL; }
@@ -178,7 +192,10 @@ struct Value {
     bool is_callable() const { return is_function() || is_closure(); }
     bool is_object() const { return tag == ValueTag::OBJECT; }
     bool is_iterator() const { return tag == ValueTag::ITERATOR; }
-    
+    bool is_coroutine() const { return tag == ValueTag::COROUTINE; }
+    bool is_future() const { return tag == ValueTag::FUTURE; }
+    bool is_webtransport() const { return tag == ValueTag::WEBTRANSPORT; }
+
     // Value extraction
     bool as_bool() const { 
         if (is_bool()) return std::get<bool>(data);
@@ -215,6 +232,16 @@ struct Value {
     const std::shared_ptr<ArrayValue>& as_array_ptr() const {
         static const std::shared_ptr<ArrayValue> empty;
         if (is_array()) return std::get<std::shared_ptr<ArrayValue>>(data);
+        return empty;
+    }
+
+    std::shared_ptr<WebTransportValue> as_webtransport() {
+        if (is_webtransport()) return std::get<std::shared_ptr<WebTransportValue>>(data);
+        return nullptr;
+    }
+    const std::shared_ptr<WebTransportValue>& as_webtransport() const {
+        static const std::shared_ptr<WebTransportValue> empty;
+        if (is_webtransport()) return std::get<std::shared_ptr<WebTransportValue>>(data);
         return empty;
     }
     
@@ -339,11 +366,55 @@ struct ObjectValue {
 };
 
 // ============================================================================
+// Coroutine Value - Saved execution state for stackless coroutines
+// ============================================================================
+
+struct FutureValue;
+
+struct CoroutineValue {
+    int32_t func_id = -1;              // Function ID in module
+    int32_t saved_ip = 0;              // Saved instruction pointer
+    int32_t saved_base_stack = 0;      // Saved base stack index
+    int32_t saved_stack_top = 0;       // Saved stack top
+    std::vector<Value> saved_locals;   // Saved local variables
+    std::vector<Value> saved_expr_stack; // Saved expression evaluation stack
+    std::shared_ptr<FutureValue> parent_future; // Future this coroutine resolves
+    std::shared_ptr<FutureValue> waiting_on;    // Future this coroutine is waiting on
+    bool is_complete = false;
+    bool marked = false;
+};
+
+// ============================================================================
+// Future Value - Promise-like container for async results
+// ============================================================================
+
+struct FutureValue {
+    bool is_resolved = false;
+    Value resolved_value;
+    std::vector<std::shared_ptr<CoroutineValue>> waiting_coroutines;
+    bool marked = false;
+};
+
+// ============================================================================
+// WebTransport Value - Handle for WebTransport connections
+// ============================================================================
+
+struct WebTransportValue {
+    std::string url;                        // Connection URL
+    bool connected = false;                 // Connection state
+    bool closed = false;                    // Closed state
+    std::deque<std::string> incoming_queue; // Incoming message queue
+    std::mutex queue_mutex;                 // Queue protection
+    std::condition_variable cv;             // For blocking recv
+    bool marked = false;
+};
+
+// ============================================================================
 // Call Frame - Runtime function call context
 // ============================================================================
 
 struct CallFrame {
-    ClosureValue* closure;     // Function being called
+    std::shared_ptr<ClosureValue> closure; // Function being called
     int32_t ip;                // Instruction pointer
     int32_t base_stack;        // Base of this frame's stack slots
     int32_t slot_count;        // Number of slots in this frame
@@ -381,13 +452,20 @@ struct VMRuntime {
     ObjectPool<IteratorValue> iterator_pool;
     ObjectPool<ObjectValue> object_pool;
     ObjectPool<TensorValue> tensor_pool;
+    ObjectPool<CoroutineValue> coroutine_pool;
+    ObjectPool<FutureValue> future_pool;
+
+    // Async event loop support
+    std::deque<std::shared_ptr<CoroutineValue>> ready_coroutines;
+    std::function<void(std::shared_ptr<FutureValue>)> on_future_resolved;
 
     VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE)
         : stack(stack_size), globals(MAX_GLOBALS),
-          array_pool(4), tuple_pool(2), iterator_pool(2), object_pool(4), tensor_pool(2) {
+          array_pool(4), tuple_pool(2), iterator_pool(2), object_pool(4), tensor_pool(2),
+          coroutine_pool(2), future_pool(2) {
         setup_builtins();
     }
-    
+
     void setup_builtins();
     
     // Stack operations
@@ -442,7 +520,11 @@ public:
     static void mark_closure(ClosureValue* cl);
     static void mark_userdata(UserDataValue* ud);
     static void mark_object(ObjectValue* obj);
-    
+    static void mark_iterator(IteratorValue* iter);
+    static void mark_coroutine(CoroutineValue* coro);
+    static void mark_future(FutureValue* fut);
+    static void mark_webtransport(WebTransportValue* wt);
+
     static void collect(VMRuntime& runtime);
     static void sweep(VMRuntime& runtime);
 };
@@ -470,9 +552,13 @@ public:
     // Current function context (for instruction dispatch)
     const bytecode::Function* current_function = nullptr;
     uint32_t current_function_idx = 0;
-    
+
+    // Async/coroutine state (communicated to executor)
+    std::shared_ptr<CoroutineValue> suspended_coroutine;
+    std::shared_ptr<FutureValue> suspended_future;
+
     ClawVM(size_t stack_size = DEFAULT_STACK_SIZE) : runtime(stack_size) {}
-    
+
     // Load bytecode module
     bool load_module(const bytecode::Module& module);
     bool load_module_from_file(const std::string& path);
@@ -480,24 +566,27 @@ public:
     // Execute bytecode
     Value execute();
     Value execute_function(int32_t func_id, const std::vector<Value>& args = {});
-    
+
     // Execute single instruction (for debugging)
     bool step();
-    
+
     // Reset VM state
     void reset();
-    
+
     // Debug/inspect
     std::string dump_stack() const;
     std::string dump_callframes() const;
-    
+
     // Global variable inspection (for debugger/REPL)
     int32_t get_global_idx(const std::string& name) { return runtime.get_global_idx(name); }
     Value get_global(int32_t idx) const { return runtime.get_global(idx); }
     void set_global(int32_t idx, const Value& val) { runtime.set_global(idx, val); }
     int32_t define_global(const std::string& name) { return runtime.define_global(name); }
     const std::map<std::string, int32_t>& get_global_map() const { return runtime.get_global_map(); }
-    
+
+    // Coroutine support (public for event loop access)
+    Value resume_coroutine(std::shared_ptr<CoroutineValue> coro);
+
     friend class ::claw::debugger::Debugger;
     
 private:
@@ -535,7 +624,9 @@ private:
     bool op_ile();
     bool op_igt();
     bool op_ige();
-    
+    bool op_eq();
+    bool op_ne();
+
     bool op_feq();
     bool op_fne();
     bool op_flt();
@@ -631,6 +722,20 @@ private:
     bool op_type_of();
     bool op_ext();
     bool op_throw();
+
+    // Coroutine operations
+    bool op_co_create();
+    bool op_co_yield();
+    bool op_co_resume();
+    bool op_co_await();
+    bool op_async_call(int32_t arg_count = 0);
+    bool op_future_create();
+    bool op_future_resolve();
+    bool op_future_is_ready();
+
+    // Coroutine frame save/restore
+    void save_coroutine_frame(std::shared_ptr<CoroutineValue> coro);
+    void restore_coroutine_frame(std::shared_ptr<CoroutineValue> coro);
 
     // Iterator operations (NEW - 2026-04-26)
     bool op_iter_create();

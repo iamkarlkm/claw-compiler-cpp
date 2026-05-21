@@ -52,6 +52,8 @@ enum class OpCode : uint8_t {
     ILE,                // Integer less or equal
     IGT,                // Integer greater than
     IGE,                // Integer greater or equal
+    EQ,                 // Generic equal (any type)
+    NE,                 // Generic not equal (any type)
 
     // Comparison - Float (6)
     FEQ = 0x40,         // Float equal
@@ -182,10 +184,15 @@ enum class ExtOpCode : uint8_t {
     IS_NULL = 40,       // Check null
     IS_TYPE,            // Check type
 
-    // Coroutines
-    CO_CREATE = 50,     // Create coroutine
+    // Coroutines (moved to 150+ to avoid conflict with stdlib EXT opcodes)
+    CO_CREATE = 150,    // Create coroutine
     CO_YIELD,           // Yield
     CO_RESUME,          // Resume
+    CO_AWAIT = 153,     // Await a future
+    ASYNC_CALL = 154,   // Async function call
+    FUTURE_CREATE = 155,// Create future for current async fn
+    FUTURE_RESOLVE = 156,// Resolve future with value
+    FUTURE_IS_READY = 157,// Check if future is resolved
 
     // Memory
     MEM_COPY = 60,      // Memory copy
@@ -220,7 +227,9 @@ enum class ValueType : uint8_t {
     TENSOR,
     POINTER,
     EXTERN,
-    ITERATOR  // NEW - Iterator type
+    ITERATOR,  // NEW - Iterator type
+    COROUTINE, // NEW - Coroutine type
+    FUTURE     // NEW - Future type
 };
 
 // Value representation (tagged union)

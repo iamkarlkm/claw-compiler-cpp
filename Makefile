@@ -15,6 +15,12 @@ ifeq ($(LTO),1)
     LDFLAGS += -flto
 endif
 
+# WebTransport support (mock implementation, no external deps)
+CLAW_ENABLE_WEBTRANSPORT ?= 1
+ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
+    CXXFLAGS += -DCLAW_ENABLE_WEBTRANSPORT
+endif
+
 # Detect OS
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -47,6 +53,8 @@ CORE_SOURCES = \
     src/ast/ast.cpp \
     src/ast/ast_compact_repr.cpp \
     src/type/type_system.h \
+    src/type/error_effect.cpp \
+    src/type/error_effect_analyzer.cpp \
     src/type/type_checker.cpp \
     src/type/pattern_checker.cpp \
     src/type/type_inference.cpp \
@@ -177,7 +185,9 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
 .PHONY: all clean test help \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
-    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast
+    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast \
+    test-enum test-struct test-for-in test-struct-bytecode test-parser \
+    test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock
 
 all: claw claw-lsp claw-repl
 
@@ -220,7 +230,7 @@ claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrate
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-aot
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -454,7 +464,7 @@ install: all
 # ============================================================================
 # 测试目标
 # ============================================================================
-TEST_CXXFLAGS = -std=c++17 -I. -Isrc
+TEST_CXXFLAGS = -std=c++17 -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT
 
 tests/test_lexer: tests/test_lexer.cpp src/lexer/lexer.h src/lexer/token.h tests/claw_test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_lexer.cpp
@@ -463,3 +473,185 @@ test-lexer: tests/test_lexer
 	@./tests/test_lexer
 
 .PHONY: test-lexer
+
+tests/test_coroutine_vm: tests/test_coroutine_vm.cpp src/vm/claw_vm.h src/bytecode/bytecode.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_coroutine_vm.cpp src/vm/claw_vm.cpp src/bytecode/bytecode.cpp
+
+test-coroutine-vm: tests/test_coroutine_vm
+	@./tests/test_coroutine_vm
+
+.PHONY: test-coroutine-vm
+
+TEST_ASYNC_PARSER_SOURCES = tests/test_async_parser.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp
+
+tests/test_async_parser: tests/test_async_parser.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ASYNC_PARSER_SOURCES)
+
+test-async-parser: tests/test_async_parser
+	@./tests/test_async_parser
+
+.PHONY: test-async-parser
+
+TEST_ASYNC_BYTECODE_SOURCES = tests/test_async_bytecode.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+tests/test_async_bytecode: tests/test_async_bytecode.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ASYNC_BYTECODE_SOURCES)
+
+test-async-bytecode: tests/test_async_bytecode
+	@./tests/test_async_bytecode
+
+.PHONY: test-async-bytecode
+
+TEST_ASYNC_TYPES_SOURCES = tests/test_async_types.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp
+
+tests/test_async_types: tests/test_async_types.cpp src/lexer/lexer.h src/parser/parser.h src/type/type_system.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ASYNC_TYPES_SOURCES)
+
+test-async-types: tests/test_async_types
+	@./tests/test_async_types
+
+.PHONY: test-async-types
+
+TEST_ERROR_EFFECT_SOURCES = src/test/test_error_effect.cpp \
+    src/type/error_effect.cpp \
+    src/type/error_effect_analyzer.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/semantic/semantic_analyzer.cpp
+
+src/test/test_error_effect: src/test/test_error_effect.cpp src/lexer/lexer.h src/parser/parser.h src/type/error_effect.h src/type/error_effect_analyzer.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ERROR_EFFECT_SOURCES)
+
+test-error-effect: src/test/test_error_effect
+	@./src/test/test_error_effect
+
+.PHONY: test-error-effect
+
+TEST_WEBTRANSPORT_MOCK_SOURCES = tests/test_webtransport_mock.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+tests/test_webtransport_mock: tests/test_webtransport_mock.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_WEBTRANSPORT_MOCK_SOURCES)
+
+test-webtransport-mock: tests/test_webtransport_mock
+	@./tests/test_webtransport_mock
+
+.PHONY: test-webtransport-mock
+
+# ============================================================================
+# Core language feature tests (enum, struct, impl, for-in)
+# ============================================================================
+
+TEST_ENUM_SOURCES = tests/test_enum.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp
+
+TEST_STRUCT_SOURCES = tests/test_struct.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp
+
+TEST_FOR_IN_SOURCES = tests/test_for_in.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp
+
+TEST_STRUCT_BYTECODE_SOURCES = tests/test_struct_bytecode.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+TEST_PARSER_SOURCES = src/test/test_parser.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp
+
+tests/test_enum: tests/test_enum.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ENUM_SOURCES)
+
+test-enum: tests/test_enum
+	@./tests/test_enum
+
+.PHONY: test-enum
+
+tests/test_struct: tests/test_struct.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STRUCT_SOURCES)
+
+test-struct: tests/test_struct
+	@./tests/test_struct
+
+.PHONY: test-struct
+
+tests/test_for_in: tests/test_for_in.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_FOR_IN_SOURCES)
+
+test-for-in: tests/test_for_in
+	@./tests/test_for_in
+
+.PHONY: test-for-in
+
+tests/test_struct_bytecode: tests/test_struct_bytecode.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STRUCT_BYTECODE_SOURCES)
+
+test-struct-bytecode: tests/test_struct_bytecode
+	@./tests/test_struct_bytecode
+
+.PHONY: test-struct-bytecode
+
+src/test/test_parser: src/test/test_parser.cpp src/lexer/lexer.h src/parser/parser.h src/test/test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_PARSER_SOURCES)
+
+test-parser: src/test/test_parser
+	@./src/test/test_parser
+
+.PHONY: test-parser
+

@@ -1,0 +1,19 @@
+async fn main() {
+    let conn = await wt_connect("mock://echo")
+
+    if !wt_ready(conn) {
+        println("Failed to connect")
+        return
+    }
+
+    println("Connected!")
+
+    await wt_send(conn, "Hello from Claw!")
+    println("Sent")
+
+    let response = await wt_recv(conn)
+    println("Received: " + response)
+
+    await wt_close(conn)
+    println("Closed")
+}
