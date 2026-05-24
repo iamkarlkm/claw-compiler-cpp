@@ -11,6 +11,7 @@
 #include "lexer/token.h"
 #include "lexer/lexer.h"
 #include "ast/ast.h"
+#include "ast/clone.h"
 #include "ast/pattern.h"
 #include "common/common.h"
 
@@ -55,6 +56,7 @@ private:
     std::unique_ptr<ast::Expression> parse_unary();
     std::unique_ptr<ast::Expression> parse_postfix();
     std::unique_ptr<ast::Expression> parse_primary();
+    std::unique_ptr<ast::Expression> parse_command_expression();
 
     // Pattern parsing
     std::unique_ptr<ast::Pattern> parse_pattern();
@@ -75,6 +77,7 @@ private:
     std::unique_ptr<ast::Statement> parse_if_statement();
     std::unique_ptr<ast::Statement> parse_match_statement();
     std::unique_ptr<ast::Statement> parse_for_statement();
+    std::unique_ptr<ast::Statement> parse_for_await_statement();
     std::unique_ptr<ast::Statement> parse_while_statement();
     std::unique_ptr<ast::Statement> parse_loop_statement();
     std::unique_ptr<ast::Statement> parse_return_statement();
@@ -84,6 +87,8 @@ private:
     std::unique_ptr<ast::Statement> parse_expression_statement();
     std::unique_ptr<ast::Statement> parse_publish_statement();
     std::unique_ptr<ast::Statement> parse_subscribe_statement();
+    std::unique_ptr<ast::Statement> parse_handle_statement();
+    std::unique_ptr<ast::Statement> parse_bridge_statement();
     std::unique_ptr<ast::Statement> parse_try_statement();
     std::unique_ptr<ast::Statement> parse_throw_statement();
     std::unique_ptr<ast::Statement> parse_raise_statement();
@@ -214,6 +219,11 @@ inline std::unique_ptr<ast::Program> Parser::parse() {
         auto decl = parse_declaration();
         if (decl) {
             program->add_declaration(std::move(decl));
+            // Consume optional semicolon for top-level declarations
+            // (expression statements already consume their own)
+            if (check(TokenType::Semicolon)) {
+                advance();
+            }
         } else if (!is_at_end()) {
             // Parse failed, try to recover
             if (reporter) {
@@ -265,11 +275,16 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
         return parse_publish_statement();
     }
     
-    // Check for subscribe statement  
+    // Check for subscribe statement
     if (check(TokenType::Kw_subscribe)) {
         return parse_subscribe_statement();
     }
-    
+
+    // Check for handle statement
+    if (check(TokenType::Kw_handle)) {
+        return parse_handle_statement();
+    }
+
     // Check for name binding statement
     if (check(TokenType::Kw_name)) {
         return parse_name_statement();
@@ -499,26 +514,17 @@ inline std::unique_ptr<ast::Statement> Parser::parse_serial_process_declaration(
         return nullptr;
     }
     
-    // Get process name
-    if (!check(TokenType::Identifier)) {
-        if (reporter) {
-            reporter->error("Expected process name", span_from(peek()), "P008");
-        }
-        return nullptr;
+    // Get optional process name
+    if (check(TokenType::Identifier)) {
+        advance(); // consume process name
+        proc->set_name(previous().text);
     }
-    advance(); // consume process name
-    proc->set_name(previous().text);
-    
-    // Parse parameters: (x: u32, y: u32, result: u32)
-    if (!check(TokenType::LParen)) {
-        if (reporter) {
-            reporter->error("Expected '(' after process name", span_from(peek()), "P009");
-        }
-        return nullptr;
-    }
-    advance(); // consume '('
-    
+
+    // Parse optional parameters: (x: u32, y: u32, result: u32)
     std::vector<std::pair<std::string, std::string>> params;
+    if (check(TokenType::LParen)) {
+        advance(); // consume '('
+
     while (!check(TokenType::RParen) && !is_at_end()) {
         // Parameter name
         if (check(TokenType::Identifier)) {
@@ -572,21 +578,22 @@ inline std::unique_ptr<ast::Statement> Parser::parse_serial_process_declaration(
             if (check(TokenType::Comma)) {
                 advance();
             }
-        } else if (!check(TokenType::RParen)) {
-            break;
+            } else if (!check(TokenType::RParen)) {
+                break;
+            }
         }
-    }
-    
-    if (!check(TokenType::RParen)) {
-        if (reporter) {
-            reporter->error("Expected ')' after parameters", span_from(peek()), "P010");
+
+        if (!check(TokenType::RParen)) {
+            if (reporter) {
+                reporter->error("Expected ')' after parameters", span_from(peek()), "P010");
+            }
+            return nullptr;
         }
-        return nullptr;
+        advance(); // consume ')'
     }
-    advance(); // consume ')'
-    
+
     proc->set_params(params);
-    
+
     // Parse process body
     if (!check(TokenType::LBrace)) {
         if (reporter) {
@@ -595,7 +602,7 @@ inline std::unique_ptr<ast::Statement> Parser::parse_serial_process_declaration(
         return nullptr;
     }
     proc->set_body(parse_block());
-    
+
     return proc;
 }
 
@@ -965,8 +972,59 @@ inline std::unique_ptr<ast::Statement> Parser::parse_for_statement() {
     }
     auto body = parse_block();
     
-    return std::make_unique<ast::ForStmt>(var_name, std::move(iterable), 
+    return std::make_unique<ast::ForStmt>(var_name, std::move(iterable),
                                           std::move(body), span_from(previous()));
+}
+
+// Parse for await statement
+inline std::unique_ptr<ast::Statement> Parser::parse_for_await_statement() {
+    // Expect 'for'
+    if (!match(TokenType::Kw_for)) {
+        return nullptr;
+    }
+
+    // Expect 'await'
+    if (!match(TokenType::Kw_await)) {
+        if (reporter) {
+            reporter->error("Expected 'await' after 'for'", span_from(peek()), "P023");
+        }
+        return nullptr;
+    }
+
+    // Get loop variable
+    std::string var_name;
+    if (match(TokenType::Identifier)) {
+        var_name = previous().text;
+    } else {
+        if (reporter) {
+            reporter->error("Expected loop variable name", span_from(peek()), "P024");
+        }
+        return nullptr;
+    }
+
+    // Expect 'in'
+    if (!check(TokenType::Kw_in)) {
+        if (reporter) {
+            reporter->error("Expected 'in' keyword", span_from(peek()), "P025");
+        }
+        return nullptr;
+    }
+    advance(); // consume 'in'
+
+    // Parse stream expression
+    auto stream_expr = parse_expression();
+
+    // Parse body
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after for await statement", span_from(peek()), "P026");
+        }
+        return nullptr;
+    }
+    auto body = parse_block();
+
+    return std::make_unique<ast::ForAwaitStmt>(var_name, std::move(stream_expr),
+                                               std::move(body), span_from(previous()));
 }
 
 // Parse while statement
@@ -1406,15 +1464,43 @@ inline std::unique_ptr<ast::Statement> Parser::parse_block() {
 // Parse expression statement
 inline std::unique_ptr<ast::Statement> Parser::parse_expression_statement() {
     auto expr = parse_expression();
-    
-    // Check if expression is a BinaryExpr with = operator (already parsed by parse_assignment)
-    // Keep it as ExprStmt, interpreter will handle it
-    
+
+    // Convert assignment expressions to AssignStmt
+    if (auto* bin = dynamic_cast<ast::BinaryExpr*>(expr.get())) {
+        auto op = bin->get_operator();
+        if (op == TokenType::Op_eq_assign) {
+            auto target = bin->release_left();
+            auto value = bin->release_right();
+            if (check(TokenType::Semicolon)) advance();
+            return std::make_unique<ast::AssignStmt>(
+                std::move(target), std::move(value), span_from(previous()));
+        } else if (op == TokenType::Op_plus_eq || op == TokenType::Op_minus_eq ||
+                   op == TokenType::Op_star_eq || op == TokenType::Op_slash_eq) {
+            auto target = bin->release_left();
+            auto right = bin->release_right();
+            TokenType binary_op;
+            switch (op) {
+                case TokenType::Op_plus_eq:  binary_op = TokenType::Op_plus; break;
+                case TokenType::Op_minus_eq: binary_op = TokenType::Op_minus; break;
+                case TokenType::Op_star_eq:  binary_op = TokenType::Op_star; break;
+                case TokenType::Op_slash_eq: binary_op = TokenType::Op_slash; break;
+                default: binary_op = TokenType::Op_plus; break;
+            }
+            auto target_clone = ast::clone_expr(*target);
+            auto value = std::make_unique<ast::BinaryExpr>(
+                binary_op, std::move(target_clone), std::move(right),
+                bin->get_span());
+            if (check(TokenType::Semicolon)) advance();
+            return std::make_unique<ast::AssignStmt>(
+                std::move(target), std::move(value), span_from(previous()));
+        }
+    }
+
     // Not an assignment - consume optional semicolon and return expression statement
     if (check(TokenType::Semicolon)) {
         advance();
     }
-    
+
     return std::make_unique<ast::ExprStmt>(std::move(expr));
 }
 
@@ -1435,8 +1521,8 @@ inline std::unique_ptr<ast::Statement> Parser::parse_publish_statement() {
         }
         return nullptr;
     }
-    publish->set_event_name(previous().text);
     advance();
+    publish->set_event_name(previous().text);
     
     // Parse arguments: (a[1], b[1], sum[1])
     if (!check(TokenType::LParen)) {
@@ -1490,8 +1576,8 @@ inline std::unique_ptr<ast::Statement> Parser::parse_subscribe_statement() {
         }
         return nullptr;
     }
-    subscribe->set_event_name(previous().text);
     advance();
+    subscribe->set_event_name(previous().text);
     
     // Parse handler body - expect a block containing a function definition
     if (!check(TokenType::LBrace)) {
@@ -1540,23 +1626,23 @@ inline std::unique_ptr<ast::Statement> Parser::parse_subscribe_statement() {
         std::vector<std::pair<std::string, std::string>> params;
         while (!check(TokenType::RParen) && !is_at_end()) {
             if (check(TokenType::Identifier)) {
-                std::string param_name = previous().text;
                 advance();
-                
+                std::string param_name = previous().text;
+
                 std::string param_type;
                 if (check(TokenType::Colon)) {
                     advance(); // consume ':'
                     if (check(TokenType::Identifier)) {
-                        param_type = previous().text;
                         advance();
+                        param_type = previous().text;
                     } else if (check_any({TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
                                           TokenType::Type_u64, TokenType::Type_usize,
                                           TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
                                           TokenType::Type_i64, TokenType::Type_isize,
                                           TokenType::Type_f32, TokenType::Type_f64,
                                           TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
-                        param_type = previous().text;
                         advance();
+                        param_type = previous().text;
                     }
                 }
                 
@@ -1580,8 +1666,8 @@ inline std::unique_ptr<ast::Statement> Parser::parse_subscribe_statement() {
         if (check(TokenType::Op_arrow)) {
             advance(); // consume '->'
             if (check(TokenType::Identifier) || check_any({TokenType::Type_bool, TokenType::Type_u32, TokenType::Type_i32})) {
-                handler->set_return_type(previous().text);
                 advance();
+                handler->set_return_type(previous().text);
             }
         }
         
@@ -1632,8 +1718,277 @@ inline std::unique_ptr<ast::Statement> Parser::parse_subscribe_statement() {
     }
     
     subscribe->set_handler(std::move(handler));
-    
+
     return subscribe;
+}
+
+// Parse command expression
+// Format: command <name>(args...)
+inline std::unique_ptr<ast::Expression> Parser::parse_command_expression() {
+    if (!match(TokenType::Kw_command)) {
+        return nullptr;
+    }
+
+    // Get command name
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected command name", span_from(peek()), "P060");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string name = previous().text;
+
+    auto expr = std::make_unique<ast::CommandExpr>(name, span_from(previous()));
+
+    // Parse arguments
+    if (check(TokenType::LParen)) {
+        advance(); // consume '('
+
+        while (!check(TokenType::RParen) && !is_at_end()) {
+            auto arg = parse_expression();
+            expr->add_argument(std::move(arg));
+
+            if (check(TokenType::Comma)) {
+                advance();
+            }
+        }
+
+        if (!check(TokenType::RParen)) {
+            if (reporter) {
+                reporter->error("Expected ')' after command arguments", span_from(peek()), "P061");
+            }
+        } else {
+            advance(); // consume ')'
+        }
+    }
+
+    return expr;
+}
+
+// Parse handle statement
+// Format: handle <command_name> { fn handler_name(param: type, ...) -> ret_type { ... } }
+inline std::unique_ptr<ast::Statement> Parser::parse_handle_statement() {
+    if (!match(TokenType::Kw_handle)) {
+        return nullptr;
+    }
+
+    auto handle = std::make_unique<ast::HandleStmt>("", span_from(previous()));
+
+    // Get command name
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected command name", span_from(peek()), "P062");
+        }
+        return nullptr;
+    }
+    advance();
+    handle->set_command_name(previous().text);
+
+    // Parse handler body - expect a block containing a function definition
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after handle command name", span_from(peek()), "P063");
+        }
+        return nullptr;
+    }
+
+    // Create the handler function
+    auto handler = std::make_unique<ast::FunctionStmt>("", span_from(peek()));
+
+    if (check(TokenType::LBrace)) {
+        advance(); // consume first '{'
+
+        // Now we should see 'fn'
+        if (!check(TokenType::Kw_fn)) {
+            if (reporter) {
+                reporter->error("Expected 'fn' in handle handler", span_from(peek()), "P064");
+            }
+            return nullptr;
+        }
+        advance(); // consume 'fn'
+
+        // Get handler function name
+        if (!check(TokenType::Identifier)) {
+            if (reporter) {
+                reporter->error("Expected handler function name", span_from(peek()), "P065");
+            }
+            return nullptr;
+        }
+        handler->set_name(previous().text);
+        advance();
+
+        // Parse parameters
+        if (!check(TokenType::LParen)) {
+            if (reporter) {
+                reporter->error("Expected '(' after function name", span_from(peek()), "P066");
+            }
+            return nullptr;
+        }
+        advance(); // consume '('
+
+        std::vector<std::pair<std::string, std::string>> params;
+        while (!check(TokenType::RParen) && !is_at_end()) {
+            if (check(TokenType::Identifier)) {
+                advance();
+                std::string param_name = previous().text;
+
+                std::string param_type;
+                if (check(TokenType::Colon)) {
+                    advance(); // consume ':'
+                    if (check(TokenType::Identifier)) {
+                        advance();
+                        param_type = previous().text;
+                    } else if (check_any({TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+                                          TokenType::Type_u64, TokenType::Type_usize,
+                                          TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+                                          TokenType::Type_i64, TokenType::Type_isize,
+                                          TokenType::Type_f32, TokenType::Type_f64,
+                                          TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+                        advance();
+                        param_type = previous().text;
+                    }
+                }
+
+                params.emplace_back(param_name, param_type);
+
+                if (check(TokenType::Comma)) {
+                    advance();
+                }
+            } else if (!check(TokenType::RParen)) {
+                break;
+            }
+        }
+
+        if (check(TokenType::RParen)) {
+            advance(); // consume ')'
+        }
+
+        handler->set_params(params);
+
+        // Parse return type
+        if (check(TokenType::Op_arrow)) {
+            advance(); // consume '->'
+            if (check(TokenType::Identifier) || check_any({TokenType::Type_bool, TokenType::Type_u32, TokenType::Type_i32})) {
+                advance();
+                handler->set_return_type(previous().text);
+            }
+        }
+
+        // Parse function body
+        if (!check(TokenType::LBrace)) {
+            if (reporter) {
+                reporter->error("Expected function body", span_from(peek()), "P067");
+            }
+            return nullptr;
+        }
+
+        auto inner_block = std::make_unique<ast::BlockStmt>(span_from(peek()));
+        advance(); // consume '{'
+
+        while (!check(TokenType::RBrace) && !is_at_end()) {
+            if (check(TokenType::Semicolon)) {
+                advance();
+                continue;
+            }
+
+            auto stmt = parse_declaration();
+            if (stmt) {
+                if (check(TokenType::Semicolon)) {
+                    advance();
+                }
+                inner_block->add_statement(std::move(stmt));
+            } else {
+                break;
+            }
+        }
+
+        if (check(TokenType::RBrace)) {
+            advance(); // consume '}'
+        }
+
+        handler->set_body(std::move(inner_block));
+
+        // Now we should be at the closing '}' of the handle block
+        if (!check(TokenType::RBrace)) {
+            if (reporter) {
+                reporter->error("Expected '}' to close handle block", span_from(peek()), "P068");
+            }
+        } else {
+            advance(); // consume '}'
+        }
+    }
+
+    handle->set_handler(std::move(handler));
+
+    return handle;
+}
+
+// Parse bridge statement
+// Format: bridge event|command|stream <name> over <connection_expr>
+inline std::unique_ptr<ast::Statement> Parser::parse_bridge_statement() {
+    if (!match(TokenType::Kw_bridge)) {
+        return nullptr;
+    }
+
+    ast::BridgeStmt::BridgeKind kind;
+    if (check(TokenType::Kw_publish) || check(TokenType::Kw_subscribe)) {
+        // For simplicity, treat publish/subscribe after bridge as event
+        kind = ast::BridgeStmt::BridgeKind::Event;
+        advance();
+    } else if (check(TokenType::Kw_command) || check(TokenType::Kw_handle)) {
+        kind = ast::BridgeStmt::BridgeKind::Command;
+        advance();
+    } else if (check(TokenType::Identifier) && peek().text == "stream") {
+        kind = ast::BridgeStmt::BridgeKind::Stream;
+        advance();
+    } else if (check(TokenType::Identifier) && peek().text == "event") {
+        kind = ast::BridgeStmt::BridgeKind::Event;
+        advance();
+    } else if (check(TokenType::Identifier)) {
+        // Default to event for bare identifier (e.g. bridge MyEvent over conn)
+        kind = ast::BridgeStmt::BridgeKind::Event;
+    } else {
+        if (reporter) {
+            reporter->error("Expected 'event', 'command', 'stream' or name after 'bridge'", span_from(peek()), "P070");
+        }
+        return nullptr;
+    }
+
+    // Get target name
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected target name", span_from(peek()), "P071");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string target_name = previous().text;
+
+    // Expect 'over'
+    if (!check(TokenType::Identifier) || peek().text != "over") {
+        if (reporter) {
+            reporter->error("Expected 'over' after bridge target", span_from(peek()), "P072");
+        }
+        return nullptr;
+    }
+    advance(); // consume 'over'
+
+    // Parse connection expression
+    auto conn_expr = parse_expression();
+    if (!conn_expr) {
+        if (reporter) {
+            reporter->error("Expected connection expression", span_from(peek()), "P073");
+        }
+        return nullptr;
+    }
+
+    // Consume optional semicolon
+    if (check(TokenType::Semicolon)) {
+        advance();
+    }
+
+    return std::make_unique<ast::BridgeStmt>(kind, target_name, std::move(conn_expr), span_from(previous()));
 }
 
 // Parse statement (dispatcher)
@@ -1657,7 +2012,17 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
     if (check(TokenType::Kw_publish)) {
         return parse_publish_statement();
     }
-    
+
+    // Handle statement (can appear in function bodies)
+    if (check(TokenType::Kw_handle)) {
+        return parse_handle_statement();
+    }
+
+    // Bridge statement (can appear in function bodies)
+    if (check(TokenType::Kw_bridge)) {
+        return parse_bridge_statement();
+    }
+
     // If statement
     if (check(TokenType::Kw_if)) {
         return parse_if_statement();
@@ -1668,8 +2033,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_statement() {
         return parse_match_statement();
     }
     
-    // For statement
+    // For statement (for or for await)
     if (check(TokenType::Kw_for)) {
+        if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::Kw_await) {
+            return parse_for_await_statement();
+        }
         return parse_for_statement();
     }
     
@@ -2182,7 +2550,7 @@ inline std::unique_ptr<ast::Expression> Parser::parse_expression() {
 
 inline std::unique_ptr<ast::Expression> Parser::parse_assignment() {
     auto expr = parse_ternary();
-    
+
     if (check(TokenType::Op_eq_assign)) {
         advance();
         auto value = parse_assignment();
@@ -2190,8 +2558,36 @@ inline std::unique_ptr<ast::Expression> Parser::parse_assignment() {
             TokenType::Op_eq_assign, std::move(expr), std::move(value),
             span_from(previous())
         );
+    } else if (check(TokenType::Op_plus_eq)) {
+        advance();
+        auto value = parse_assignment();
+        return std::make_unique<ast::BinaryExpr>(
+            TokenType::Op_plus_eq, std::move(expr), std::move(value),
+            span_from(previous())
+        );
+    } else if (check(TokenType::Op_minus_eq)) {
+        advance();
+        auto value = parse_assignment();
+        return std::make_unique<ast::BinaryExpr>(
+            TokenType::Op_minus_eq, std::move(expr), std::move(value),
+            span_from(previous())
+        );
+    } else if (check(TokenType::Op_star_eq)) {
+        advance();
+        auto value = parse_assignment();
+        return std::make_unique<ast::BinaryExpr>(
+            TokenType::Op_star_eq, std::move(expr), std::move(value),
+            span_from(previous())
+        );
+    } else if (check(TokenType::Op_slash_eq)) {
+        advance();
+        auto value = parse_assignment();
+        return std::make_unique<ast::BinaryExpr>(
+            TokenType::Op_slash_eq, std::move(expr), std::move(value),
+            span_from(previous())
+        );
     }
-    
+
     return expr;
 }
 
@@ -2419,9 +2815,9 @@ inline std::unique_ptr<ast::Expression> Parser::parse_postfix() {
                         span_from(previous())
                     );
                 }
-            } else if (check(TokenType::Op_range)) {
-                // Slice with explicit '..'
-                advance(); // consume '..'
+            } else if (check(TokenType::Op_range) || check(TokenType::Colon)) {
+                // Slice with explicit '..' or ':'
+                advance(); // consume '..' or ':'
                 auto end = parse_expression();
 
                 expr = std::make_unique<ast::SliceExpr>(
@@ -2711,6 +3107,11 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         }
 
         return lambda;
+    }
+
+    // Command expression: command Name(args)
+    if (check(TokenType::Kw_command)) {
+        return parse_command_expression();
     }
 
     // Identifier

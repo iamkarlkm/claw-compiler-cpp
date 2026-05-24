@@ -178,6 +178,119 @@ vm::Value BytecodeExecutor::execute_in_vm(
             // they were added by on_future_resolved in FUTURE_RESOLVE
         }
 
+        // Command dispatch loop: drain command channel and call handlers (P3)
+        if (vm.runtime.command_channel) {
+            std::vector<vm::Value> commands;
+            {
+                std::lock_guard<std::mutex> lock(vm.runtime.command_channel->mtx);
+                commands.assign(vm.runtime.command_channel->queue.begin(),
+                                vm.runtime.command_channel->queue.end());
+                vm.runtime.command_channel->queue.clear();
+            }
+            for (auto& cmd : commands) {
+                if (!cmd.is_tuple()) continue;
+                auto tup = std::get<std::shared_ptr<vm::TupleValue>>(cmd.data);
+                if (tup->elements.size() < 3) continue;
+                int64_t req_id = tup->elements[0].as_int();
+                std::string name = tup->elements[1].as_string();
+                vm::Value args = tup->elements[2];
+
+                auto handler_it = vm.runtime.command_handlers.find(name);
+                if (handler_it == vm.runtime.command_handlers.end()) continue;
+
+                for (auto& handler : handler_it->second) {
+                    if (!handler.is_closure()) continue;
+                    vm::Value result = vm.execute_closure(handler, {args});
+
+                    auto fut_it = vm.runtime.pending_commands.find(req_id);
+                    if (fut_it != vm.runtime.pending_commands.end()) {
+                        auto future = fut_it->second;
+                        future->is_resolved = true;
+                        future->resolved_value = result;
+                        if (vm.runtime.on_future_resolved) {
+                            vm.runtime.on_future_resolved(future);
+                        }
+                        vm.runtime.pending_commands.erase(fut_it);
+                    }
+                }
+            }
+        }
+
+        // Event dispatch loop: drain event channels and call handlers (P1)
+        bool dispatched = true;
+        int max_rounds = 100;
+        while (dispatched && max_rounds-- > 0) {
+            dispatched = false;
+            for (auto& [name, handlers] : vm.runtime.event_handlers) {
+                auto ch_it = vm.runtime.event_channels.find(name);
+                if (ch_it == vm.runtime.event_channels.end()) continue;
+                auto& ch = ch_it->second;
+                std::vector<vm::Value> events;
+                {
+                    std::lock_guard<std::mutex> lock(ch->mtx);
+                    events.assign(ch->queue.begin(), ch->queue.end());
+                    ch->queue.clear();
+                }
+                for (auto& event : events) {
+                    dispatched = true;
+                    for (auto& handler : handlers) {
+                        if (handler.is_closure()) {
+                            vm.execute_closure(handler, {event});
+                        }
+                    }
+                }
+            }
+        }
+
+        // WebTransport bridge dispatch loop (P4): route incoming WT messages
+        for (auto& entry : vm.runtime.bridge_registry) {
+            if (!entry.connection) continue;
+            std::vector<std::string> messages;
+            {
+                std::lock_guard<std::mutex> lock(entry.connection->queue_mutex);
+                messages.assign(entry.connection->incoming_queue.begin(),
+                                entry.connection->incoming_queue.end());
+                entry.connection->incoming_queue.clear();
+            }
+            for (auto& msg : messages) {
+                if (entry.bridge_kind == "event") {
+                    auto& ch = vm.runtime.event_channels[entry.target_name];
+                    if (!ch) {
+                        ch = vm.runtime.channel_pool.acquire();
+                        ch->capacity = 0;
+                        ch->closed = false;
+                    }
+                    std::lock_guard<std::mutex> lock(ch->mtx);
+                    ch->queue.push_back(vm::Value::string_v(msg));
+                    ch->cv.notify_one();
+                } else if (entry.bridge_kind == "command") {
+                    if (!vm.runtime.command_channel) {
+                        vm.runtime.command_channel = vm.runtime.channel_pool.acquire();
+                        vm.runtime.command_channel->capacity = 0;
+                        vm.runtime.command_channel->closed = false;
+                    }
+                    int64_t req_id = vm.runtime.next_command_id++;
+                    auto req_tup = vm.runtime.tuple_pool.acquire();
+                    req_tup->elements.push_back(vm::Value::int_v(req_id));
+                    req_tup->elements.push_back(vm::Value::string_v(entry.target_name));
+                    req_tup->elements.push_back(vm::Value::string_v(msg));
+                    std::lock_guard<std::mutex> lock(vm.runtime.command_channel->mtx);
+                    vm.runtime.command_channel->queue.push_back(vm::Value::tuple_v(req_tup));
+                    vm.runtime.command_channel->cv.notify_one();
+                } else if (entry.bridge_kind == "stream") {
+                    auto& ch = vm.runtime.event_channels[entry.target_name];
+                    if (!ch) {
+                        ch = vm.runtime.channel_pool.acquire();
+                        ch->capacity = 0;
+                        ch->closed = false;
+                    }
+                    std::lock_guard<std::mutex> lock(ch->mtx);
+                    ch->queue.push_back(vm::Value::string_v(msg));
+                    ch->cv.notify_one();
+                }
+            }
+        }
+
         // 获取执行统计
         result.stats.vm_instructions_executed = vm.instructions_executed;
 

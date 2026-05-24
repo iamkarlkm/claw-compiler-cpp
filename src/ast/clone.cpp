@@ -208,6 +208,16 @@ std::unique_ptr<Statement> clone_stmt(const Statement& stmt) {
                 stmt.get_span());
         }
 
+        case Statement::Kind::ForAwait: {
+            auto& fa = static_cast<const ForAwaitStmt&>(stmt);
+            auto body = fa.get_body() ? dynamic_cast<const Statement*>(fa.get_body()) : nullptr;
+            return std::make_unique<ForAwaitStmt>(
+                fa.get_variable(),
+                clone_expr(*fa.get_iterable()),
+                body ? clone_stmt(*body) : nullptr,
+                stmt.get_span());
+        }
+
         case Statement::Kind::Loop: {
             auto& lp = static_cast<const LoopStmt&>(stmt);
             auto body = lp.get_body() ? dynamic_cast<const Statement*>(lp.get_body()) : nullptr;
@@ -295,6 +305,15 @@ std::unique_ptr<Statement> clone_stmt(const Statement& stmt) {
 
         case Statement::Kind::Continue:
             return std::make_unique<ContinueStmt>(stmt.get_span());
+
+        case Statement::Kind::Bridge: {
+            auto& br = static_cast<const BridgeStmt&>(stmt);
+            return std::make_unique<BridgeStmt>(
+                br.get_bridge_kind(),
+                br.get_target_name(),
+                clone_expr(*br.get_connection()),
+                stmt.get_span());
+        }
 
         default:
             return nullptr;

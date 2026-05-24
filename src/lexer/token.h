@@ -46,6 +46,9 @@ enum class TokenType {
     Kw_process,
     Kw_publish,
     Kw_subscribe,
+    Kw_command,
+    Kw_handle,
+    Kw_bridge,
     Kw_result,
     Kw_type,
     Kw_struct,
@@ -318,6 +321,7 @@ inline const char* token_type_to_string(TokenType type) {
         case TokenType::Kw_process: return "process";
         case TokenType::Kw_publish: return "publish";
         case TokenType::Kw_subscribe: return "subscribe";
+        case TokenType::Kw_bridge: return "bridge";
         case TokenType::Kw_result: return "result";
         case TokenType::Kw_type: return "type";
         case TokenType::Kw_struct: return "struct";

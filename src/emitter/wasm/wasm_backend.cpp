@@ -549,52 +549,16 @@ WasmCodeGenerator::WasmCodeGenerator(WasmModule& module) : module_(module) {}
 // ============================================================================
 
 bool WasmCodeGenerator::generate(const ast::Program& program, std::string& output, bool verbose) {
-    // Convert AST Program to Module
-    auto module = std::make_shared<ast::Module>();
-    module->functions = program.functions;
-    module->globals = program.globals;
-    
-    return generate_from_module(module, output, verbose);
+    (void)program;
+    (void)output;
+    (void)verbose;
+    // TODO: re-implement using current AST (ast::Module was removed)
+    return false;
 }
 
-bool WasmCodeGenerator::generate_from_module(std::shared_ptr<ast::Module> module, std::string& output, bool verbose) {
-    if (verbose) {
-        std::cout << "[WASM] Starting Module to WASM generation...\n";
-    }
-    
-    // Generate IR from AST
-    ir::IRGenerator ir_gen;
-    auto ir_module = ir_gen.generate(module);
-    if (!ir_module) {
-        if (verbose) {
-            std::cerr << "[WASM] IR generation failed\n";
-        }
-        return false;
-    }
-    
-    if (verbose) {
-        std::cout << "[WASM] IR generated, converting to WASM...\n";
-        std::cout << "[WASM] Module has " << ir_module->functions.size() << " functions\n";
-    }
-    
-    // Generate WASM from IR
-    if (!generate(*ir_module)) {
-        if (verbose) {
-            std::cerr << "[WASM] WASM generation from IR failed\n";
-        }
-        return false;
-    }
-    
-    // Serialize to binary format
-    auto bytes = module_.serialize();
-    output.assign(reinterpret_cast<char*>(bytes.data()), bytes.size());
-    
-    if (verbose) {
-        std::cout << "[WASM] Generated " << bytes.size() << " bytes\n";
-    }
-    
-    return true;
-}
+// bool WasmCodeGenerator::generate_from_module(std::shared_ptr<ast::Module> module, std::string& output, bool verbose) {
+//     // Removed - ast::Module no longer exists in the AST
+// }
 
 bool WasmCodeGenerator::generate_from_program(std::shared_ptr<ast::Program> program, std::string& output, bool verbose) {
     if (!program) {
@@ -603,23 +567,10 @@ bool WasmCodeGenerator::generate_from_program(std::shared_ptr<ast::Program> prog
         }
         return false;
     }
-    
-    // Convert shared_ptr<Program> to Module
-    auto module = std::make_shared<ast::Module>();
-    // Extract functions from the program - they may be stored as declarations
-    for (const auto& decl : program->get_declarations()) {
-        if (auto func_decl = std::dynamic_pointer_cast<ast::FunctionDecl>(decl)) {
-            module->functions.push_back(func_decl);
-        }
-    }
-    
-    return generate_from_module(module, output, verbose);
-}
-
-// Generate from Claw IR (stub - requires IR module integration)
-bool WasmCodeGenerator::generate(const ir::Module& ir_module) {
-    (void)ir_module;  // Stub - IR integration not yet implemented
-    return true;
+    (void)output;
+    (void)verbose;
+    // TODO: re-implement using current AST
+    return false;
 }
 
 void WasmCodeGenerator::emit_instruction(const WasmInstruction& inst) {
@@ -772,36 +723,6 @@ void WasmCodeGenerator::finish_function() {
         current_func_->code.push_back(0x0B);  // end
         current_func_ = nullptr;
     }
-}
-
-// Map IR type to WASM type (stub)
-WasmType WasmCodeGenerator::map_type(const ir::Type* type) {
-    (void)type;  // Stub
-    return WasmType::I32;
-}
-
-// Generate expression (stub)
-bool WasmCodeGenerator::generate_expression(const ir::Value* value) {
-    (void)value;  // Stub
-    return false;
-}
-
-// Generate instruction (stub)
-bool WasmCodeGenerator::generate_instruction(const ir::Instruction* inst) {
-    (void)inst;  // Stub
-    return false;
-}
-
-// Generate basic block (stub)
-bool WasmCodeGenerator::generate_basic_block(const ir::BasicBlock* block) {
-    (void)block;  // Stub
-    return false;
-}
-
-// Generate function (stub)
-bool WasmCodeGenerator::generate_function(const ir::Function* func) {
-    (void)func;  // Stub
-    return false;
 }
 
 // ============================================================================

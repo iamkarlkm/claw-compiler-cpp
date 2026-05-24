@@ -2,6 +2,7 @@
 // Phase 8: Bytecode Execution Engine
 
 #include "vm/claw_vm.h"
+#include "vm/webtransport_backend.h"
 #include <cctype>
 #include <csignal>
 #include <random>
@@ -10,6 +11,35 @@
 
 namespace claw {
 namespace vm {
+
+// ============================================================================
+// VMRuntime Constructor / Destructor
+// ============================================================================
+
+VMRuntime::VMRuntime(size_t stack_size)
+    : stack(stack_size), globals(MAX_GLOBALS),
+      array_pool(4), tuple_pool(2), iterator_pool(2), object_pool(4), tensor_pool(2),
+      coroutine_pool(2), future_pool(2), channel_pool(2) {
+    wt_backend_mock = std::make_unique<MockWebTransportBackend>();
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    wt_backend_msquic = std::make_unique<MsquicWebTransportBackend>();
+#endif
+    setup_builtins();
+}
+
+VMRuntime::~VMRuntime() = default;
+
+WebTransportBackend* VMRuntime::select_wt_backend(const std::string& url) {
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    if (url.find("mock://") == 0) {
+        return wt_backend_mock.get();
+    }
+    return wt_backend_msquic.get();
+#else
+    (void)url;
+    return wt_backend_mock.get();
+#endif
+}
 
 // ============================================================================
 // Value Implementation
@@ -85,6 +115,12 @@ std::string Value::to_string() const {
             auto wt = std::get<std::shared_ptr<WebTransportValue>>(data);
             return "webtransport(" + wt->url + ")";
         }
+        case ValueTag::CHANNEL: {
+            auto ch = std::get<std::shared_ptr<ChannelValue>>(data);
+            return "channel(" + std::to_string(ch->queue.size()) + "/" +
+                   (ch->capacity == 0 ? "unbounded" : std::to_string(ch->capacity)) +
+                   ")";
+        }
         default: return "<unknown>";
     }
 }
@@ -107,6 +143,7 @@ std::string Value::type_name() const {
         case ValueTag::COROUTINE: return "coroutine";
         case ValueTag::FUTURE: return "future";
         case ValueTag::WEBTRANSPORT: return "webtransport";
+        case ValueTag::CHANNEL: return "channel";
         default: return "unknown";
     }
 }
@@ -161,6 +198,11 @@ bool Value::equals(const Value& other) const {
             auto w1 = std::get<std::shared_ptr<WebTransportValue>>(data);
             auto w2 = std::get<std::shared_ptr<WebTransportValue>>(other.data);
             return w1->url == w2->url;
+        }
+        case ValueTag::CHANNEL: {
+            auto c1 = std::get<std::shared_ptr<ChannelValue>>(data);
+            auto c2 = std::get<std::shared_ptr<ChannelValue>>(other.data);
+            return c1.get() == c2.get();
         }
         default: return false;
     }
@@ -309,12 +351,381 @@ void VMRuntime::setup_builtins() {
         return Value::nil();
     };
 
+    // ============================================================================
+    // Channel builtins (P0 - MPMC queue foundation)
+    // ============================================================================
+    builtins["channel"] = [](VMRuntime& rt) -> Value {
+        int64_t cap = 0;
+        if (rt.stack_top > 0) {
+            cap = rt.peek().as_int();
+        }
+        auto ch = rt.channel_pool.acquire();
+        ch->queue.clear();
+        ch->capacity = cap > 0 ? static_cast<size_t>(cap) : 0;
+        ch->closed = false;
+        return Value::channel_v(ch);
+    };
+
+    builtins["ch_send"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) {
+            auto fut = rt.future_pool.acquire();
+            fut->is_resolved = true;
+            fut->resolved_value = Value::bool_v(false);
+            return Value::future_v(fut);
+        }
+        Value val = rt.peek();
+        Value ch_val = rt.stack[rt.stack_top - 2];
+        auto ch = ch_val.as_channel();
+        auto future = rt.future_pool.acquire();
+        if (!ch) {
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(false);
+            return Value::future_v(future);
+        }
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        if (ch->closed) {
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(false);
+        } else if (ch->capacity == 0 || ch->queue.size() < ch->capacity) {
+            ch->queue.push_back(val);
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(true);
+            ch->cv.notify_one();
+        } else {
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(false);
+        }
+        return Value::future_v(future);
+    };
+
+    builtins["ch_recv"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) {
+            auto fut = rt.future_pool.acquire();
+            fut->is_resolved = true;
+            return Value::future_v(fut);
+        }
+        Value ch_val = rt.peek();
+        auto ch = ch_val.as_channel();
+        auto future = rt.future_pool.acquire();
+        if (!ch) {
+            future->is_resolved = true;
+            return Value::future_v(future);
+        }
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        if (!ch->queue.empty()) {
+            Value val = ch->queue.front();
+            ch->queue.pop_front();
+            future->is_resolved = true;
+            future->resolved_value = val;
+            ch->cv.notify_one();
+        } else if (ch->closed) {
+            future->is_resolved = true;
+        } else {
+            future->is_resolved = true;
+        }
+        return Value::future_v(future);
+    };
+
+    builtins["stream_next"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) {
+            auto fut = rt.future_pool.acquire();
+            fut->is_resolved = true;
+            return Value::future_v(fut);
+        }
+        Value ch_val = rt.peek();
+        auto ch = ch_val.as_channel();
+        auto future = rt.future_pool.acquire();
+        if (!ch) {
+            future->is_resolved = true;
+            return Value::future_v(future);
+        }
+        auto tup = rt.tuple_pool.acquire();
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        if (!ch->queue.empty()) {
+            Value val = ch->queue.front();
+            ch->queue.pop_front();
+            tup->elements.push_back(val);
+            tup->elements.push_back(Value::bool_v(true));
+            future->is_resolved = true;
+            future->resolved_value = Value::tuple_v(tup);
+            ch->cv.notify_one();
+        } else if (ch->closed) {
+            tup->elements.push_back(Value::nil());
+            tup->elements.push_back(Value::bool_v(false));
+            future->is_resolved = true;
+            future->resolved_value = Value::tuple_v(tup);
+        } else {
+            tup->elements.push_back(Value::nil());
+            tup->elements.push_back(Value::bool_v(false));
+            future->is_resolved = true;
+            future->resolved_value = Value::tuple_v(tup);
+        }
+        return Value::future_v(future);
+    };
+
+    builtins["ch_try_send"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value val = rt.peek();
+        Value ch_val = rt.stack[rt.stack_top - 2];
+        auto ch = ch_val.as_channel();
+        if (!ch) return Value::bool_v(false);
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        if (ch->closed) return Value::bool_v(false);
+        if (ch->capacity > 0 && ch->queue.size() >= ch->capacity) return Value::bool_v(false);
+        ch->queue.push_back(val);
+        ch->cv.notify_one();
+        return Value::bool_v(true);
+    };
+
+    builtins["ch_try_recv"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::nil();
+        Value ch_val = rt.peek();
+        auto ch = ch_val.as_channel();
+        if (!ch) return Value::nil();
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        if (ch->queue.empty()) return Value::nil();
+        Value val = ch->queue.front();
+        ch->queue.pop_front();
+        ch->cv.notify_one();
+        return val;
+    };
+
+    builtins["ch_close"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        Value ch_val = rt.peek();
+        auto ch = ch_val.as_channel();
+        if (!ch) return Value::bool_v(false);
+        std::lock_guard<std::mutex> lock(ch->mtx);
+        ch->closed = true;
+        ch->cv.notify_all();
+        return Value::bool_v(true);
+    };
+
+    // Event system builtins (P1)
+    builtins["event_publish"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value val = rt.peek();
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!name_val.is_string()) return Value::bool_v(false);
+        std::string name = name_val.as_string();
+        auto& ch = rt.event_channels[name];
+        if (!ch) {
+            ch = rt.channel_pool.acquire();
+            ch->capacity = 0;
+            ch->closed = false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(ch->mtx);
+            ch->queue.push_back(val);
+            ch->cv.notify_one();
+        }
+        return Value::bool_v(true);
+    };
+
+    builtins["event_subscribe"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value handler_val = rt.peek();
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!name_val.is_string()) return Value::bool_v(false);
+        if (!handler_val.is_closure()) return Value::bool_v(false);
+        std::string name = name_val.as_string();
+        auto& ch = rt.event_channels[name];
+        if (!ch) {
+            ch = rt.channel_pool.acquire();
+            ch->capacity = 0;
+            ch->closed = false;
+        }
+        rt.event_handlers[name].push_back(handler_val);
+        return Value::bool_v(true);
+    };
+
+    // Command system builtins (P3)
+    builtins["command_send"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) {
+            auto fut = rt.future_pool.acquire();
+            fut->is_resolved = true;
+            return Value::future_v(fut);
+        }
+        Value args_val = rt.peek();
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!name_val.is_string()) {
+            auto fut = rt.future_pool.acquire();
+            fut->is_resolved = true;
+            return Value::future_v(fut);
+        }
+        std::string name = name_val.as_string();
+        int64_t req_id = rt.next_command_id++;
+
+        // Create pending future
+        auto future = rt.future_pool.acquire();
+        future->is_resolved = false;
+        rt.pending_commands[req_id] = future;
+
+        // Pack request into tuple (id, name, args)
+        auto req_tup = rt.tuple_pool.acquire();
+        req_tup->elements.push_back(Value::int_v(req_id));
+        req_tup->elements.push_back(name_val);
+        req_tup->elements.push_back(args_val);
+
+        // Send to command channel
+        if (!rt.command_channel) {
+            rt.command_channel = rt.channel_pool.acquire();
+            rt.command_channel->capacity = 0;
+            rt.command_channel->closed = false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(rt.command_channel->mtx);
+            rt.command_channel->queue.push_back(Value::tuple_v(req_tup));
+            rt.command_channel->cv.notify_one();
+        }
+
+        return Value::future_v(future);
+    };
+
+    builtins["command_register"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value handler_val = rt.peek();
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!name_val.is_string()) return Value::bool_v(false);
+        if (!handler_val.is_closure()) return Value::bool_v(false);
+        std::string name = name_val.as_string();
+        rt.command_handlers[name].push_back(handler_val);
+        return Value::bool_v(true);
+    };
+
+    // ============================================================================
+    // Stream transformation operators (P5)
+    // ============================================================================
+    builtins["stream_map"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::channel_v(rt.channel_pool.acquire());
+        Value closure_val = rt.peek();
+        Value ch_val = rt.stack[rt.stack_top - 2];
+        auto in_ch = ch_val.as_channel();
+        auto out_ch = rt.channel_pool.acquire();
+        out_ch->queue.clear();
+        out_ch->capacity = 0;
+        out_ch->closed = false;
+        if (!in_ch || !closure_val.is_closure()) {
+            return Value::channel_v(out_ch);
+        }
+        std::vector<Value> elems;
+        {
+            std::lock_guard<std::mutex> lock(in_ch->mtx);
+            elems.assign(in_ch->queue.begin(), in_ch->queue.end());
+            in_ch->queue.clear();
+        }
+        for (auto& elem : elems) {
+            if (rt.vm) {
+                Value mapped = rt.vm->execute_closure(closure_val, {elem});
+                std::lock_guard<std::mutex> lock(out_ch->mtx);
+                out_ch->queue.push_back(mapped);
+            }
+        }
+        return Value::channel_v(out_ch);
+    };
+
+    builtins["stream_filter"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::channel_v(rt.channel_pool.acquire());
+        Value closure_val = rt.peek();
+        Value ch_val = rt.stack[rt.stack_top - 2];
+        auto in_ch = ch_val.as_channel();
+        auto out_ch = rt.channel_pool.acquire();
+        out_ch->queue.clear();
+        out_ch->capacity = 0;
+        out_ch->closed = false;
+        if (!in_ch || !closure_val.is_closure()) {
+            return Value::channel_v(out_ch);
+        }
+        std::vector<Value> elems;
+        {
+            std::lock_guard<std::mutex> lock(in_ch->mtx);
+            elems.assign(in_ch->queue.begin(), in_ch->queue.end());
+            in_ch->queue.clear();
+        }
+        for (auto& elem : elems) {
+            if (rt.vm) {
+                Value pred = rt.vm->execute_closure(closure_val, {elem});
+                if (pred.as_bool()) {
+                    std::lock_guard<std::mutex> lock(out_ch->mtx);
+                    out_ch->queue.push_back(elem);
+                }
+            }
+        }
+        return Value::channel_v(out_ch);
+    };
+
+    builtins["stream_buffer"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::channel_v(rt.channel_pool.acquire());
+        int64_t batch_size = rt.peek().as_int();
+        Value ch_val = rt.stack[rt.stack_top - 2];
+        auto in_ch = ch_val.as_channel();
+        auto out_ch = rt.channel_pool.acquire();
+        out_ch->queue.clear();
+        out_ch->capacity = 0;
+        out_ch->closed = false;
+        if (!in_ch || batch_size <= 0) {
+            return Value::channel_v(out_ch);
+        }
+        std::vector<Value> elems;
+        {
+            std::lock_guard<std::mutex> lock(in_ch->mtx);
+            elems.assign(in_ch->queue.begin(), in_ch->queue.end());
+            in_ch->queue.clear();
+        }
+        std::vector<Value> batch;
+        for (auto& elem : elems) {
+            batch.push_back(elem);
+            if (static_cast<int64_t>(batch.size()) >= batch_size) {
+                auto arr = rt.array_pool.acquire();
+                arr->elements = std::move(batch);
+                std::lock_guard<std::mutex> lock(out_ch->mtx);
+                out_ch->queue.push_back(Value::array_v(arr));
+                batch.clear();
+            }
+        }
+        if (!batch.empty()) {
+            auto arr = rt.array_pool.acquire();
+            arr->elements = std::move(batch);
+            std::lock_guard<std::mutex> lock(out_ch->mtx);
+            out_ch->queue.push_back(Value::array_v(arr));
+        }
+        return Value::channel_v(out_ch);
+    };
+
+    builtins["stream_merge"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::channel_v(rt.channel_pool.acquire());
+        Value arr_val = rt.peek();
+        auto out_ch = rt.channel_pool.acquire();
+        out_ch->queue.clear();
+        out_ch->capacity = 0;
+        out_ch->closed = false;
+        if (!arr_val.is_array()) {
+            return Value::channel_v(out_ch);
+        }
+        auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+        for (auto& ch_val : arr->elements) {
+            auto in_ch = ch_val.as_channel();
+            if (!in_ch) continue;
+            std::vector<Value> elems;
+            {
+                std::lock_guard<std::mutex> lock(in_ch->mtx);
+                elems.assign(in_ch->queue.begin(), in_ch->queue.end());
+                in_ch->queue.clear();
+            }
+            std::lock_guard<std::mutex> lock(out_ch->mtx);
+            for (auto& elem : elems) {
+                out_ch->queue.push_back(elem);
+            }
+        }
+        return Value::channel_v(out_ch);
+    };
+
 #ifdef CLAW_ENABLE_WEBTRANSPORT
     // WebTransport mock builtins (async, return Future with WebTransport handle)
     builtins["wt_connect"] = [](VMRuntime& rt) -> Value {
         std::string url = "";
         if (rt.stack_top > 0) {
-            url = rt.stack[rt.stack_top - 1].to_string();
+            url = rt.stack[rt.stack_top - 1].as_string();
         }
         auto wt = std::make_shared<WebTransportValue>();
         wt->url = url;
@@ -331,7 +742,7 @@ void VMRuntime::setup_builtins() {
             future->resolved_value = Value::bool_v(false);
             return Value::future_v(future);
         }
-        std::string data = rt.stack[rt.stack_top - 1].to_string();
+        std::string data = rt.stack[rt.stack_top - 1].as_string();
         Value handle = rt.stack[rt.stack_top - 2];
         bool ok = false;
         if (handle.is_webtransport()) {
@@ -415,6 +826,46 @@ void VMRuntime::setup_builtins() {
         }
         return Value::bool_v(false);
     };
+
+    // WebTransport bridge builtins (P4)
+    builtins["wt_bridge_event"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value conn_val = rt.stack[rt.stack_top - 1];
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!conn_val.is_webtransport() || !name_val.is_string()) return Value::bool_v(false);
+        VMRuntime::BridgeEntry entry;
+        entry.target_name = name_val.as_string();
+        entry.bridge_kind = "event";
+        entry.connection = conn_val.as_webtransport();
+        rt.bridge_registry.push_back(std::move(entry));
+        return Value::bool_v(true);
+    };
+
+    builtins["wt_bridge_command"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value conn_val = rt.stack[rt.stack_top - 1];
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!conn_val.is_webtransport() || !name_val.is_string()) return Value::bool_v(false);
+        VMRuntime::BridgeEntry entry;
+        entry.target_name = name_val.as_string();
+        entry.bridge_kind = "command";
+        entry.connection = conn_val.as_webtransport();
+        rt.bridge_registry.push_back(std::move(entry));
+        return Value::bool_v(true);
+    };
+
+    builtins["wt_bridge_stream"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value conn_val = rt.stack[rt.stack_top - 1];
+        Value name_val = rt.stack[rt.stack_top - 2];
+        if (!conn_val.is_webtransport() || !name_val.is_string()) return Value::bool_v(false);
+        VMRuntime::BridgeEntry entry;
+        entry.target_name = name_val.as_string();
+        entry.bridge_kind = "stream";
+        entry.connection = conn_val.as_webtransport();
+        rt.bridge_registry.push_back(std::move(entry));
+        return Value::bool_v(true);
+    };
 #endif
 }
 
@@ -457,6 +908,16 @@ void GarbageCollector::mark_value(Value& val) {
         case ValueTag::WEBTRANSPORT:
             mark_webtransport(std::get<std::shared_ptr<WebTransportValue>>(val.data).get());
             break;
+        case ValueTag::CHANNEL: {
+            auto ch = std::get<std::shared_ptr<ChannelValue>>(val.data);
+            if (!ch->marked) {
+                ch->marked = true;
+                for (auto& qv : ch->queue) {
+                    mark_value(qv);
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -569,7 +1030,23 @@ void GarbageCollector::collect(VMRuntime& runtime) {
     for (auto& g : runtime.globals) {
         mark_value(g);
     }
-    
+
+    // Mark event handlers
+    for (auto& [name, handlers] : runtime.event_handlers) {
+        for (auto& handler : handlers) {
+            mark_value(handler);
+        }
+    }
+    // Mark event channels
+    for (auto& [name, ch] : runtime.event_channels) {
+        if (ch) {
+            std::lock_guard<std::mutex> lock(ch->mtx);
+            for (auto& val : ch->queue) {
+                mark_value(val);
+            }
+        }
+    }
+
     // Sweep phase
     sweep(runtime);
 }
@@ -680,6 +1157,79 @@ Value ClawVM::execute() {
         return runtime.pop();
     }
     return Value::nil();
+}
+
+Value ClawVM::execute_closure(Value closure_val, const std::vector<Value>& args) {
+    if (!closure_val.is_closure()) {
+        return Value::nil();
+    }
+
+    int32_t saved_frame_count = runtime.frame_count;
+    int32_t saved_stack_top = runtime.stack_top;
+
+    auto closure = std::get<std::shared_ptr<ClosureValue>>(closure_val.data);
+    auto& func = closure->function;
+
+    // Push args
+    for (auto& arg : args) {
+        runtime.push(arg);
+    }
+    // Push closure
+    runtime.push(closure_val);
+
+    // Replicate op_call logic
+    if (static_cast<size_t>(runtime.frame_count) >= MAX_CALL_FRAMES) {
+        error("Call stack overflow in execute_closure");
+        runtime.stack_top = saved_stack_top;
+        return Value::nil();
+    }
+
+    if (!runtime.call_frames.empty()) {
+        runtime.call_frames.back().ip = ip;
+    }
+
+    CallFrame frame;
+    frame.closure = closure;
+    frame.ip = 0;
+    frame.base_stack = runtime.stack_top - static_cast<int32_t>(args.size()) - 1;
+    frame.slot_count = func->max_stack > 0 ? func->max_stack : 256;
+    frame.local_count = func->local_count;
+
+    runtime.call_frames.push_back(frame);
+    runtime.frame_count++;
+
+    // Update current function
+    if (func->func_id >= 0 && func->func_id < static_cast<int32_t>(current_module.functions.size())) {
+        current_function_idx = func->func_id;
+        current_function = &current_module.functions[current_function_idx];
+    } else {
+        error("Invalid function id in execute_closure");
+        runtime.call_frames.pop_back();
+        runtime.frame_count--;
+        runtime.stack_top = saved_stack_top;
+        return Value::nil();
+    }
+
+    ip = 0;
+    if (current_function) {
+        runtime.stack_top = frame.base_stack + current_function->local_count;
+    }
+
+    // Run until the closure frame returns
+    bool prev_running = running;
+    running = true;
+    while (running && runtime.frame_count > saved_frame_count) {
+        if (!dispatch()) break;
+        instructions_executed++;
+    }
+    running = prev_running;
+
+    Value result = Value::nil();
+    if (runtime.stack_top > frame.base_stack) {
+        result = runtime.pop();
+    }
+    runtime.stack_top = saved_stack_top;
+    return result;
 }
 
 bool ClawVM::step() {
@@ -1577,6 +2127,11 @@ bool ClawVM::op_call_ext() {
     if (it == runtime.builtins.end()) {
         error("Unknown builtin: " + name);
         return false;
+    }
+
+    // Save IP so execute_closure (or nested dispatch) can restore caller state
+    if (!runtime.call_frames.empty()) {
+        runtime.call_frames.back().ip = ip;
     }
 
     Value result = it->second(runtime);
@@ -3654,39 +4209,48 @@ bool ClawVM::op_ext() {
 
 #ifdef CLAW_ENABLE_WEBTRANSPORT
         // ========== WebTransport 函数 (200-205) ==========
-        case 200: { // wt_connect
+        case static_cast<int>(bytecode::ExtOpCode::WT_CONNECT): {
             std::string url = "";
-            if (!stack.empty()) {
-                url = stack.back().to_string();
-                stack.pop_back();
+            if (runtime.stack_top > 0) {
+                url = runtime.stack[runtime.stack_top - 1].as_string();
+                runtime.stack_top--;
             }
-            auto wt = std::make_shared<WebTransportValue>();
-            wt->url = url;
-            wt->connected = true;
+            auto* backend = runtime.select_wt_backend(url);
+            auto wt = backend->connect(url);
+            if (wt) {
+                wt->backend = backend;
+                wt->runtime = &runtime;
+            }
             auto future = runtime.future_pool.acquire();
-            future->is_resolved = true;
             future->resolved_value = Value::webtransport_v(wt);
+
+            bool is_mock = (url.find("mock://") == 0);
+            if (is_mock || !wt || wt->closed) {
+                future->is_resolved = true;
+            } else {
+                wt->connect_future = future;
+                future->is_resolved = false;
+                runtime.pending_futures++;
+            }
             runtime.push(Value::future_v(future));
             return true;
         }
-        case 201: { // wt_send
-            if (stack.size() < 2) {
+        case static_cast<int>(bytecode::ExtOpCode::WT_SEND): {
+            if (runtime.stack_top < 2) {
                 auto future = runtime.future_pool.acquire();
                 future->is_resolved = true;
                 future->resolved_value = Value::bool_v(false);
                 runtime.push(Value::future_v(future));
                 return true;
             }
-            std::string data = stack.back().to_string();
-            stack.pop_back();
-            Value handle = stack.back();
-            stack.pop_back();
+            std::string data = runtime.stack[runtime.stack_top - 1].as_string();
+            runtime.stack_top--;
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
             bool ok = false;
             if (handle.is_webtransport()) {
                 auto wt = handle.as_webtransport();
-                std::lock_guard<std::mutex> lock(wt->queue_mutex);
-                wt->incoming_queue.push_back(data);
-                ok = true;
+                if (wt && wt->backend) ok = wt->backend->send(wt, data);
             }
             auto future = runtime.future_pool.acquire();
             future->is_resolved = true;
@@ -3694,24 +4258,20 @@ bool ClawVM::op_ext() {
             runtime.push(Value::future_v(future));
             return true;
         }
-        case 202: { // wt_recv
-            if (stack.empty()) {
+        case static_cast<int>(bytecode::ExtOpCode::WT_RECV): {
+            if (runtime.stack_top <= 0) {
                 auto future = runtime.future_pool.acquire();
                 future->is_resolved = true;
                 future->resolved_value = Value::string_v("");
                 runtime.push(Value::future_v(future));
                 return true;
             }
-            Value handle = stack.back();
-            stack.pop_back();
-            std::string msg = "hello";
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            std::string msg = "";
             if (handle.is_webtransport()) {
                 auto wt = handle.as_webtransport();
-                std::lock_guard<std::mutex> lock(wt->queue_mutex);
-                if (!wt->incoming_queue.empty()) {
-                    msg = wt->incoming_queue.front();
-                    wt->incoming_queue.pop_front();
-                }
+                if (wt && wt->backend) msg = wt->backend->recv(wt, -1);
             }
             auto future = runtime.future_pool.acquire();
             future->is_resolved = true;
@@ -3719,25 +4279,22 @@ bool ClawVM::op_ext() {
             runtime.push(Value::future_v(future));
             return true;
         }
-        case 203: { // wt_recv_timeout
-            if (stack.size() < 2) {
+        case static_cast<int>(bytecode::ExtOpCode::WT_RECV_TIMEOUT): {
+            if (runtime.stack_top < 2) {
                 auto future = runtime.future_pool.acquire();
                 future->is_resolved = true;
                 future->resolved_value = Value::string_v("");
                 runtime.push(Value::future_v(future));
                 return true;
             }
-            stack.pop_back(); // timeout ms
-            Value handle = stack.back();
-            stack.pop_back();
-            std::string msg = "hello";
+            int timeout_ms = static_cast<int>(runtime.stack[runtime.stack_top - 1].as_int());
+            runtime.stack_top--;
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            std::string msg = "";
             if (handle.is_webtransport()) {
                 auto wt = handle.as_webtransport();
-                std::lock_guard<std::mutex> lock(wt->queue_mutex);
-                if (!wt->incoming_queue.empty()) {
-                    msg = wt->incoming_queue.front();
-                    wt->incoming_queue.pop_front();
-                }
+                if (wt && wt->backend) msg = wt->backend->recv(wt, timeout_ms);
             }
             auto future = runtime.future_pool.acquire();
             future->is_resolved = true;
@@ -3745,37 +4302,195 @@ bool ClawVM::op_ext() {
             runtime.push(Value::future_v(future));
             return true;
         }
-        case 204: { // wt_close
-            if (stack.empty()) {
+        case static_cast<int>(bytecode::ExtOpCode::WT_CLOSE): {
+            if (runtime.stack_top <= 0) {
                 auto future = runtime.future_pool.acquire();
                 future->is_resolved = true;
                 future->resolved_value = Value::bool_v(false);
                 runtime.push(Value::future_v(future));
                 return true;
             }
-            Value handle = stack.back();
-            stack.pop_back();
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            bool ok = false;
             if (handle.is_webtransport()) {
-                handle.as_webtransport()->closed = true;
+                auto wt = handle.as_webtransport();
+                if (wt && wt->backend) ok = wt->backend->close(wt);
             }
             auto future = runtime.future_pool.acquire();
             future->is_resolved = true;
-            future->resolved_value = Value::bool_v(true);
+            future->resolved_value = Value::bool_v(ok);
             runtime.push(Value::future_v(future));
             return true;
         }
-        case 205: { // wt_ready
-            if (stack.empty()) {
+        case static_cast<int>(bytecode::ExtOpCode::WT_READY): {
+            if (runtime.stack_top <= 0) {
                 runtime.push(Value::bool_v(false));
                 return true;
             }
-            Value handle = stack.back();
-            stack.pop_back();
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            bool ready = false;
             if (handle.is_webtransport()) {
-                runtime.push(Value::bool_v(handle.as_webtransport()->connected));
-            } else {
-                runtime.push(Value::bool_v(false));
+                auto wt = handle.as_webtransport();
+                if (wt && wt->backend) ready = wt->backend->ready(wt);
             }
+            runtime.push(Value::bool_v(ready));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_OPEN_STREAM): {
+            if (runtime.stack_top < 2) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::nil();
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            bool bidirectional = runtime.stack[runtime.stack_top - 1].as_bool();
+            runtime.stack_top--;
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            auto future = runtime.future_pool.acquire();
+            if (handle.is_webtransport()) {
+                auto wt = handle.as_webtransport();
+                if (wt && wt->backend) {
+                    auto stream = wt->backend->open_stream(wt, bidirectional);
+                    if (stream) {
+                        stream->backend = wt->backend;
+                        future->resolved_value = Value::webtransport_v(stream);
+                    }
+                }
+            }
+            future->is_resolved = true;
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_STREAM_SEND): {
+            if (runtime.stack_top < 2) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::bool_v(false);
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            std::string data = runtime.stack[runtime.stack_top - 1].as_string();
+            runtime.stack_top--;
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            bool ok = false;
+            if (handle.is_webtransport()) {
+                auto stream = handle.as_webtransport();
+                if (stream && stream->backend) ok = stream->backend->stream_send(stream, data);
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(ok);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_STREAM_RECV): {
+            if (runtime.stack_top <= 0) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::string_v("");
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            std::string msg = "";
+            if (handle.is_webtransport()) {
+                auto stream = handle.as_webtransport();
+                if (stream && stream->backend) msg = stream->backend->stream_recv(stream, -1);
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::string_v(msg);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_STREAM_CLOSE): {
+            if (runtime.stack_top <= 0) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::bool_v(false);
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            bool ok = false;
+            if (handle.is_webtransport()) {
+                auto stream = handle.as_webtransport();
+                if (stream && stream->backend) ok = stream->backend->stream_close(stream);
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(ok);
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_LISTEN): {
+            std::string address = "";
+            if (runtime.stack_top > 0) {
+                address = runtime.stack[runtime.stack_top - 1].as_string();
+                runtime.stack_top--;
+            }
+            auto* backend = runtime.select_wt_backend(address);
+            auto server = backend->listen(address);
+            if (server) {
+                server->backend = backend;
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = server ? Value::webtransport_v(server) : Value::nil();
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_ACCEPT): {
+            if (runtime.stack_top <= 0) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::nil();
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            auto future = runtime.future_pool.acquire();
+            if (handle.is_webtransport()) {
+                auto server = handle.as_webtransport();
+                if (server && server->backend) {
+                    auto conn = server->backend->accept(server, -1);
+                    if (conn) {
+                        conn->backend = server->backend;
+                        future->resolved_value = Value::webtransport_v(conn);
+                    }
+                }
+            }
+            future->is_resolved = true;
+            runtime.push(Value::future_v(future));
+            return true;
+        }
+        case static_cast<int>(bytecode::ExtOpCode::WT_CLOSE_SERVER): {
+            if (runtime.stack_top <= 0) {
+                auto future = runtime.future_pool.acquire();
+                future->is_resolved = true;
+                future->resolved_value = Value::bool_v(false);
+                runtime.push(Value::future_v(future));
+                return true;
+            }
+            Value handle = runtime.stack[runtime.stack_top - 1];
+            runtime.stack_top--;
+            bool ok = false;
+            if (handle.is_webtransport()) {
+                auto server = handle.as_webtransport();
+                if (server && server->backend) ok = server->backend->close_server(server);
+            }
+            auto future = runtime.future_pool.acquire();
+            future->is_resolved = true;
+            future->resolved_value = Value::bool_v(ok);
+            runtime.push(Value::future_v(future));
             return true;
         }
 #endif

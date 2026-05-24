@@ -189,6 +189,9 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
         case ast::Statement::Kind::For:
             compileForStmt(static_cast<const ast::ForStmt&>(stmt));
             break;
+        case ast::Statement::Kind::ForAwait:
+            compileForAwaitStmt(static_cast<const ast::ForAwaitStmt&>(stmt));
+            break;
         case ast::Statement::Kind::While:
             compileWhileStmt(static_cast<const ast::WhileStmt&>(stmt));
             break;
@@ -233,6 +236,12 @@ void BytecodeCompiler::compileStatement(const Stmt& stmt) {
             break;
         case ast::Statement::Kind::Throw:
             compileThrowStmt(static_cast<const ast::ThrowStmt&>(stmt));
+            break;
+        case ast::Statement::Kind::Handle:
+            compileHandleStmt(static_cast<const ast::HandleStmt&>(stmt));
+            break;
+        case ast::Statement::Kind::Bridge:
+            compileBridgeStmt(static_cast<const ast::BridgeStmt&>(stmt));
             break;
         default:
             errorf("Unknown statement type: %d", (int)stmt.get_kind());
@@ -769,6 +778,89 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
     ctx_->loopStack.pop_back();
 }
 
+void BytecodeCompiler::compileForAwaitStmt(const ast::ForAwaitStmt& stmt) {
+    auto* stream_expr = stmt.get_iterable();
+    auto* body = stmt.get_body();
+    if (!stream_expr) return;
+
+    // Setup loop context
+    LoopContext loopCtx;
+    loopCtx.breakJumpIdx = -1;
+    loopCtx.continueJumpIdx = -1;
+    loopCtx.scopeDepth = ctx_->scopeDepth;
+    ctx_->loopStack.push_back(loopCtx);
+
+    enterScope();
+
+    // Evaluate stream expression and store in __stream
+    compileExpression(*stream_expr);
+    int streamSlot = allocateLocal("__stream");
+    emitOp1(bytecode::OpCode::STORE_LOCAL, streamSlot);
+
+    // Allocate result slot for tuple (value, is_some)
+    int resultSlot = allocateLocal("__result");
+
+    // Loop start
+    int loopStartIdx = static_cast<int>(ctx_->currentFunction->code.size());
+
+    // Load stream and call stream_next
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, streamSlot);
+    int str_idx = findOrAddString("stream_next");
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 1);
+
+    // Await the future
+    emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::CO_AWAIT));
+
+    // Store awaited result (tuple)
+    emitOp1(bytecode::OpCode::STORE_LOCAL, resultSlot);
+
+    // Check is_some (tuple index 1)
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, resultSlot);
+    emitConst(1);
+    emitOp(bytecode::OpCode::LOAD_ELEM);
+
+    // If not some, break
+    int exitJumpIdx = static_cast<int>(ctx_->currentFunction->code.size());
+    emitOp(bytecode::OpCode::JMP_IF_NOT);
+    ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
+
+    // Extract value (tuple index 0) and store in loop variable
+    emitOp1(bytecode::OpCode::LOAD_LOCAL, resultSlot);
+    emitConst(0);
+    emitOp(bytecode::OpCode::LOAD_ELEM);
+    int varSlot = allocateLocal(stmt.get_variable());
+    emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
+
+    // Body
+    if (body) {
+        if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
+            compileBlockStmt(*block);
+        } else if (auto* stmtNode = dynamic_cast<ast::Statement*>(body)) {
+            compileStatement(*stmtNode);
+        }
+    }
+
+    // Jump back to loop start
+    int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
+    emitOp1(bytecode::OpCode::JMP, backOffset);
+
+    // Patch exit jump to here
+    patchJump(exitJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+
+    // Patch any break jumps inside the body
+    if (ctx_->loopStack.back().breakJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().breakJumpIdx, static_cast<int>(ctx_->currentFunction->code.size()));
+    }
+
+    // Patch any continue jumps inside the body to loop start
+    if (ctx_->loopStack.back().continueJumpIdx >= 0) {
+        patchJump(ctx_->loopStack.back().continueJumpIdx, loopStartIdx);
+    }
+
+    ctx_->loopStack.pop_back();
+    exitScope();
+}
+
 void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
     int loopStartIdx = ctx_->currentFunction->code.size();
 
@@ -931,22 +1023,36 @@ void BytecodeCompiler::compileExprStmt(const ast::ExprStmt& stmt) {
 
 void BytecodeCompiler::compilePublishStmt(const ast::PublishStmt& stmt) {
     emitConst(stmt.get_event_name());
-    // PublishStmt has get_arguments() - compile each argument
     const auto& args = stmt.get_arguments();
-    // Push argument count
-    emitOp(bytecode::OpCode::PUSH);
-    emitOp1(bytecode::OpCode::PUSH, static_cast<int64_t>(args.size()));
-    for (const auto& arg : args) {
-        if (arg) compileExpression(*arg);
+    if (args.empty()) {
+        emitOp(bytecode::OpCode::PUSH);
+        emitOp1(bytecode::OpCode::PUSH, 0);
+    } else if (args.size() == 1) {
+        compileExpression(*args[0]);
+    } else {
+        for (const auto& arg : args) {
+            if (arg) compileExpression(*arg);
+        }
+        emitOp1(bytecode::OpCode::CREATE_TUPLE, static_cast<int>(args.size()));
     }
-    emitOp(bytecode::OpCode::EXT);
+    int str_idx = findOrAddString("event_publish");
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
 }
 
 void BytecodeCompiler::compileSubscribeStmt(const ast::SubscribeStmt& stmt) {
-    // SubscribeStmt handler is a FunctionStmt, not an Expression
-    // We need to compile it as a closure or skip for now
+    auto handler = stmt.get_handler();
+    if (!handler) {
+        return;
+    }
+    static int subscribe_counter = 0;
+    std::string handler_name = "__event_handler_" + stmt.get_event_name() + "_" + std::to_string(subscribe_counter++);
+    handler->set_name(handler_name);
+    int func_idx = static_cast<int>(module_->functions.size());
+    compileFunction(*handler);
     emitConst(stmt.get_event_name());
-    emitOp(bytecode::OpCode::EXT);
+    emitOp1(bytecode::OpCode::CLOSURE, func_idx);
+    int str_idx = findOrAddString("event_subscribe");
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
 }
 
 void BytecodeCompiler::compileStructStmt(const ast::StructStmt& stmt) {
@@ -1035,6 +1141,44 @@ void BytecodeCompiler::compileThrowStmt(const ast::ThrowStmt& stmt) {
     emitOp(bytecode::OpCode::THROW);
 }
 
+void BytecodeCompiler::compileHandleStmt(const ast::HandleStmt& stmt) {
+    auto handler = stmt.get_handler();
+    if (!handler) return;
+    static int handle_counter = 0;
+    std::string handler_name = "__command_handler_" + stmt.get_command_name() + "_" + std::to_string(handle_counter++);
+    handler->set_name(handler_name);
+    int func_idx = static_cast<int>(module_->functions.size());
+    compileFunction(*handler);
+    emitConst(stmt.get_command_name());
+    emitOp1(bytecode::OpCode::CLOSURE, func_idx);
+    int str_idx = findOrAddString("command_register");
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
+}
+
+void BytecodeCompiler::compileBridgeStmt(const ast::BridgeStmt& stmt) {
+    // Compile connection expression onto stack
+    compileExpression(*stmt.get_connection());
+    // Push target name
+    emitConst(stmt.get_target_name());
+    // Swap so name is arg1, connection is arg2
+    emitOp(bytecode::OpCode::SWAP);
+
+    std::string builtin_name;
+    switch (stmt.get_bridge_kind()) {
+        case ast::BridgeStmt::BridgeKind::Event:
+            builtin_name = "wt_bridge_event";
+            break;
+        case ast::BridgeStmt::BridgeKind::Command:
+            builtin_name = "wt_bridge_command";
+            break;
+        case ast::BridgeStmt::BridgeKind::Stream:
+            builtin_name = "wt_bridge_stream";
+            break;
+    }
+    int str_idx = findOrAddString(builtin_name);
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
+}
+
 // ========== 表达式编译 ==========
 
 void BytecodeCompiler::compileExpression(const Expr& expr) {
@@ -1072,6 +1216,9 @@ void BytecodeCompiler::compileExpression(const Expr& expr) {
         case ast::Expression::Kind::Await:
             compileExpression(*static_cast<const ast::AwaitExpr&>(expr).get_operand());
             emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::CO_AWAIT));
+            break;
+        case ast::Expression::Kind::Command:
+            compileCommandExpr(static_cast<const ast::CommandExpr&>(expr));
             break;
         default:
             errorf("Unknown expression type: %d", (int)expr.get_kind());
@@ -1153,10 +1300,33 @@ void BytecodeCompiler::compileUnaryExpr(const ast::UnaryExpr& expr) {
 void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
     static const std::unordered_set<std::string> builtins = {
         "print", "println", "len", "type", "int", "float", "string", "bool", "input", "array", "range", "panic",
+        "channel", "ch_send", "ch_recv", "ch_try_send", "ch_try_recv", "ch_close",
+        "stream_next", "stream_map", "stream_filter", "stream_buffer", "stream_merge",
+        "command_send", "command_register",
 #ifdef CLAW_ENABLE_WEBTRANSPORT
-        "wt_connect", "wt_send", "wt_recv", "wt_recv_timeout", "wt_close", "wt_ready"
+        "wt_connect", "wt_send", "wt_recv", "wt_recv_timeout", "wt_close", "wt_ready",
+        "wt_open_stream", "wt_stream_send", "wt_stream_recv", "wt_stream_close",
+        "wt_listen", "wt_accept", "wt_close_server"
 #endif
     };
+
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    static const std::unordered_map<std::string, bytecode::ExtOpCode> wt_builtins = {
+        {"wt_connect", bytecode::ExtOpCode::WT_CONNECT},
+        {"wt_send", bytecode::ExtOpCode::WT_SEND},
+        {"wt_recv", bytecode::ExtOpCode::WT_RECV},
+        {"wt_recv_timeout", bytecode::ExtOpCode::WT_RECV_TIMEOUT},
+        {"wt_close", bytecode::ExtOpCode::WT_CLOSE},
+        {"wt_ready", bytecode::ExtOpCode::WT_READY},
+        {"wt_open_stream", bytecode::ExtOpCode::WT_OPEN_STREAM},
+        {"wt_stream_send", bytecode::ExtOpCode::WT_STREAM_SEND},
+        {"wt_stream_recv", bytecode::ExtOpCode::WT_STREAM_RECV},
+        {"wt_stream_close", bytecode::ExtOpCode::WT_STREAM_CLOSE},
+        {"wt_listen", bytecode::ExtOpCode::WT_LISTEN},
+        {"wt_accept", bytecode::ExtOpCode::WT_ACCEPT},
+        {"wt_close_server", bytecode::ExtOpCode::WT_CLOSE_SERVER},
+    };
+#endif
 
     if (expr.get_callee()->get_kind() == ast::Expression::Kind::Identifier) {
         const auto& name = static_cast<const ast::IdentifierExpr&>(*expr.get_callee()).get_name();
@@ -1164,6 +1334,13 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
             for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
                 compileExpression(**it);
             }
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+            auto wt_it = wt_builtins.find(name);
+            if (wt_it != wt_builtins.end()) {
+                emitOp1(bytecode::OpCode::EXT, static_cast<int>(wt_it->second));
+                return;
+            }
+#endif
             int str_idx = findOrAddString(name);
             int arg_count = static_cast<int>(expr.get_arguments().size());
             emitOp2(bytecode::OpCode::CALL_EXT, str_idx, arg_count);
@@ -1328,6 +1505,24 @@ void BytecodeCompiler::compileLambdaExpr(const ast::LambdaExpr& expr) {
     ctx_ = std::move(prevCtx);
 
     emitOp1(bytecode::OpCode::CLOSURE, func_idx);
+}
+
+void BytecodeCompiler::compileCommandExpr(const ast::CommandExpr& expr) {
+    emitConst(expr.get_name());
+    const auto& args = expr.get_arguments();
+    if (args.empty()) {
+        emitOp(bytecode::OpCode::PUSH);
+        emitOp1(bytecode::OpCode::PUSH, 0);
+    } else if (args.size() == 1) {
+        compileExpression(*args[0]);
+    } else {
+        for (const auto& arg : args) {
+            if (arg) compileExpression(*arg);
+        }
+        emitOp1(bytecode::OpCode::CREATE_TUPLE, static_cast<int>(args.size()));
+    }
+    int str_idx = findOrAddString("command_send");
+    emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
 }
 
 // ========== 作用域管理 ==========

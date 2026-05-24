@@ -350,6 +350,9 @@ inline void Lexer::scan_identifier() {
         type == TokenType::Kw_process ||
         type == TokenType::Kw_publish ||
         type == TokenType::Kw_subscribe ||
+        type == TokenType::Kw_command ||
+        type == TokenType::Kw_handle ||
+        type == TokenType::Kw_bridge ||
         type == TokenType::Kw_await ||
         type == TokenType::Kw_async ||
         type == TokenType::Kw_mut ||
@@ -710,6 +713,9 @@ inline void KeywordMap::init() {
     keywords["process"] = TokenType::Kw_process;
     keywords["publish"] = TokenType::Kw_publish;
     keywords["subscribe"] = TokenType::Kw_subscribe;
+    keywords["command"] = TokenType::Kw_command;
+    keywords["handle"] = TokenType::Kw_handle;
+    keywords["bridge"] = TokenType::Kw_bridge;
     keywords["Result"] = TokenType::Kw_result;
     keywords["type"] = TokenType::Kw_type;
     keywords["struct"] = TokenType::Kw_struct;

@@ -60,7 +60,8 @@ enum class ValueTag {
     ITERATOR,  // NEW - Iterator type
     COROUTINE, // NEW - Coroutine type
     FUTURE,    // NEW - Future type
-    WEBTRANSPORT // NEW - WebTransport handle type
+    WEBTRANSPORT, // NEW - WebTransport handle type
+    CHANNEL    // NEW - Channel type for MPMC queues
 };
 
 struct Value;
@@ -74,6 +75,8 @@ struct ObjectValue;
 struct CoroutineValue;
 struct FutureValue;
 struct WebTransportValue;
+struct ChannelValue;
+class WebTransportBackend;
 
 // Iterator value structure (NEW - 2026-04-26)
 struct IteratorValue {
@@ -148,7 +151,8 @@ using ValueData = std::variant<
     std::shared_ptr<IteratorValue>, // ITERATOR
     std::shared_ptr<CoroutineValue>,    // COROUTINE
     std::shared_ptr<FutureValue>,       // FUTURE
-    std::shared_ptr<WebTransportValue>  // WEBTRANSPORT
+    std::shared_ptr<WebTransportValue>, // WEBTRANSPORT
+    std::shared_ptr<ChannelValue>       // CHANNEL
 >;
 
 struct Value {
@@ -176,6 +180,7 @@ struct Value {
     static Value coroutine_v(std::shared_ptr<CoroutineValue> c) { Value v; v.tag = ValueTag::COROUTINE; v.data = c; return v; }
     static Value future_v(std::shared_ptr<FutureValue> f) { Value v; v.tag = ValueTag::FUTURE; v.data = f; return v; }
     static Value webtransport_v(std::shared_ptr<WebTransportValue> wt) { Value v; v.tag = ValueTag::WEBTRANSPORT; v.data = wt; return v; }
+    static Value channel_v(std::shared_ptr<ChannelValue> ch) { Value v; v.tag = ValueTag::CHANNEL; v.data = ch; return v; }
 
     // Type checking
     bool is_nil() const { return tag == ValueTag::NIL; }
@@ -195,6 +200,7 @@ struct Value {
     bool is_coroutine() const { return tag == ValueTag::COROUTINE; }
     bool is_future() const { return tag == ValueTag::FUTURE; }
     bool is_webtransport() const { return tag == ValueTag::WEBTRANSPORT; }
+    bool is_channel() const { return tag == ValueTag::CHANNEL; }
 
     // Value extraction
     bool as_bool() const { 
@@ -244,7 +250,17 @@ struct Value {
         if (is_webtransport()) return std::get<std::shared_ptr<WebTransportValue>>(data);
         return empty;
     }
-    
+
+    std::shared_ptr<ChannelValue> as_channel() {
+        if (is_channel()) return std::get<std::shared_ptr<ChannelValue>>(data);
+        return nullptr;
+    }
+    const std::shared_ptr<ChannelValue>& as_channel() const {
+        static const std::shared_ptr<ChannelValue> empty;
+        if (is_channel()) return std::get<std::shared_ptr<ChannelValue>>(data);
+        return empty;
+    }
+
     // String representation
     std::string to_string() const;
     std::string type_name() const;
@@ -396,6 +412,19 @@ struct FutureValue {
 };
 
 // ============================================================================
+// Channel Value - MPMC queue for inter-coroutine communication
+// ============================================================================
+
+struct ChannelValue {
+    std::deque<Value> queue;
+    size_t capacity = 0;  // 0 = unbounded
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool closed = false;
+    bool marked = false;
+};
+
+// ============================================================================
 // WebTransport Value - Handle for WebTransport connections
 // ============================================================================
 
@@ -407,6 +436,38 @@ struct WebTransportValue {
     std::mutex queue_mutex;                 // Queue protection
     std::condition_variable cv;             // For blocking recv
     bool marked = false;
+
+    // Msquic handles (opaque, managed by backend)
+    void* msquic_connection = nullptr;      // HQUIC
+    void* msquic_stream = nullptr;          // HQUIC
+    bool msquic_connecting = false;         // Async connect in progress
+    bool msquic_send_shutdown = false;      // Stream send shutdown
+
+    // Backend that owns this connection (for dispatching send/recv/close/ready)
+    WebTransportBackend* backend = nullptr;
+    void* backend_api = nullptr;                  // Opaque backend-specific data (e.g. QUIC_API_TABLE*)
+
+    // Async connect support
+    std::shared_ptr<FutureValue> connect_future;  // Future to resolve when connect completes
+    void* runtime = nullptr;                      // VMRuntime* (opaque to avoid circular type)
+
+    // Stream multiplexing support
+    bool is_stream = false;                       // true if this handle represents a stream
+    uint64_t stream_id = 0;                       // Stream ID (for msquic)
+    std::shared_ptr<WebTransportValue> parent_conn; // Parent connection (for streams)
+
+    // Server-side support
+    bool is_server = false;                       // true if this handle represents a listener
+    std::deque<std::shared_ptr<WebTransportValue>> pending_connections; // Accepted connections queue
+    std::mutex server_mutex;                      // Server queue protection
+    std::condition_variable server_cv;            // For blocking accept
+    void* msquic_listener = nullptr;              // HQUIC listener handle
+
+    // Mock peer connection (for bidirectional mock client/server pairs)
+    std::shared_ptr<WebTransportValue> peer;      // Peer connection in mock backend
+
+    // Weak self-reference for retrieving shared_ptr from raw pointers in callbacks
+    std::weak_ptr<WebTransportValue> self_weak;
 };
 
 // ============================================================================
@@ -424,6 +485,8 @@ struct CallFrame {
 // ============================================================================
 // VM Runtime State
 // ============================================================================
+
+class ClawVM;
 
 struct VMRuntime {
     std::vector<Value> stack;              // Value stack
@@ -454,19 +517,48 @@ struct VMRuntime {
     ObjectPool<TensorValue> tensor_pool;
     ObjectPool<CoroutineValue> coroutine_pool;
     ObjectPool<FutureValue> future_pool;
+    ObjectPool<ChannelValue> channel_pool;
 
     // Async event loop support
     std::deque<std::shared_ptr<CoroutineValue>> ready_coroutines;
     std::function<void(std::shared_ptr<FutureValue>)> on_future_resolved;
 
-    VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE)
-        : stack(stack_size), globals(MAX_GLOBALS),
-          array_pool(4), tuple_pool(2), iterator_pool(2), object_pool(4), tensor_pool(2),
-          coroutine_pool(2), future_pool(2) {
-        setup_builtins();
-    }
+    // External async event loop support (for msquic, I/O, etc.)
+    std::mutex event_mutex;
+    std::condition_variable event_cv;
+    bool event_ready = false;
+    std::atomic<size_t> pending_futures{0};
+
+    // Event system (P1)
+    std::unordered_map<std::string, std::shared_ptr<ChannelValue>> event_channels;
+    std::unordered_map<std::string, std::vector<Value>> event_handlers;
+    ClawVM* vm = nullptr;
+
+    // Command system (P3)
+    std::shared_ptr<ChannelValue> command_channel;
+    std::unordered_map<std::string, std::vector<Value>> command_handlers;
+    std::unordered_map<int64_t, std::shared_ptr<FutureValue>> pending_commands;
+    int64_t next_command_id = 1;
+
+    // WebTransport bridge registry (P4)
+    struct BridgeEntry {
+        std::string target_name;           // Event/Command/Stream name
+        std::string bridge_kind;           // "event", "command", "stream"
+        std::shared_ptr<WebTransportValue> connection;
+    };
+    std::vector<BridgeEntry> bridge_registry;
+
+    // WebTransport backends (mock always available; msquic when compiled in)
+    std::unique_ptr<WebTransportBackend> wt_backend_mock;
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    std::unique_ptr<WebTransportBackend> wt_backend_msquic;
+#endif
+
+    VMRuntime(size_t stack_size = DEFAULT_STACK_SIZE);
+    ~VMRuntime();
 
     void setup_builtins();
+    WebTransportBackend* select_wt_backend(const std::string& url);
     
     // Stack operations
     void push(const Value& val) {
@@ -557,7 +649,9 @@ public:
     std::shared_ptr<CoroutineValue> suspended_coroutine;
     std::shared_ptr<FutureValue> suspended_future;
 
-    ClawVM(size_t stack_size = DEFAULT_STACK_SIZE) : runtime(stack_size) {}
+    ClawVM(size_t stack_size = DEFAULT_STACK_SIZE) : runtime(stack_size) {
+        runtime.vm = this;
+    }
 
     // Load bytecode module
     bool load_module(const bytecode::Module& module);
@@ -566,6 +660,9 @@ public:
     // Execute bytecode
     Value execute();
     Value execute_function(int32_t func_id, const std::vector<Value>& args = {});
+
+    // Execute a closure with arguments (for event dispatch)
+    Value execute_closure(Value closure_val, const std::vector<Value>& args = {});
 
     // Execute single instruction (for debugging)
     bool step();

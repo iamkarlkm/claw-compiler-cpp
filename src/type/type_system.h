@@ -37,6 +37,7 @@ namespace ast {
     class IfStmt;
     class MatchStmt;
     class ForStmt;
+    class ForAwaitStmt;
     class WhileStmt;
     class ReturnStmt;
     class BlockStmt;
@@ -47,7 +48,9 @@ namespace ast {
     class ImplStmt;
     class PublishStmt;
     class SubscribeStmt;
+    class HandleStmt;
     class SerialProcessStmt;
+    class CommandExpr;
     
     using ExprPtr = std::shared_ptr<Expression>;
     using StmtPtr = std::shared_ptr<Statement>;
@@ -91,6 +94,7 @@ enum class TypeKind {
 
     // Async types
     FUTURE,     // Future type (Future<T>)
+    STREAM,     // Stream type (Stream<T>)
 
     // Special
     UNKNOWN,    // Unknown/inferred type
@@ -140,6 +144,7 @@ public:
     virtual bool is_type_var() const; // NEW: check if type variable
     virtual bool is_unknown() const;  // NEW: check if unknown type
     virtual bool is_future() const;   // NEW: check if future type
+    virtual bool is_stream() const;   // NEW: check if stream type
     virtual bool can_be_zero() const;
     virtual bool is_copyable() const;
     
@@ -179,6 +184,7 @@ private:
     std::map<TypePtr, TypePtr> optional_types_;
     std::map<std::pair<TypePtr, TypePtr>, TypePtr> result_types_;
     std::map<TypePtr, TypePtr> future_types_;            // NEW: FutureType cache
+    std::map<TypePtr, TypePtr> stream_types_;            // NEW: StreamType cache
     std::map<std::string, TypePtr> generic_types_;       // NEW: GenericType cache (e.g., Array<T>)
     std::map<std::string, TypePtr> type_vars_;           // NEW: TypeVar cache
     
@@ -214,6 +220,7 @@ public:
     TypePtr get_optional(TypePtr inner);
     TypePtr get_result(TypePtr ok, TypePtr err);
     TypePtr get_future(TypePtr inner);
+    TypePtr get_stream(TypePtr inner);
 
     // NEW: Generic type methods
     TypePtr get_generic(const std::string& base_name, std::vector<TypePtr> params = {});
@@ -394,6 +401,7 @@ private:
     TypePtr check_lambda(const ast::LambdaExpr& lambda);
     TypePtr check_match(const ast::MatchStmt& match);
     TypePtr check_for(const ast::ForStmt& for_stmt);
+    TypePtr check_for_await(const ast::ForAwaitStmt& for_stmt);
     TypePtr check_function(const ast::FunctionStmt& decl);
     TypePtr check_struct(const ast::StructStmt& decl);
     TypePtr check_enum(const ast::EnumStmt& decl);
@@ -609,6 +617,25 @@ public:
     }
 
     bool is_future() const override { return true; }
+    bool can_be_zero() const override { return false; }
+    bool is_copyable() const override { return true; }
+
+    bool equals(const TypePtr& other) const override;
+    std::string to_string() const override;
+    TypePtr clone() const override;
+};
+
+class StreamType : public Type {
+public:
+    TypePtr inner_type;
+
+    explicit StreamType(TypePtr inner)
+        : Type(TypeKind::STREAM, "Stream"),
+          inner_type(std::move(inner)) {
+        name = "Stream<" + inner_type->name + ">";
+    }
+
+    bool is_stream() const override { return true; }
     bool can_be_zero() const override { return false; }
     bool is_copyable() const override { return true; }
 
@@ -851,6 +878,7 @@ inline bool Type::is_generic() const { return kind == TypeKind::GENERIC || kind 
 inline bool Type::is_type_var() const { return kind == TypeKind::TYPE_VAR; }
 inline bool Type::is_unknown() const { return kind == TypeKind::UNKNOWN; }
 inline bool Type::is_future() const { return kind == TypeKind::FUTURE; }
+inline bool Type::is_stream() const { return kind == TypeKind::STREAM; }
 
 inline bool Type::can_be_zero() const {
     return is_numeric() || is_string() || is_optional();

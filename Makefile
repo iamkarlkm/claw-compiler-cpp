@@ -15,10 +15,14 @@ ifeq ($(LTO),1)
     LDFLAGS += -flto
 endif
 
-# WebTransport support (mock implementation, no external deps)
+# WebTransport support (msquic backend on macOS/Linux)
 CLAW_ENABLE_WEBTRANSPORT ?= 1
 ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
     CXXFLAGS += -DCLAW_ENABLE_WEBTRANSPORT
+    # libmsquic from Homebrew
+    MSQUIC_PREFIX := $(shell test -d /usr/local/opt/libmsquic && echo /usr/local/opt/libmsquic || echo /usr/local/Cellar/libmsquic/2.5.7)
+    CXXFLAGS += -I$(MSQUIC_PREFIX)/include
+    LDFLAGS += -L$(MSQUIC_PREFIX)/lib -lmsquic
 endif
 
 # Detect OS
@@ -82,6 +86,7 @@ CORE_SOURCES = \
     src/bytecode/bytecode_compiler_simple.cpp \
     src/bytecode/bytecode_executor.cpp \
     src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
     src/interpreter/interpreter.cpp \
     src/pipeline/execution_engine.cpp \
     src/pipeline/execution_engine_enhanced.cpp \
@@ -147,22 +152,23 @@ TEST_BENCHMARK_SOURCES = src/benchmark/benchmark.cpp src/test/test_benchmark.cpp
 TEST_PACKAGE_SOURCES = src/package/package_manager.cpp src/package/manifest_parser.cpp \
     src/package/dependency_resolver.cpp src/package/lock_file.cpp src/test/test_package_manager.cpp
 TEST_CUDA_SOURCES = src/backend/cuda_codegen.cpp src/tensorir/tensor_ir.cpp src/test/test_cuda_codegen.cpp
-TEST_DEBUGGER_SOURCES = src/debugger/claw_debugger.cpp src/jit/deoptimization.cpp src/jit/stack_frame.cpp \
-    src/test/test_deoptimization.cpp src/test/test_stack_frame.cpp
+TEST_DEBUGGER_SOURCES = src/jit/deoptimization.cpp src/jit/stack_frame.cpp \
+    src/emitter/x86_64_emitter.cpp src/test/test_deoptimization.cpp src/test/test_stack_frame.cpp
 TEST_AUTO_SCHEDULER_SOURCES = src/auto_scheduler/auto_scheduler.cpp src/auto_scheduler/vm_evaluator.cpp src/auto_scheduler/ml_evaluator.cpp \
     src/auto_scheduler/schedule_cache.cpp src/auto_scheduler/schedule_space.cpp \
     src/auto_scheduler/search_strategy.cpp src/ml/ml_cost_model.cpp src/ml/ml_cost_model_adapter.cpp \
-    src/test/test_ml_cost_model_adapter.cpp
+    src/tensorir/tensor_ir.cpp src/pipeline/perf_profiler.cpp src/vm/claw_vm.cpp src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp src/test/test_ml_cost_model_adapter.cpp
 TEST_VM_EVALUATOR_SOURCES = src/auto_scheduler/vm_evaluator.cpp src/auto_scheduler/schedule_space.cpp \
     src/auto_scheduler/search_strategy.cpp src/auto_scheduler/schedule_cache.cpp \
     src/auto_scheduler/auto_scheduler.cpp src/auto_scheduler/ml_evaluator.cpp \
     src/pipeline/perf_profiler.cpp src/tensorir/tensor_ir.cpp src/test/test_vm_evaluator.cpp \
-    src/vm/claw_vm.cpp src/jit/jit_runtime.cpp src/ml/ml_cost_model.cpp src/ml/ml_cost_model_adapter.cpp \
+    src/vm/claw_vm.cpp src/vm/webtransport_backend.cpp src/jit/jit_runtime.cpp src/ml/ml_cost_model.cpp src/ml/ml_cost_model_adapter.cpp \
     src/bytecode/bytecode.cpp src/bytecode/bytecode_compiler.cpp src/stdlib/stdlib.cpp
 # Note: test-tensorir removed - no test file exists
-TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/test/test_wasm_ir.cpp
+TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/ir/ir.cpp src/ir/ir_enhanced.cpp src/test/test_wasm_ir.cpp
 TEST_ATTRIBUTE_SOURCES = src/frontend/attribute.cpp src/test/test_attribute.cpp
-TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/test/test_doc_generator.cpp
+TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/test/test_doc_generator.cpp
 TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp test/benchmark_ir_passes.cpp
 TEST_TREE_SHAKER_SOURCES = src/optimizer/tree_shaker.cpp src/test/test_tree_shaker.cpp
 TEST_CONSTANT_FOLDER_SOURCES = src/optimizer/constant_folder.cpp src/test/test_constant_folder.cpp
@@ -187,7 +193,8 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
     test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast \
     test-enum test-struct test-for-in test-struct-bytecode test-parser \
-    test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock
+    test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock \
+    test-command-stream test-webtransport-bridge test-stream-operators
 
 all: claw claw-lsp claw-repl
 
@@ -219,18 +226,18 @@ $(BUILD_DIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # LSP Server
-claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp
+claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp build/src/vm/claw_vm.o build/src/vm/webtransport_backend.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 # REPL
-claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrated.cpp src/repl/repl.cpp
+claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrated.cpp src/repl/repl.cpp build/src/vm/claw_vm.o build/src/vm/webtransport_backend.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 # ============================================================================
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -251,11 +258,11 @@ test-debugger:
 	@./test_debugger
 
 test-auto-scheduler:
-	$(CXX) $(CXXFLAGS) -o test_auto_scheduler $(TEST_AUTO_SCHEDULER_SOURCES)
+	$(CXX) $(CXXFLAGS) -o test_auto_scheduler $(TEST_AUTO_SCHEDULER_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 	@./test_auto_scheduler
 
 test-vm-evaluator:
-	$(CXX) $(CXXFLAGS) -o test_vm_evaluator $(TEST_VM_EVALUATOR_SOURCES)
+	$(CXX) $(CXXFLAGS) -o test_vm_evaluator $(TEST_VM_EVALUATOR_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 	@./test_vm_evaluator
 
 test-wasm:
@@ -475,7 +482,7 @@ test-lexer: tests/test_lexer
 .PHONY: test-lexer
 
 tests/test_coroutine_vm: tests/test_coroutine_vm.cpp src/vm/claw_vm.h src/bytecode/bytecode.h tests/claw_test.h
-	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_coroutine_vm.cpp src/vm/claw_vm.cpp src/bytecode/bytecode.cpp
+	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_coroutine_vm.cpp src/vm/claw_vm.cpp src/vm/webtransport_backend.cpp src/bytecode/bytecode.cpp -L$(MSQUIC_PREFIX)/lib -lmsquic
 
 test-coroutine-vm: tests/test_coroutine_vm
 	@./tests/test_coroutine_vm
@@ -496,6 +503,7 @@ TEST_ASYNC_BYTECODE_SOURCES = tests/test_async_bytecode.cpp \
     src/bytecode/bytecode_compiler.cpp \
     src/bytecode/bytecode_executor.cpp \
     src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
     src/bytecode/bytecode.cpp \
     src/ast/ast.cpp \
     src/ast/clone.cpp \
@@ -507,7 +515,7 @@ TEST_ASYNC_BYTECODE_SOURCES = tests/test_async_bytecode.cpp \
     src/stdlib/stdlib_bytecode_integration.cpp
 
 tests/test_async_bytecode: tests/test_async_bytecode.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
-	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ASYNC_BYTECODE_SOURCES)
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ASYNC_BYTECODE_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 
 test-async-bytecode: tests/test_async_bytecode
 	@./tests/test_async_bytecode
@@ -547,6 +555,7 @@ TEST_WEBTRANSPORT_MOCK_SOURCES = tests/test_webtransport_mock.cpp \
     src/bytecode/bytecode_compiler.cpp \
     src/bytecode/bytecode_executor.cpp \
     src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
     src/bytecode/bytecode.cpp \
     src/ast/ast.cpp \
     src/ast/clone.cpp \
@@ -558,12 +567,150 @@ TEST_WEBTRANSPORT_MOCK_SOURCES = tests/test_webtransport_mock.cpp \
     src/stdlib/stdlib_bytecode_integration.cpp
 
 tests/test_webtransport_mock: tests/test_webtransport_mock.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
-	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_WEBTRANSPORT_MOCK_SOURCES)
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_WEBTRANSPORT_MOCK_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 
 test-webtransport-mock: tests/test_webtransport_mock
 	@./tests/test_webtransport_mock
 
 .PHONY: test-webtransport-mock
+
+TEST_CHANNEL_SOURCES = tests/test_channel.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+tests/test_channel: tests/test_channel.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_CHANNEL_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-channel: tests/test_channel
+	@./tests/test_channel
+
+.PHONY: test-channel
+
+TEST_EVENT_STREAM_SOURCES = tests/test_event_stream.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+tests/test_event_stream: tests/test_event_stream.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_EVENT_STREAM_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-event-stream: tests/test_event_stream
+	@./tests/test_event_stream
+
+.PHONY: test-event-stream
+
+TEST_STREAM_SOURCES = tests/test_stream.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/common/parse_cache.cpp \
+    src/semantic/semantic_analyzer.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+TEST_COMMAND_STREAM_SOURCES = tests/test_command_stream.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+TEST_WEBTRANSPORT_BRIDGE_SOURCES = tests/test_webtransport_bridge.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+TEST_STREAM_OPERATORS_SOURCES = tests/test_stream_operators.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
+tests/test_stream: tests/test_stream.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STREAM_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-stream: tests/test_stream
+	@./tests/test_stream
+
+.PHONY: test-stream
+
+tests/test_command_stream: tests/test_command_stream.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_COMMAND_STREAM_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-command-stream: tests/test_command_stream
+	@./tests/test_command_stream
+
+.PHONY: test-command-stream
+
+tests/test_webtransport_bridge: tests/test_webtransport_bridge.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_WEBTRANSPORT_BRIDGE_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-webtransport-bridge: tests/test_webtransport_bridge
+	@./tests/test_webtransport_bridge
+
+.PHONY: test-webtransport-bridge
+
+tests/test_stream_operators: tests/test_stream_operators.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STREAM_OPERATORS_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-stream-operators: tests/test_stream_operators
+	@./tests/test_stream_operators
+
+.PHONY: test-stream-operators
 
 # ============================================================================
 # Core language feature tests (enum, struct, impl, for-in)
@@ -597,6 +744,7 @@ TEST_STRUCT_BYTECODE_SOURCES = tests/test_struct_bytecode.cpp \
     src/bytecode/bytecode_compiler.cpp \
     src/bytecode/bytecode_executor.cpp \
     src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
     src/bytecode/bytecode.cpp \
     src/ast/ast.cpp \
     src/ast/clone.cpp \
@@ -640,7 +788,7 @@ test-for-in: tests/test_for_in
 .PHONY: test-for-in
 
 tests/test_struct_bytecode: tests/test_struct_bytecode.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
-	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STRUCT_BYTECODE_SOURCES)
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_STRUCT_BYTECODE_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 
 test-struct-bytecode: tests/test_struct_bytecode
 	@./tests/test_struct_bytecode

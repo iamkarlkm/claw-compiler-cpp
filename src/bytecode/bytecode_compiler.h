@@ -82,6 +82,7 @@ private:
     void compileIfStmt(const ast::IfStmt& stmt);
     void compileMatchStmt(const ast::MatchStmt& stmt);
     void compileForStmt(const ast::ForStmt& stmt);
+    void compileForAwaitStmt(const ast::ForAwaitStmt& stmt);
     void compileWhileStmt(const ast::WhileStmt& stmt);
     void compileLoopStmt(const ast::LoopStmt& stmt);
     void compileReturnStmt(const ast::ReturnStmt& stmt);
@@ -97,6 +98,8 @@ private:
     void compileImplStmt(const ast::ImplStmt& stmt);
     void compileTryStmt(const ast::TryStmt& stmt);
     void compileThrowStmt(const ast::ThrowStmt& stmt);
+    void compileHandleStmt(const ast::HandleStmt& stmt);
+    void compileBridgeStmt(const ast::BridgeStmt& stmt);
 
     // 表达式编译
     void compileLiteralExpr(const ast::LiteralExpr& expr);
@@ -109,7 +112,8 @@ private:
     void compileArrayExpr(const ast::ArrayExpr& expr);
     void compileTupleExpr(const ast::TupleExpr& expr);
     void compileLambdaExpr(const ast::LambdaExpr& expr);
-    
+    void compileCommandExpr(const ast::CommandExpr& expr);
+
     // 作用域管理
     void enterScope();
     void exitScope();

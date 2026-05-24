@@ -518,18 +518,31 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
             }
         }
         future->waiting_coroutines.clear();
+        std::lock_guard<std::mutex> lock(rt.event_mutex);
+        rt.event_ready = true;
+        rt.event_cv.notify_one();
     };
 
     vm::Value result = vm.execute();
 
-    // Event loop: process ready coroutines until all complete
-    while (!vm.runtime.ready_coroutines.empty()) {
-        auto coro = vm.runtime.ready_coroutines.front();
-        vm.runtime.ready_coroutines.pop_front();
+    // Event loop: process ready coroutines and wait for external async events
+    while (!vm.runtime.ready_coroutines.empty() || vm.runtime.pending_futures.load() > 0) {
+        // Process all currently ready coroutines
+        while (!vm.runtime.ready_coroutines.empty()) {
+            auto coro = vm.runtime.ready_coroutines.front();
+            vm.runtime.ready_coroutines.pop_front();
+            if (!coro || coro->is_complete) continue;
+            vm.resume_coroutine(coro);
+        }
 
-        if (!coro || coro->is_complete) continue;
-
-        vm.resume_coroutine(coro);
+        // If no coroutines ready but async operations pending, wait for events
+        if (vm.runtime.ready_coroutines.empty() && vm.runtime.pending_futures.load() > 0) {
+            std::unique_lock<std::mutex> lock(vm.runtime.event_mutex);
+            vm.runtime.event_cv.wait_for(lock, std::chrono::milliseconds(100), [&]() {
+                return vm.runtime.event_ready || !vm.runtime.ready_coroutines.empty();
+            });
+            vm.runtime.event_ready = false;
+        }
     }
 
     // 输出返回值或错误信息

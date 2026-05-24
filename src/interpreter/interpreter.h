@@ -1310,11 +1310,22 @@ public:
 
     // Execute assignment
     void execute_assign(claw::ast::AssignStmt* assign) {
-        // Get target (should be index expression like a[1])
         claw::ast::Expression* target = assign->get_target();
         Value value = evaluate(assign->get_value());
 
-        if (target->get_kind() == claw::ast::Expression::Kind::Index) {
+        if (target->get_kind() == claw::ast::Expression::Kind::Identifier) {
+            auto* ident = static_cast<claw::ast::IdentifierExpr*>(target);
+            RuntimeValue* var = scoped_get(ident->get_name());
+            if (var) {
+                var->scalar = value;
+            } else if (!variable_stack.empty()) {
+                RuntimeValue new_val;
+                new_val.type_name = "auto";
+                new_val.size = 1;
+                new_val.scalar = value;
+                variable_stack.back()[ident->get_name()] = std::move(new_val);
+            }
+        } else if (target->get_kind() == claw::ast::Expression::Kind::Index) {
             auto* index_expr = static_cast<claw::ast::IndexExpr*>(target);
             claw::ast::Expression* obj = index_expr->get_object();
             claw::ast::Expression* idx_expr = index_expr->get_index();

@@ -74,6 +74,7 @@ public:
         Borrow,
         Await,
         TryQuestion,
+        Command,
     };
     
     Expression(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -223,6 +224,39 @@ public:
 
 private:
     std::unique_ptr<Expression> operand_;
+};
+
+// Command expression: command RequestName(args)
+class CommandExpr : public Expression {
+public:
+    CommandExpr(const std::string& name, const SourceSpan& span)
+        : Expression(Kind::Command, span), name_(name) {}
+
+    void add_argument(std::unique_ptr<Expression> arg) {
+        arguments_.push_back(std::move(arg));
+    }
+
+    const std::string& get_name() const { return name_; }
+    const std::vector<std::unique_ptr<Expression>>& get_arguments() const {
+        return arguments_;
+    }
+    std::vector<std::unique_ptr<Expression>>& mutable_arguments() {
+        return arguments_;
+    }
+
+    std::string to_string() const override {
+        std::string result = "command " + name_ + "(";
+        for (size_t i = 0; i < arguments_.size(); i++) {
+            if (i > 0) result += ", ";
+            result += arguments_[i]->to_string();
+        }
+        result += ")";
+        return result;
+    }
+
+private:
+    std::string name_;
+    std::vector<std::unique_ptr<Expression>> arguments_;
 };
 
 // Function call expression
@@ -467,6 +501,7 @@ public:
         If,
         Match,
         For,
+        ForAwait,
         While,
         Loop,
         Return,
@@ -485,6 +520,8 @@ public:
         Use,
         Publish,
         Subscribe,
+        Handle,
+        Bridge,
         SerialProcess,
         Const,
         Try,
@@ -696,6 +733,32 @@ public:
 
     std::string to_string() const override {
         return "for " + variable_ + " in " + iterable_->to_string() + " { ... }";
+    }
+
+private:
+    std::string variable_;
+    std::unique_ptr<Expression> iterable_;
+    std::unique_ptr<ASTNode> body_;
+};
+
+// For await loop statement
+class ForAwaitStmt : public Statement {
+public:
+    ForAwaitStmt(const std::string& variable, std::unique_ptr<Expression> iterable,
+                 std::unique_ptr<ASTNode> body, const SourceSpan& span)
+        : Statement(Kind::ForAwait, span), variable_(variable),
+          iterable_(std::move(iterable)), body_(std::move(body)) {}
+
+    const std::string& get_variable() const { return variable_; }
+    Expression* get_iterable() const { return iterable_.get(); }
+    std::unique_ptr<Expression> release_iterable() { return std::move(iterable_); }
+    void set_iterable(std::unique_ptr<Expression> it) { iterable_ = std::move(it); }
+    ASTNode* get_body() const { return body_.get(); }
+    std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+    void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
+
+    std::string to_string() const override {
+        return "for await " + variable_ + " in " + iterable_->to_string() + " { ... }";
     }
 
 private:
@@ -1034,6 +1097,65 @@ public:
 private:
     std::string event_name_;
     std::unique_ptr<FunctionStmt> handler_;
+};
+
+// Handle statement (RPC request-response system)
+class HandleStmt : public Statement {
+public:
+    HandleStmt(const std::string& command_name, const SourceSpan& span)
+        : Statement(Kind::Handle, span), command_name_(command_name) {}
+
+    void set_command_name(const std::string& name) { command_name_ = name; }
+    void set_handler(std::unique_ptr<FunctionStmt> handler) {
+        handler_ = std::move(handler);
+    }
+
+    const std::string& get_command_name() const { return command_name_; }
+    FunctionStmt* get_handler() const { return handler_.get(); }
+    std::unique_ptr<FunctionStmt> release_handler() { return std::move(handler_); }
+
+    std::string to_string() const override {
+        return "handle " + command_name_ + " { ... }";
+    }
+
+private:
+    std::string command_name_;
+    std::unique_ptr<FunctionStmt> handler_;
+};
+
+// Bridge statement - bridge event/command/stream over WebTransport
+class BridgeStmt : public Statement {
+public:
+    enum class BridgeKind {
+        Event,
+        Command,
+        Stream
+    };
+
+    BridgeStmt(BridgeKind kind, const std::string& target_name,
+               std::unique_ptr<Expression> connection, const SourceSpan& span)
+        : Statement(Kind::Bridge, span),
+          kind_(kind), target_name_(target_name), connection_(std::move(connection)) {}
+
+    BridgeKind get_bridge_kind() const { return kind_; }
+    const std::string& get_target_name() const { return target_name_; }
+    Expression* get_connection() const { return connection_.get(); }
+    std::unique_ptr<Expression> release_connection() { return std::move(connection_); }
+
+    std::string to_string() const override {
+        std::string k;
+        switch (kind_) {
+            case BridgeKind::Event: k = "event"; break;
+            case BridgeKind::Command: k = "command"; break;
+            case BridgeKind::Stream: k = "stream"; break;
+        }
+        return "bridge " + k + " " + target_name_ + " over ...";
+    }
+
+private:
+    BridgeKind kind_;
+    std::string target_name_;
+    std::unique_ptr<Expression> connection_;
 };
 
 // Serial process declaration (event handler)

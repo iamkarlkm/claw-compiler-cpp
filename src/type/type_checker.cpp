@@ -121,6 +121,13 @@ TypePtr TypeCache::get_future(TypePtr inner) {
     return future_types_[inner];
 }
 
+TypePtr TypeCache::get_stream(TypePtr inner) {
+    if (stream_types_.count(inner) == 0) {
+        stream_types_[inner] = std::make_shared<StreamType>(inner);
+    }
+    return stream_types_[inner];
+}
+
 TypePtr TypeCache::get_primitive(TypeKind kind) {
     if (primitives_.count(kind) > 0) {
         return primitives_[kind];
@@ -568,6 +575,10 @@ TypePtr TypeChecker::check_stmt(const ast::Statement* stmt) {
             auto* f = static_cast<const ast::ForStmt*>(stmt);
             return check_for(*f);
         }
+        case ast::Statement::Kind::ForAwait: {
+            auto* fa = static_cast<const ast::ForAwaitStmt*>(stmt);
+            return check_for_await(*fa);
+        }
         case ast::Statement::Kind::While: {
             auto* w = static_cast<const ast::WhileStmt*>(stmt);
             if (w->get_condition()) check_expr(w->get_condition());
@@ -591,6 +602,23 @@ TypePtr TypeChecker::check_stmt(const ast::Statement* stmt) {
         case ast::Statement::Kind::Break:
         case ast::Statement::Kind::Continue:
             return Type::unit();
+        case ast::Statement::Kind::Handle: {
+            auto* h = static_cast<const ast::HandleStmt*>(stmt);
+            auto* handler = h->get_handler();
+            if (handler) {
+                push_scope();
+                check_function(*handler);
+                pop_scope();
+            }
+            return Type::unit();
+        }
+        case ast::Statement::Kind::Bridge: {
+            auto* br = static_cast<const ast::BridgeStmt*>(stmt);
+            if (br->get_connection()) {
+                check_expr(br->get_connection());
+            }
+            return Type::unit();
+        }
         default:
             return Type::unit();
     }
@@ -677,6 +705,12 @@ TypePtr TypeChecker::check_expr(const ast::Expression* expr) {
             // For now, use generic Error type
             TypePtr error_type = TypeCache::instance().get_generic("Error");
             return TypeCache::instance().get_result(operand_type, error_type);
+        }
+        case ast::Expression::Kind::Command: {
+            auto* cmd = static_cast<const ast::CommandExpr*>(expr);
+            // command returns Future<T> where T is inferred from context
+            // For now, return Future<unknown>
+            return TypeCache::instance().get_future(Type::unknown());
         }
         default:
             return Type::unknown();
@@ -986,6 +1020,33 @@ TypePtr TypeChecker::check_for(const ast::ForStmt& for_stmt) {
     return Type::unit();
 }
 
+TypePtr TypeChecker::check_for_await(const ast::ForAwaitStmt& for_stmt) {
+    TypePtr stream_type = Type::unknown();
+    if (for_stmt.get_iterable()) {
+        stream_type = check_expr(for_stmt.get_iterable());
+    }
+
+    TypePtr var_type = Type::unknown();
+    if (stream_type) {
+        if (stream_type->is_stream()) {
+            auto* st = static_cast<StreamType*>(stream_type.get());
+            var_type = st->inner_type;
+        } else if (stream_type->is_array()) {
+            auto* arr = static_cast<ArrayType*>(stream_type.get());
+            var_type = arr->element_type;
+        } else if (stream_type->is_string()) {
+            var_type = Type::string();
+        }
+    }
+
+    push_scope();
+    define_var(for_stmt.get_variable(), var_type);
+    auto* body = dynamic_cast<const ast::Statement*>(for_stmt.get_body());
+    if (body) check_stmt(body);
+    pop_scope();
+    return Type::unit();
+}
+
 TypePtr TypeChecker::check_function(const ast::FunctionStmt& decl) {
     bool prev_async = in_async_function;
     in_async_function = decl.is_async();
@@ -1235,6 +1296,21 @@ std::string FutureType::to_string() const {
 
 TypePtr FutureType::clone() const {
     return std::make_shared<FutureType>(inner_type->clone());
+}
+
+// StreamType
+bool StreamType::equals(const TypePtr& other) const {
+    if (!other || !other->is_stream()) return false;
+    auto* o = static_cast<StreamType*>(other.get());
+    return inner_type->equals(o->inner_type);
+}
+
+std::string StreamType::to_string() const {
+    return "Stream<" + inner_type->to_string() + ">";
+}
+
+TypePtr StreamType::clone() const {
+    return std::make_shared<StreamType>(inner_type->clone());
 }
 
 // TupleType

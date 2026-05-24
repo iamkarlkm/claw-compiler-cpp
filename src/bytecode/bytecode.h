@@ -207,6 +207,23 @@ enum class ExtOpCode : uint8_t {
     RANGE_CREATE,       // Create range iterator (start, end, step)
     ENUMERATE_CREATE,   // Create enumerate iterator (index, value)
     ZIP_CREATE,         // Create zip iterator (multiple iterables)
+
+#ifdef CLAW_ENABLE_WEBTRANSPORT
+    // WebTransport (200-209)
+    WT_CONNECT = 200,   // Connect to WebTransport endpoint
+    WT_SEND,            // Send data over WebTransport
+    WT_RECV,            // Receive data from WebTransport
+    WT_RECV_TIMEOUT,    // Receive with timeout
+    WT_CLOSE,           // Close WebTransport connection
+    WT_READY,           // Check if WebTransport is ready
+    WT_OPEN_STREAM,     // Open a new stream on the connection
+    WT_STREAM_SEND,     // Send data over a stream
+    WT_STREAM_RECV,     // Receive data from a stream
+    WT_STREAM_CLOSE,    // Close a stream
+    WT_LISTEN,          // Start listening for incoming connections
+    WT_ACCEPT,          // Accept an incoming connection
+    WT_CLOSE_SERVER,    // Close the server listener
+#endif
 };
 
 // ============================================================================

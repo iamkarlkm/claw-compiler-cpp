@@ -512,7 +512,7 @@ public:
     
     // Generate from Claw AST (converts to IR internally)
     bool generate(const ast::Program& program, std::string& output, bool verbose = false);
-    bool generate_from_module(std::shared_ptr<ast::Module> module, std::string& output, bool verbose = false);
+    // bool generate_from_module(std::shared_ptr<ast::Module> module, std::string& output, bool verbose = false);
     bool generate_from_program(std::shared_ptr<ast::Program> program, std::string& output, bool verbose = false);
     
     // Generate from Claw IR
