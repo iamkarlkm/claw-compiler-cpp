@@ -1,5 +1,8 @@
 # 构建产物
 claw
+claw-lsp
+claw-repl
+claw-debug
 claw-opt
 claw-tests
 *.o

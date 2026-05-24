@@ -143,6 +143,7 @@ CORE_SOURCES = \
 CORE_CPP_SOURCES = $(filter %.cpp,$(CORE_SOURCES))
 CORE_OBJECTS     = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(CORE_CPP_SOURCES))
 DEBUG_OBJECTS    = $(patsubst %.cpp,$(DEBUG_BUILD_DIR)/%.o,$(CORE_CPP_SOURCES))
+CORE_NON_MAIN_OBJECTS = $(filter-out $(BUILD_DIR)/src/main.o,$(CORE_OBJECTS))
 
 # ============================================================================
 # Test Sources
@@ -226,11 +227,11 @@ $(BUILD_DIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 # LSP Server
-claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp build/src/vm/claw_vm.o build/src/vm/webtransport_backend.o
+claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp $(CORE_NON_MAIN_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 # REPL
-claw-repl: src/repl_main.cpp src/repl/claw_repl.cpp src/repl/claw_repl_integrated.cpp src/repl/repl.cpp build/src/vm/claw_vm.o build/src/vm/webtransport_backend.o
+claw-repl: src/repl_main.cpp $(CORE_NON_MAIN_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 # ============================================================================
