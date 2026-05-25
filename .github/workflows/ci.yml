@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install llvm
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> $GITHUB_ENV
+
+      - name: Build
+        run: make all
+
+      - name: Run tests
+        run: make test
+
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev
+
+      - name: Build
+        run: make all CXX=clang++
+
+      - name: Run tests
+        run: make test CXX=clang++

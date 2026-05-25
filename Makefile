@@ -3,10 +3,11 @@
 # No CMake required
 
 CXX = clang++
-LLVM_PREFIX := $(shell /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
+LLVM_PREFIX := $(shell llvm-config --prefix 2>/dev/null || /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
+LLVM_LIBDIR := $(shell llvm-config --libdir 2>/dev/null || echo $(LLVM_PREFIX)/lib)
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-LDFLAGS = -lpthread -lreadline -L/usr/local/Cellar/llvm/19.1.4/lib -lLLVM-19
+LDFLAGS = -lpthread -lreadline -L$(LLVM_LIBDIR) -lLLVM
 
 # Link-time optimization (optional)
 LTO ?= 0
@@ -19,8 +20,12 @@ endif
 CLAW_ENABLE_WEBTRANSPORT ?= 1
 ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
     CXXFLAGS += -DCLAW_ENABLE_WEBTRANSPORT
-    # libmsquic from Homebrew
-    MSQUIC_PREFIX := $(shell test -d /usr/local/opt/libmsquic && echo /usr/local/opt/libmsquic || echo /usr/local/Cellar/libmsquic/2.5.7)
+    # libmsquic auto-detection (Homebrew, system, or user-specified)
+    MSQUIC_PREFIX := $(shell \
+        if [ -d /usr/local/opt/libmsquic ]; then echo /usr/local/opt/libmsquic; \
+        elif [ -d /opt/homebrew/opt/libmsquic ]; then echo /opt/homebrew/opt/libmsquic; \
+        elif [ -d /usr/lib/msquic ]; then echo /usr/lib/msquic; \
+        else echo /usr/local/Cellar/libmsquic/2.5.7; fi)
     CXXFLAGS += -I$(MSQUIC_PREFIX)/include
     LDFLAGS += -L$(MSQUIC_PREFIX)/lib -lmsquic
 endif
@@ -472,11 +477,20 @@ $(DEBUG_BUILD_DIR)/%.o: %.cpp
 # Installation
 # ============================================================================
 
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+
 install: all
 	@echo "Installing Claw Compiler..."
-	@mkdir -p $(DESTDIR)/usr/local/bin
-	@cp claw claw-lsp claw-repl $(DESTDIR)/usr/local/bin/
-	@echo "Installation complete!"
+	@mkdir -p $(DESTDIR)$(BINDIR)
+	@cp claw claw-lsp claw-repl $(DESTDIR)$(BINDIR)/
+	@echo "Installation complete to $(DESTDIR)$(BINDIR)"
+
+uninstall:
+	@rm -f $(DESTDIR)$(BINDIR)/claw
+	@rm -f $(DESTDIR)$(BINDIR)/claw-lsp
+	@rm -f $(DESTDIR)$(BINDIR)/claw-repl
+	@echo "Uninstalled from $(DESTDIR)$(BINDIR)"
 
 # ============================================================================
 # 测试目标
