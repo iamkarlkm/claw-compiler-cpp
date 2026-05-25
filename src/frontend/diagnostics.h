@@ -274,11 +274,11 @@ private:
                 return color ? (COLOR_YELLOW + std::string("warning") + COLOR_RESET) : "warning";
             case ErrorSeverity::Error:   
                 return color ? (COLOR_RED + std::string("error") + COLOR_RESET) : "error";
-            case ErrorSeverity::Fatal:   
-                return color ? (COLOR_BOLD + COLOR_RED + std::string("fatal error") + COLOR_RESET) 
+            case ErrorSeverity::Fatal:
+                return color ? (std::string(COLOR_BOLD) + COLOR_RED + "fatal error" + COLOR_RESET)
                              : "fatal error";
-            case ErrorSeverity::Bug:     
-                return color ? (COLOR_BOLD + COLOR_RED + std::string("compiler bug") + COLOR_RESET) 
+            case ErrorSeverity::Bug:
+                return color ? (std::string(COLOR_BOLD) + COLOR_RED + "compiler bug" + COLOR_RESET)
                              : "compiler bug";
         }
         return "unknown";
@@ -517,15 +517,15 @@ public:
         return action;
     }
     
-    // 跳到匹配的闭合括号
-    template<typename TokenIter>
-    int skip_to_matching(TokenIter& current, TokenIter end, 
-                         int open_type, int close_type) {
+    // 跳到匹配的闭合括号 (requires TokenType to be visible at use site)
+    template<typename TokenIter, typename TokenTypeT>
+    int skip_to_matching(TokenIter& current, TokenIter end,
+                         TokenTypeT open_type, TokenTypeT close_type) {
         int depth = 1;
         int skipped = 0;
         while (current != end && depth > 0) {
-            if (current->type == static_cast<enum TokenType>(open_type)) depth++;
-            else if (current->type == static_cast<enum TokenType>(close_type)) depth--;
+            if (current->type == open_type) depth++;
+            else if (current->type == close_type) depth--;
             if (depth > 0) {
                 ++current;
                 ++skipped;
@@ -770,7 +770,10 @@ public:
         Stats stats{diagnostics_.size(), error_count_, warning_count_, note_count_, 0, {}};
         for (const auto& d : diagnostics_) {
             if (!d.fixits.empty()) stats.fixits_available++;
-            if (d.error_code.number > 0) {
+            if (d.error_code.number > 0 &&
+                (d.severity == ErrorSeverity::Error ||
+                 d.severity == ErrorSeverity::Fatal ||
+                 d.severity == ErrorSeverity::Bug)) {
                 stats.errors_by_code[d.error_code.code_string()]++;
             }
         }
@@ -925,6 +928,95 @@ private:
             }
         }
         return dp[n];
+    }
+};
+
+// ========================================================================
+// ParserRecoveryHelper - convenience wrapper for parser error recovery
+// ========================================================================
+
+class ParserRecoveryHelper {
+private:
+    EnhancedDiagnosticReporter& reporter_;
+
+public:
+    ParserRecoveryHelper(EnhancedDiagnosticReporter& reporter)
+        : reporter_(reporter) {}
+
+    void expected_token(const std::string& expected,
+                        const SourceSpan& span,
+                        const std::string& context = "",
+                        const std::string& actual = "") {
+        ErrorCode code = ErrorCodes::expected_token;
+        std::string msg;
+        if (!context.empty()) {
+            msg = "expected '" + expected + "' " + context;
+        } else {
+            msg = "expected '" + expected + "'";
+        }
+        if (!actual.empty()) {
+            msg += ", got '" + actual + "'";
+        }
+        auto diag = Diagnostic::error(code, span, msg);
+        auto fixits = FixItSuggester::suggest_for_expected(expected, span, actual);
+        for (auto& f : fixits) {
+            diag.add_fixit(std::move(f));
+        }
+        reporter_.report(std::move(diag));
+    }
+
+    void unexpected_token(const std::string& token, const SourceSpan& span,
+                          const std::string& context = "") {
+        std::string msg = "unexpected token '" + token + "'";
+        if (!context.empty()) msg += " in " + context;
+        auto diag = Diagnostic::error(ErrorCodes::unexpected_token, span, msg);
+        reporter_.report(std::move(diag));
+    }
+
+    void semantic_error(const ErrorCode& code, const SourceSpan& span,
+                        const std::vector<std::string>& args,
+                        const SourceSpan& definition_span = SourceSpan()) {
+        std::string msg = code.format(args);
+        auto diag = Diagnostic::error(code, span, msg);
+        if (definition_span.start.line > 0) {
+            diag.add_note(definition_span, "previously defined here");
+        }
+        reporter_.report(std::move(diag));
+    }
+
+    void type_error(const ErrorCode& code, const SourceSpan& span,
+                    const std::string& expected, const std::string& actual,
+                    const std::string& context = "") {
+        std::string msg = code.format({expected, actual});
+        if (!context.empty()) msg += " in " + context;
+        auto diag = Diagnostic::error(code, span, msg);
+        reporter_.report(std::move(diag));
+    }
+
+    void type_error3(const ErrorCode& code, const SourceSpan& span,
+                     const std::string& a, const std::string& b,
+                     const std::string& c) {
+        auto diag = Diagnostic::error(code, span, code.format({a, b, c}));
+        reporter_.report(std::move(diag));
+    }
+
+    void warning(const ErrorCode& code, const SourceSpan& span,
+                 const std::string& msg) {
+        reporter_.report(Diagnostic::warning(code, span, msg));
+    }
+
+    void warn_unused_variable(const std::string& name, const SourceSpan& span) {
+        auto diag = Diagnostic::warning(ErrorCodes::unused_variable, span,
+                                        "unused variable '" + name + "'");
+        diag.add_fixit(FixItHint::remove(span, "remove unused variable"));
+        reporter_.report(std::move(diag));
+    }
+
+    void warn_unreachable_code(const SourceSpan& span, const std::string& after_what) {
+        auto diag = Diagnostic::warning(ErrorCodes::unreachable_code, span,
+                                        "unreachable code after " + after_what);
+        diag.add_fixit(FixItHint::remove(span, "remove unreachable code"));
+        reporter_.report(std::move(diag));
     }
 };
 

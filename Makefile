@@ -183,6 +183,7 @@ TEST_PATTERN_CHECKER_SOURCES = src/type/type_checker.cpp src/type/pattern_checke
 TEST_MONOMORPHIZER_SOURCES = src/optimizer/monomorphizer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_monomorphizer.cpp
 TEST_ITERATOR_DESUGARER_SOURCES = src/optimizer/iterator_desugarer.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_iterator_desugarer.cpp
 TEST_TYPE_INFERENCE_SOURCES = src/type/type_inference.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/ast/ast.cpp src/ast/clone.cpp src/test/test_type_inference.cpp
+TEST_IMPLICIT_GENERIC_SOURCES = src/type/type_inference.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/ast/ast.cpp src/ast/clone.cpp src/test/test_implicit_generic.cpp
 TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/clone.cpp src/test/test_compact_ast.cpp
 
 # ============================================================================
@@ -192,7 +193,7 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
 .PHONY: all clean test help \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
-    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast \
+    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast \
     test-enum test-struct test-for-in test-struct-bytecode test-parser \
     test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock \
     test-command-stream test-webtransport-bridge test-stream-operators
@@ -238,7 +239,7 @@ claw-repl: src/repl_main.cpp $(CORE_NON_MAIN_OBJECTS)
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-compact-ast test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -330,9 +331,17 @@ test-type-inference:
 	$(CXX) $(CXXFLAGS) -o test_type_inference $(TEST_TYPE_INFERENCE_SOURCES)
 	@./test_type_inference
 
+test-implicit-generic:
+	$(CXX) $(CXXFLAGS) -o test_implicit_generic $(TEST_IMPLICIT_GENERIC_SOURCES)
+	@./test_implicit_generic
+
 test-compact-ast:
 	$(CXX) $(CXXFLAGS) -o test_compact_ast $(TEST_COMPACT_AST_SOURCES)
 	@./test_compact_ast
+
+test-diagnostics:
+	$(CXX) $(CXXFLAGS) -DCLAW_DIAGNOSTICS_TEST -Isrc -o test_diagnostics src/test/test_diagnostics.cpp
+	@./test_diagnostics
 
 test-aot: claw
 	@echo "=== AOT Native Codegen Tests ==="

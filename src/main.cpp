@@ -39,6 +39,8 @@
 #include "optimizer/peephole_optimizer.h"
 #include "optimizer/monomorphizer.h"
 #include "optimizer/iterator_desugarer.h"
+#include "type/type_inference.h"
+#include "ast/ast_compact_repr.h"
 #include "repl/claw_repl.h"
 
 using namespace claw;
@@ -127,7 +129,7 @@ struct CompileOptions {
     std::string output_file;
     
     enum class Mode {
-        None, Tokens, AST, Semantic, TypeCheck, Interpret, Bytecode, JIT, Hybrid, CCodeGen, NativeCodegen, AOT, WebAssembly, REPL
+        None, Tokens, AST, CompactAST, Semantic, TypeCheck, Interpret, Bytecode, JIT, Hybrid, CCodeGen, NativeCodegen, AOT, WebAssembly, REPL
     } mode = Mode::None;
     
     int opt_level = 0;
@@ -148,6 +150,7 @@ void print_usage(const char* prog) {
     std::cout << "Execution Modes:\n";
     std::cout << "  -t, --tokens        Print tokens only\n";
     std::cout << "  -a, --ast           Print AST\n";
+    std::cout << "  --compact-ast       Print compact AST representation (AI-friendly)\n";
     std::cout << "  -s, --semantic      Run semantic analysis\n";
     std::cout << "  -T, --typecheck     Run type checking\n";
     std::cout << "  -r, --run           Interpret AST directly\n";
@@ -280,6 +283,7 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
             
             if (mode_arg == "tokens") opts.mode = CompileOptions::Mode::Tokens;
             else if (mode_arg == "ast") opts.mode = CompileOptions::Mode::AST;
+            else if (mode_arg == "compact-ast") opts.mode = CompileOptions::Mode::CompactAST;
             else if (mode_arg == "interpret" || mode_arg == "interp") opts.mode = CompileOptions::Mode::Interpret;
             else if (mode_arg == "bytecode") {
                 opts.mode = CompileOptions::Mode::Bytecode;
@@ -1071,6 +1075,22 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (opts.mode == CompileOptions::Mode::CompactAST) {
+        std::cout << "\n=== Compact AST ===\n";
+        ast::CompactASTRepr repr;
+        std::string compact = repr.to_compact(*program);
+        std::cout << compact << "\n";
+        auto [src_tokens, compact_tokens] = ast::CompactASTRepr::compare_sizes(*program, source);
+        std::cout << "\n--- Token comparison ---\n";
+        std::cout << "Source tokens:  " << src_tokens << "\n";
+        std::cout << "Compact tokens: " << compact_tokens << "\n";
+        if (src_tokens > 0) {
+            int savings = static_cast<int>(100.0 * (1.0 - static_cast<double>(compact_tokens) / src_tokens));
+            std::cout << "Savings:        " << savings << "%\n";
+        }
+        return 0;
+    }
+
     if (opts.mode == CompileOptions::Mode::Semantic) {
         std::cout << "\n=== Semantic Analysis ===\n";
         std::cout << "  (Not yet implemented - use -T for type checking)\n";
@@ -1101,6 +1121,24 @@ int main(int argc, char** argv) {
     if (opts.mode == CompileOptions::Mode::TypeCheck) {
         std::cout << "Type checking passed!\n";
         return 0;
+    }
+
+    // Infer implicit generic type arguments (e.g. id(42) -> id<Int>(42))
+    auto t_infer_start = high_resolution_clock::now();
+    type::TypeInference type_inference;
+    std::unordered_map<std::string, ast::FunctionStmt*> generic_functions;
+    for (const auto& decl : program->get_declarations()) {
+        if (auto* fn = dynamic_cast<ast::FunctionStmt*>(decl.get())) {
+            if (fn->has_type_params()) {
+                generic_functions[fn->get_name()] = fn;
+            }
+        }
+    }
+    int inferred = type_inference.infer_implicit_generic_args(*program, generic_functions);
+    auto t_infer_end = high_resolution_clock::now();
+    if (opts.verbose && inferred > 0) {
+        std::cout << "  TypeInference: " << inferred << " implicit generic call(s) inferred"
+                  << " (" << duration_cast<microseconds>(t_infer_end - t_infer_start).count() / 1000.0 << " ms)\n";
     }
 
     // Generic monomorphization (zero-cost generics)

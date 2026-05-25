@@ -14,104 +14,98 @@ namespace claw {
 // Parser Error Recovery Integration
 // ========================================================================
 
-class ParserRecoveryHelper {
-private:
-    EnhancedDiagnosticReporter& reporter_;
-    
-public:
-    ParserRecoveryHelper(EnhancedDiagnosticReporter& reporter) 
-        : reporter_(reporter) {}
-    
-    // 报告 "expected token" 错误并附加修复建议
-    void expected_token(const std::string& expected, 
-                        const SourceSpan& span,
-                        const std::string& context = "",
-                        const std::string& actual = "") {
-        ErrorCode code = ErrorCodes::expected_token;
-        std::string msg;
-        if (!context.empty()) {
-            msg = "expected '" + expected + "' " + context;
-        } else {
-            msg = "expected '" + expected + "'";
-        }
-        if (!actual.empty()) {
-            msg += ", got '" + actual + "'";
-        }
-        
-        auto diag = Diagnostic::error(code, span, msg);
-        
-        // 附加修复建议
-        auto fixits = FixItSuggester::suggest_for_expected(expected, span, actual);
-        for (auto& f : fixits) {
-            diag.add_fixit(std::move(f));
-        }
-        
-        reporter_.report(std::move(diag));
+ParserRecoveryHelper::ParserRecoveryHelper(EnhancedDiagnosticReporter& reporter)
+    : reporter_(reporter) {}
+
+void ParserRecoveryHelper::expected_token(const std::string& expected,
+                                          const SourceSpan& span,
+                                          const std::string& context,
+                                          const std::string& actual) {
+    ErrorCode code = ErrorCodes::expected_token;
+    std::string msg;
+    if (!context.empty()) {
+        msg = "expected '" + expected + "' " + context;
+    } else {
+        msg = "expected '" + expected + "'";
     }
-    
-    // 报告 "unexpected token" 错误
-    void unexpected_token(const std::string& token, const SourceSpan& span,
-                          const std::string& context = "") {
-        std::string msg = "unexpected token '" + token + "'";
-        if (!context.empty()) msg += " in " + context;
-        
-        auto diag = Diagnostic::error(ErrorCodes::unexpected_token, span, msg);
-        reporter_.report(std::move(diag));
+    if (!actual.empty()) {
+        msg += ", got '" + actual + "'";
     }
-    
-    // 报告语义错误
-    void semantic_error(const ErrorCode& code, const SourceSpan& span,
-                        const std::vector<std::string>& args,
-                        const SourceSpan& definition_span = SourceSpan()) {
-        std::string msg = code.format(args);
-        auto diag = Diagnostic::error(code, span, msg);
-        
-        if (definition_span.start.line > 0) {
-            diag.add_note(definition_span, "previously defined here");
-        }
-        reporter_.report(std::move(diag));
+
+    auto diag = Diagnostic::error(code, span, msg);
+
+    auto fixits = FixItSuggester::suggest_for_expected(expected, span, actual);
+    for (auto& f : fixits) {
+        diag.add_fixit(std::move(f));
     }
-    
-    // 报告类型错误
-    void type_error(const ErrorCode& code, const SourceSpan& span,
-                    const std::string& expected, const std::string& actual,
-                    const std::string& context = "") {
-        std::string msg = code.format({expected, actual});
-        if (!context.empty()) msg += " in " + context;
-        auto diag = Diagnostic::error(code, span, msg);
-        reporter_.report(std::move(diag));
+
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::unexpected_token(const std::string& token,
+                                            const SourceSpan& span,
+                                            const std::string& context) {
+    std::string msg = "unexpected token '" + token + "'";
+    if (!context.empty()) msg += " in " + context;
+
+    auto diag = Diagnostic::error(ErrorCodes::unexpected_token, span, msg);
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::semantic_error(const ErrorCode& code,
+                                          const SourceSpan& span,
+                                          const std::vector<std::string>& args,
+                                          const SourceSpan& definition_span) {
+    std::string msg = code.format(args);
+    auto diag = Diagnostic::error(code, span, msg);
+
+    if (definition_span.start.line > 0) {
+        diag.add_note(definition_span, "previously defined here");
     }
-    
-    // 报告类型错误 (三参数版)
-    void type_error3(const ErrorCode& code, const SourceSpan& span,
-                     const std::string& a, const std::string& b, 
-                     const std::string& c) {
-        auto diag = Diagnostic::error(code, span, code.format({a, b, c}));
-        reporter_.report(std::move(diag));
-    }
-    
-    // 报告警告
-    void warning(const ErrorCode& code, const SourceSpan& span,
-                 const std::string& msg) {
-        reporter_.report(Diagnostic::warning(code, span, msg));
-    }
-    
-    // 报告未使用变量警告
-    void warn_unused_variable(const std::string& name, const SourceSpan& span) {
-        auto diag = Diagnostic::warning(ErrorCodes::unused_variable, span, 
-                                        "unused variable '" + name + "'");
-        diag.add_fixit(FixItHint::remove(span, "remove unused variable"));
-        reporter_.report(std::move(diag));
-    }
-    
-    // 报告不可达代码警告
-    void warn_unreachable_code(const SourceSpan& span, const std::string& after_what) {
-        auto diag = Diagnostic::warning(ErrorCodes::unreachable_code, span,
-                                        "unreachable code after " + after_what);
-        diag.add_fixit(FixItHint::remove(span, "remove unreachable code"));
-        reporter_.report(std::move(diag));
-    }
-};
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::type_error(const ErrorCode& code,
+                                      const SourceSpan& span,
+                                      const std::string& expected,
+                                      const std::string& actual,
+                                      const std::string& context) {
+    std::string msg = code.format({expected, actual});
+    if (!context.empty()) msg += " in " + context;
+    auto diag = Diagnostic::error(code, span, msg);
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::type_error3(const ErrorCode& code,
+                                       const SourceSpan& span,
+                                       const std::string& a,
+                                       const std::string& b,
+                                       const std::string& c) {
+    auto diag = Diagnostic::error(code, span, code.format({a, b, c}));
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::warning(const ErrorCode& code,
+                                   const SourceSpan& span,
+                                   const std::string& msg) {
+    reporter_.report(Diagnostic::warning(code, span, msg));
+}
+
+void ParserRecoveryHelper::warn_unused_variable(const std::string& name,
+                                                const SourceSpan& span) {
+    auto diag = Diagnostic::warning(ErrorCodes::unused_variable, span,
+                                    "unused variable '" + name + "'");
+    diag.add_fixit(FixItHint::remove(span, "remove unused variable"));
+    reporter_.report(std::move(diag));
+}
+
+void ParserRecoveryHelper::warn_unreachable_code(const SourceSpan& span,
+                                                const std::string& after_what) {
+    auto diag = Diagnostic::warning(ErrorCodes::unreachable_code, span,
+                                    "unreachable code after " + after_what);
+    diag.add_fixit(FixItHint::remove(span, "remove unreachable code"));
+    reporter_.report(std::move(diag));
+}
 
 // ========================================================================
 // Error Recovery Strategies Implementation

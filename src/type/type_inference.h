@@ -35,6 +35,13 @@ public:
     TypePtr infer_expr(const ast::Expression* expr,
                        const InferenceContext& ctx);
 
+    // Walk the entire program and fill in missing generic type arguments
+    // for calls to generic functions (e.g. id(42) -> id<Int>(42)).
+    // Returns the number of calls that were successfully inferred.
+    int infer_implicit_generic_args(
+        ast::Program& program,
+        const std::unordered_map<std::string, ast::FunctionStmt*>& generic_functions);
+
 private:
     // Attempt to match a param type (which may contain type variables)
     // against an argument type, building a substitution map.
@@ -45,6 +52,15 @@ private:
 
     // Extract a type from an AST expression (simplified)
     TypePtr extract_type(const ast::Expression* expr);
+
+    // Parse a type annotation string into a TypePtr (handles primitives,
+    // type variables, arrays, optionals).
+    TypePtr parse_type_string(const std::string& str);
+
+    // Helper: infer missing type args for a single CallExpr.
+    bool infer_call_type_args(
+        ast::CallExpr& call,
+        ast::FunctionStmt& generic_fn);
 };
 
 } // namespace type
