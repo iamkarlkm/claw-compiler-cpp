@@ -72,3 +72,5 @@ CLAUDE.md
 .brain/policy.override.yaml
 .brain/state/
 # brain:end gitignore-session
+version
+claw-coverage

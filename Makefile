@@ -195,7 +195,7 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
 # Targets
 # ============================================================================
 
-.PHONY: all clean test help \
+.PHONY: all clean test help check-deps \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
     test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast \
@@ -203,7 +203,25 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
     test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock \
     test-command-stream test-webtransport-bridge test-stream-operators
 
-all: claw claw-lsp claw-repl
+check-deps:
+	@echo "Checking dependencies..."
+	@which $(CXX) >/dev/null 2>&1 || (echo "ERROR: $(CXX) not found. Install clang++ (C++17)."; exit 1)
+	@(which llvm-config >/dev/null 2>&1 || test -x $(LLVM_PREFIX)/bin/llvm-config) || (echo "ERROR: llvm-config not found. Install LLVM."; exit 1)
+	@echo "  $(CXX)        OK"
+	@echo "  llvm-config   OK"
+	@echo "  LLVM prefix   $(LLVM_PREFIX)"
+	@echo "  LLVM libdir   $(LLVM_LIBDIR)"
+	@echo "Checking readline..."
+	@printf '%s\n' '#include <readline/readline.h>' 'int main() { return 0; }' | $(CXX) -x c++ - -lreadline -o /dev/null 2>/dev/null || (echo "ERROR: libreadline not found. Install readline development headers."; exit 1)
+	@echo "  libreadline   OK"
+ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
+	@echo "Checking libmsquic..."
+	@test -d $(MSQUIC_PREFIX)/include || (echo "ERROR: libmsquic headers not found at $(MSQUIC_PREFIX)/include. Install libmsquic or set CLAW_ENABLE_WEBTRANSPORT=0"; exit 1)
+	@echo "  libmsquic     OK ($(MSQUIC_PREFIX))"
+endif
+	@echo "All dependencies satisfied."
+
+all: check-deps claw claw-lsp claw-repl
 
 help:
 	@echo "Claw Compiler Build System"
@@ -461,6 +479,33 @@ clean:
 	rm -f test_benchmark test_cuda test_package test_debugger
 	rm -f test_auto_scheduler test_tensorir test_wasm test_attribute test_docgen test_vm_evaluator test_ir_passes
 	rm -rf $(BUILD_DIR)
+	find . -name '*.gcno' -delete
+	find . -name '*.gcda' -delete
+	find . -name '*.gcov' -delete
+
+# ============================================================================
+# Coverage
+# ============================================================================
+
+COVERAGE_DIR = $(BUILD_DIR)/coverage
+COVERAGE_FLAGS = -std=c++17 -fprofile-arcs -ftest-coverage -O0 -g
+COVERAGE_OBJECTS = $(patsubst %.cpp,$(COVERAGE_DIR)/%.o,$(CORE_CPP_SOURCES))
+
+$(COVERAGE_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(COVERAGE_FLAGS) -I. -Isrc -I$(LLVM_PREFIX)/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -DCLAW_ENABLE_WEBTRANSPORT -I$(MSQUIC_PREFIX)/include -c -o $@ $<
+
+claw-coverage: $(COVERAGE_OBJECTS)
+	$(CXX) $(COVERAGE_FLAGS) -o claw-coverage $(COVERAGE_OBJECTS) $(LDFLAGS)
+
+coverage: clean claw-coverage
+	@echo "Running coverage build..."
+	@rm -rf coverage-report
+	@mkdir -p coverage-report
+	@$(MAKE) test CXX=clang++ CLAW_ENABLE_WEBTRANSPORT=0 || true
+	@lcov --capture --directory $(COVERAGE_DIR) --output-file coverage-report/claw.info --no-external 2>/dev/null || (echo "lcov not found. Install lcov to generate coverage reports."; exit 1)
+	@genhtml coverage-report/claw.info --output-directory coverage-report/html 2>/dev/null
+	@echo "Coverage report generated: coverage-report/html/index.html"
 
 # ============================================================================
 # Debug builds
