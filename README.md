@@ -4,6 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![CI](https://github.com/yourusername/claw-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/claw-compiler/actions/workflows/ci.yml)
 
 ---
 
@@ -75,14 +76,54 @@ claw_free  → pool_release
 
 ## 快速开始
 
-### 编译
+### 依赖
+
+- **clang++** (C++17)
+- **LLVM** (自动通过 `llvm-config` 探测路径)
+- **libmsquic** (可选，启用 WebTransport 支持)
+- **libreadline**
+
+### 源码编译
 
 ```bash
 cd claw-compiler
 make all          # 编译 claw + claw-lsp + claw-repl
 ```
 
-需要：clang++ (C++17)、LLVM 19 (macOS: `/usr/local/Cellar/llvm/19.1.4`)
+Makefile 会自动探测 LLVM 路径（通过 `llvm-config`）。如果探测失败，可手动指定：
+
+```bash
+make all LLVM_PREFIX=/usr/local/opt/llvm
+```
+
+禁用 WebTransport（无需 libmsquic）：
+
+```bash
+make all CLAW_ENABLE_WEBTRANSPORT=0
+```
+
+### 安装与卸载
+
+```bash
+make install              # 安装到 /usr/local/bin
+make install PREFIX=/opt  # 自定义安装路径
+make uninstall            # 移除已安装的二进制文件
+```
+
+### Docker
+
+```bash
+docker build -t claw .
+docker run --rm -v $(pwd):/src claw --run /src/program.claw
+```
+
+### Homebrew (草稿)
+
+```bash
+brew tap yourusername/claw
+brew install claw --with-libmsquic   # 启用 WebTransport
+brew install claw                    # 禁用 WebTransport
+```
 
 ### 使用
 
