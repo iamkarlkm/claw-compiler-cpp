@@ -1152,108 +1152,129 @@ int main(int argc, char** argv) {
                   << " (" << duration_cast<microseconds>(t_mono_end - t_mono_start).count() / 1000.0 << " ms)\n";
     }
 
-    // Constant folding (compile-time expression evaluation)
+    // Optimization pipeline with convergence for -O2/-O3
     if (opts.opt_level > 0) {
-        auto t_fold_start = high_resolution_clock::now();
-        claw::optimizer::FoldStats fold_stats;
-        bool folded = claw::optimizer::fold_constants(*program, &fold_stats);
-        auto t_fold_end = high_resolution_clock::now();
-        if (opts.verbose && folded) {
-            std::cout << "  ConstantFold: " << fold_stats.expressions_folded << " expressions folded";
-            std::cout << " (" << duration_cast<microseconds>(t_fold_end - t_fold_start).count() / 1000.0 << " ms)\n";
-        }
-    }
+        int max_iterations = (opts.opt_level >= 2) ? 5 : 1;
+        for (int iter = 0; iter < max_iterations; iter++) {
+            bool any_change = false;
 
-    // Algebraic simplification (identity/absorbing element reductions)
-    if (opts.opt_level > 0) {
-        auto t_alg_start = high_resolution_clock::now();
-        claw::optimizer::SimplifyStats alg_stats;
-        bool simplified = claw::optimizer::simplify_algebraic(*program, &alg_stats);
-        auto t_alg_end = high_resolution_clock::now();
-        if (opts.verbose && simplified) {
-            std::cout << "  Algebraic: " << alg_stats.expressions_simplified << " expressions simplified";
-            std::cout << " (" << duration_cast<microseconds>(t_alg_end - t_alg_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Control flow simplification (remove unreachable branches after constant folding)
-    if (opts.opt_level > 0) {
-        auto t_cf_start = high_resolution_clock::now();
-        claw::optimizer::CFSimplifyStats cf_stats;
-        bool simplified = claw::optimizer::simplify_control_flow(*program, &cf_stats);
-        auto t_cf_end = high_resolution_clock::now();
-        if (opts.verbose && simplified) {
-            std::cout << "  ControlFlow: " << cf_stats.if_stmts_simplified << " ifs, "
-                      << cf_stats.while_loops_removed << " whiles, "
-                      << cf_stats.for_loops_removed << " fors simplified";
-            std::cout << " (" << duration_cast<microseconds>(t_cf_end - t_cf_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Dead code elimination (function-level unreachable code removal)
-    if (opts.opt_level > 0) {
-        auto t_dce_start = high_resolution_clock::now();
-        claw::optimizer::DCEStats dce_stats;
-        bool eliminated = claw::optimizer::eliminate_dead_code(*program, &dce_stats);
-        auto t_dce_end = high_resolution_clock::now();
-        if (opts.verbose && eliminated) {
-            std::cout << "  DCE: " << dce_stats.unreachable_statements_removed << " statements removed, "
-                      << dce_stats.blocks_cleaned << " blocks cleaned";
-            std::cout << " (" << duration_cast<microseconds>(t_dce_end - t_dce_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Iterator desugaring (zero-cost for-loops → indexed loops)
-    if (opts.opt_level > 0) {
-        auto t_iter_start = high_resolution_clock::now();
-        claw::optimizer::DesugarStats iter_stats;
-        bool desugared = claw::optimizer::desugar_iterators(*program, &iter_stats);
-        auto t_iter_end = high_resolution_clock::now();
-        if (opts.verbose && desugared) {
-            std::cout << "  IteratorDesugar: " << iter_stats.summary();
-            std::cout << " (" << duration_cast<microseconds>(t_iter_end - t_iter_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Tail call optimization (transform tail-recursive functions into loops)
-    if (opts.opt_level > 0) {
-        auto t_tco_start = high_resolution_clock::now();
-        claw::optimizer::TCOStats tco_stats;
-        bool tco_done = claw::optimizer::optimize_tail_calls(*program, &tco_stats);
-        auto t_tco_end = high_resolution_clock::now();
-        if (opts.verbose && tco_done) {
-            std::cout << "  TCO: " << tco_stats.functions_transformed << " functions transformed, "
-                      << tco_stats.tail_calls_eliminated << " tail calls eliminated";
-            std::cout << " (" << duration_cast<microseconds>(t_tco_end - t_tco_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Function inlining (inline small expression-returning functions)
-    if (opts.opt_level > 0) {
-        auto t_inline_start = high_resolution_clock::now();
-        claw::optimizer::InlineStats inline_stats;
-        claw::optimizer::FunctionInliner inliner;
-        bool inlined = inliner.inline_functions(*program, &inline_stats);
-        auto t_inline_end = high_resolution_clock::now();
-        if (opts.verbose && inlined) {
-            std::cout << "  Inline: " << inline_stats.call_sites_inlined << " call sites, "
-                      << inline_stats.functions_inlined << " functions inlined";
-            std::cout << " (" << duration_cast<microseconds>(t_inline_end - t_inline_start).count() / 1000.0 << " ms)\n";
-        }
-    }
-
-    // Tree shaking (module-level dead code elimination)
-    if (opts.opt_level > 0) {
-        auto t_shake_start = high_resolution_clock::now();
-        claw::optimizer::TreeShakeStats shake_stats;
-        bool shaken = claw::optimizer::tree_shake(*program, &shake_stats);
-        auto t_shake_end = high_resolution_clock::now();
-        if (opts.verbose || shaken) {
-            std::cout << "  TreeShake: " << shake_stats.summary();
-            if (opts.verbose) {
-                std::cout << " (" << duration_cast<microseconds>(t_shake_end - t_shake_start).count() / 1000.0 << " ms)";
+            // Constant folding (compile-time expression evaluation)
+            {
+                auto t_fold_start = high_resolution_clock::now();
+                claw::optimizer::FoldStats fold_stats;
+                bool folded = claw::optimizer::fold_constants(*program, &fold_stats);
+                auto t_fold_end = high_resolution_clock::now();
+                if (folded) any_change = true;
+                if (opts.verbose && folded) {
+                    std::cout << "  ConstantFold" << (max_iterations > 1 ? "[" + std::to_string(iter) + "]" : "")
+                              << ": " << fold_stats.expressions_folded << " expressions folded";
+                    std::cout << " (" << duration_cast<microseconds>(t_fold_end - t_fold_start).count() / 1000.0 << " ms)\n";
+                }
             }
-            std::cout << "\n";
+
+            // Algebraic simplification (identity/absorbing element reductions)
+            {
+                auto t_alg_start = high_resolution_clock::now();
+                claw::optimizer::SimplifyStats alg_stats;
+                bool simplified = claw::optimizer::simplify_algebraic(*program, &alg_stats);
+                auto t_alg_end = high_resolution_clock::now();
+                if (simplified) any_change = true;
+                if (opts.verbose && simplified) {
+                    std::cout << "  Algebraic" << (max_iterations > 1 ? "[" + std::to_string(iter) + "]" : "")
+                              << ": " << alg_stats.expressions_simplified << " expressions simplified";
+                    std::cout << " (" << duration_cast<microseconds>(t_alg_end - t_alg_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            // Control flow simplification (remove unreachable branches after constant folding)
+            {
+                auto t_cf_start = high_resolution_clock::now();
+                claw::optimizer::CFSimplifyStats cf_stats;
+                bool simplified = claw::optimizer::simplify_control_flow(*program, &cf_stats);
+                auto t_cf_end = high_resolution_clock::now();
+                if (simplified) any_change = true;
+                if (opts.verbose && simplified) {
+                    std::cout << "  ControlFlow" << (max_iterations > 1 ? "[" + std::to_string(iter) + "]" : "")
+                              << ": " << cf_stats.if_stmts_simplified << " ifs, "
+                              << cf_stats.while_loops_removed << " whiles, "
+                              << cf_stats.for_loops_removed << " fors simplified";
+                    std::cout << " (" << duration_cast<microseconds>(t_cf_end - t_cf_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            // Dead code elimination (function-level unreachable code removal)
+            {
+                auto t_dce_start = high_resolution_clock::now();
+                claw::optimizer::DCEStats dce_stats;
+                bool eliminated = claw::optimizer::eliminate_dead_code(*program, &dce_stats);
+                auto t_dce_end = high_resolution_clock::now();
+                if (eliminated) any_change = true;
+                if (opts.verbose && eliminated) {
+                    std::cout << "  DCE" << (max_iterations > 1 ? "[" + std::to_string(iter) + "]" : "")
+                              << ": " << dce_stats.unreachable_statements_removed << " statements removed, "
+                              << dce_stats.blocks_cleaned << " blocks cleaned";
+                    std::cout << " (" << duration_cast<microseconds>(t_dce_end - t_dce_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            // Iterator desugaring (zero-cost for-loops → indexed loops)
+            if (iter == 0) {
+                auto t_iter_start = high_resolution_clock::now();
+                claw::optimizer::DesugarStats iter_stats;
+                bool desugared = claw::optimizer::desugar_iterators(*program, &iter_stats);
+                auto t_iter_end = high_resolution_clock::now();
+                if (desugared) any_change = true;
+                if (opts.verbose && desugared) {
+                    std::cout << "  IteratorDesugar: " << iter_stats.summary();
+                    std::cout << " (" << duration_cast<microseconds>(t_iter_end - t_iter_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            // Tail call optimization (transform tail-recursive functions into loops)
+            if (iter == 0) {
+                auto t_tco_start = high_resolution_clock::now();
+                claw::optimizer::TCOStats tco_stats;
+                bool tco_done = claw::optimizer::optimize_tail_calls(*program, &tco_stats);
+                auto t_tco_end = high_resolution_clock::now();
+                if (tco_done) any_change = true;
+                if (opts.verbose && tco_done) {
+                    std::cout << "  TCO: " << tco_stats.functions_transformed << " functions transformed, "
+                              << tco_stats.tail_calls_eliminated << " tail calls eliminated";
+                    std::cout << " (" << duration_cast<microseconds>(t_tco_end - t_tco_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            // Function inlining (inline small expression-returning functions)
+            if (iter == 0) {
+                auto t_inline_start = high_resolution_clock::now();
+                claw::optimizer::InlineStats inline_stats;
+                claw::optimizer::FunctionInliner inliner;
+                bool inlined = inliner.inline_functions(*program, &inline_stats);
+                auto t_inline_end = high_resolution_clock::now();
+                if (inlined) any_change = true;
+                if (opts.verbose && inlined) {
+                    std::cout << "  Inline: " << inline_stats.call_sites_inlined << " call sites, "
+                              << inline_stats.functions_inlined << " functions inlined";
+                    std::cout << " (" << duration_cast<microseconds>(t_inline_end - t_inline_start).count() / 1000.0 << " ms)\n";
+                }
+            }
+
+            if (!any_change) break;
+        }
+
+        // Tree shaking (module-level dead code elimination) - run once at the end
+        {
+            auto t_shake_start = high_resolution_clock::now();
+            claw::optimizer::TreeShakeStats shake_stats;
+            bool shaken = claw::optimizer::tree_shake(*program, &shake_stats);
+            auto t_shake_end = high_resolution_clock::now();
+            if (opts.verbose || shaken) {
+                std::cout << "  TreeShake: " << shake_stats.summary();
+                if (opts.verbose) {
+                    std::cout << " (" << duration_cast<microseconds>(t_shake_end - t_shake_start).count() / 1000.0 << " ms)";
+                }
+                std::cout << "\n";
+            }
         }
     }
 
