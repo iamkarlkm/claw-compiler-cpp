@@ -86,6 +86,7 @@ CORE_SOURCES = \
     src/optimizer/function_inliner.cpp \
     src/optimizer/tail_call_optimizer.cpp \
     src/optimizer/algebraic_simplifier.cpp \
+    src/optimizer/constant_propagator.cpp \
     src/optimizer/monomorphizer.cpp \
     src/optimizer/iterator_desugarer.cpp \
     src/ast/clone.cpp \
@@ -190,6 +191,7 @@ TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/ast/clone.
 TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp test/benchmark_ir_passes.cpp
 TEST_TREE_SHAKER_SOURCES = src/optimizer/tree_shaker.cpp src/test/test_tree_shaker.cpp
 TEST_CONSTANT_FOLDER_SOURCES = src/optimizer/constant_folder.cpp src/test/test_constant_folder.cpp
+TEST_CONSTANT_PROPAGATOR_SOURCES = src/optimizer/constant_propagator.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_constant_propagator.cpp
 TEST_CONTROL_FLOW_SIMPLIFIER_SOURCES = src/optimizer/control_flow_simplifier.cpp src/test/test_control_flow_simplifier.cpp
 TEST_DEAD_CODE_ELIMINATOR_SOURCES = src/optimizer/dead_code_eliminator.cpp src/test/test_dead_code_eliminator.cpp
 TEST_PEEPHOLE_OPTIMIZER_SOURCES = src/optimizer/peephole_optimizer.cpp src/test/test_peephole_optimizer.cpp
@@ -210,7 +212,7 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
 .PHONY: all clean test help check-deps \
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
-    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast \
+    test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast \
     test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-parser \
     test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock \
     test-command-stream test-webtransport-bridge test-stream-operators
@@ -274,7 +276,7 @@ claw-repl: src/repl_main.cpp $(CORE_NON_MAIN_OBJECTS)
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -325,6 +327,10 @@ test-tree-shaker:
 test-constant-folder:
 	$(CXX) $(CXXFLAGS) -o test_constant_folder $(TEST_CONSTANT_FOLDER_SOURCES)
 	@./test_constant_folder
+
+test-constant-propagator:
+	$(CXX) $(CXXFLAGS) -o test_constant_propagator $(TEST_CONSTANT_PROPAGATOR_SOURCES)
+	@./test_constant_propagator
 
 test-control-flow-simplifier:
 	$(CXX) $(CXXFLAGS) -o test_control_flow_simplifier $(TEST_CONTROL_FLOW_SIMPLIFIER_SOURCES)

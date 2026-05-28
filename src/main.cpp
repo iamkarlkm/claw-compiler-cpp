@@ -39,6 +39,7 @@
 #include "optimizer/peephole_optimizer.h"
 #include "optimizer/monomorphizer.h"
 #include "optimizer/iterator_desugarer.h"
+#include "optimizer/constant_propagator.h"
 #include "type/type_inference.h"
 #include "ast/ast_compact_repr.h"
 #include "repl/claw_repl.h"
@@ -1166,6 +1167,20 @@ int main(int argc, char** argv) {
         int max_iterations = (opts.opt_level >= 2) ? 5 : 1;
         for (int iter = 0; iter < max_iterations; iter++) {
             bool any_change = false;
+
+            // Constant propagation (replace variables with their constant values)
+            {
+                auto t_prop_start = high_resolution_clock::now();
+                claw::optimizer::PropagationStats prop_stats;
+                bool propagated = claw::optimizer::propagate_constants(*program, &prop_stats);
+                auto t_prop_end = high_resolution_clock::now();
+                if (propagated) any_change = true;
+                if (opts.verbose && propagated) {
+                    std::cout << "  ConstProp" << (max_iterations > 1 ? "[" + std::to_string(iter) + "]" : "")
+                              << ": " << prop_stats.variables_replaced << " variables replaced";
+                    std::cout << " (" << duration_cast<microseconds>(t_prop_end - t_prop_start).count() / 1000.0 << " ms)\n";
+                }
+            }
 
             // Constant folding (compile-time expression evaluation)
             {
