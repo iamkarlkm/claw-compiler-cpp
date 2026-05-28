@@ -500,11 +500,14 @@ claw-coverage: $(COVERAGE_OBJECTS)
 
 coverage: clean claw-coverage
 	@echo "Running coverage build..."
+	@command -v lcov >/dev/null 2>&1 || { echo "ERROR: lcov not found. Install with: brew install lcov  (macOS) or apt install lcov (Linux)"; exit 1; }
+	@command -v genhtml >/dev/null 2>&1 || { echo "ERROR: genhtml not found. Install with: brew install lcov  (macOS) or apt install lcov (Linux)"; exit 1; }
 	@rm -rf coverage-report
 	@mkdir -p coverage-report
-	@$(MAKE) test CXX=clang++ CLAW_ENABLE_WEBTRANSPORT=0 || true
-	@lcov --capture --directory $(COVERAGE_DIR) --output-file coverage-report/claw.info --no-external 2>/dev/null || (echo "lcov not found. Install lcov to generate coverage reports."; exit 1)
-	@genhtml coverage-report/claw.info --output-directory coverage-report/html 2>/dev/null
+	@echo "Running tests with coverage instrumentation..."
+	@$(MAKE) test TEST_CXXFLAGS="$(COVERAGE_FLAGS) -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT" || true
+	@lcov --capture --directory $(COVERAGE_DIR) --output-file coverage-report/claw.info --no-external
+	@genhtml coverage-report/claw.info --output-directory coverage-report/html
 	@echo "Coverage report generated: coverage-report/html/index.html"
 
 # ============================================================================
