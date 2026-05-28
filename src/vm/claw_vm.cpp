@@ -2091,7 +2091,7 @@ bool ClawVM::op_ret() {
         auto caller_closure = runtime.call_frames.back().closure;
         if (caller_closure && caller_closure->function) {
             current_function_idx = caller_closure->function->func_id;
-            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+            if (current_function_idx < current_module.functions.size()) {
                 current_function = &current_module.functions[current_function_idx];
             }
         }
@@ -2118,7 +2118,7 @@ bool ClawVM::op_ret_null() {
         auto caller_closure = runtime.call_frames.back().closure;
         if (caller_closure && caller_closure->function) {
             current_function_idx = caller_closure->function->func_id;
-            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+            if (current_function_idx < current_module.functions.size()) {
                 current_function = &current_module.functions[current_function_idx];
             }
         }
@@ -2720,7 +2720,7 @@ void ClawVM::restore_coroutine_frame(std::shared_ptr<CoroutineValue> coro) {
 
     // Set current function context
     current_function_idx = coro->func_id;
-    if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+    if (current_function_idx < current_module.functions.size()) {
         current_function = &current_module.functions[current_function_idx];
     }
 
@@ -2910,7 +2910,7 @@ bool ClawVM::op_co_await() {
         auto caller_closure = runtime.call_frames.back().closure;
         if (caller_closure && caller_closure->function) {
             current_function_idx = caller_closure->function->func_id;
-            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+            if (current_function_idx < current_module.functions.size()) {
                 current_function = &current_module.functions[current_function_idx];
             }
         }
@@ -3039,7 +3039,7 @@ bool ClawVM::op_future_resolve() {
         auto caller_closure = runtime.call_frames.back().closure;
         if (caller_closure && caller_closure->function) {
             current_function_idx = caller_closure->function->func_id;
-            if (current_function_idx >= 0 && current_function_idx < static_cast<int32_t>(current_module.functions.size())) {
+            if (current_function_idx < current_module.functions.size()) {
                 current_function = &current_module.functions[current_function_idx];
             }
         }

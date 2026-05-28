@@ -821,7 +821,7 @@ std::shared_ptr<JsonValue> LSPServer::handleSemanticTokens(const std::shared_ptr
         // 简单的词法标记生成
         // 0 = namespace, 1 = function, 2 = variable, 3 = keyword, 4 = string, 5 = number
         int currentLine = 0;
-        int lineStart = 0;
+        size_t lineStart = 0;
         
         for (size_t i = 0; i <= text.size(); ++i) {
             if (i == text.size() || text[i] == '\n') {
@@ -1290,7 +1290,7 @@ std::vector<Diagnostic> LSPServer::generateDiagnostics(const std::string& uri, c
 
 // Helper to convert SourceSpan to Location
 static Location spanToLocation(const std::string& uri, const claw::SourceSpan& span) {
-    return Location{uri, {static_cast<int>(span.start.line - 1), static_cast<int>(span.start.column)}};
+    return Location{uri, {{static_cast<int>(span.start.line - 1), static_cast<int>(span.start.column)}}};
 }
 
 std::vector<SymbolDefinition> LSPServer::extractSymbols(const std::shared_ptr<ast::Program>& ast, const std::string& uri) {
