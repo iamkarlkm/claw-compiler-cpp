@@ -1,0 +1,85 @@
+.TH CLAW 1 "2026-05-28" "claw 0.2.0" "Claw Compiler"
+.SH NAME
+claw \- the Claw programming language compiler
+.SH SYNOPSIS
+.B claw
+[\fIOPTIONS\fR] \fIFILE.claw\fR
+.SH DESCRIPTION
+Claw is a systems programming language with deterministic memory management,
+zero GC pause, and compiler-managed lifetimes.
+.SH EXECUTION MODES
+.TP
+.BR \-t ", " \-\-tokens
+Print tokens only.
+.TP
+.BR \-a ", " \-\-ast
+Print AST.
+.TP
+.BR \-\-compact\-ast
+Print compact AST representation (AI-friendly).
+.TP
+.BR \-s ", " \-\-semantic
+Run semantic analysis.
+.TP
+.BR \-T ", " \-\-typecheck
+Run type checking.
+.TP
+.BR \-r ", " \-\-run
+Interpret AST directly.
+.TP
+.BR \-b ", " \-\-bytecode
+Compile to bytecode and run in VM.
+.TP
+.BR \-j ", " \-\-jit
+JIT compile and execute.
+.TP
+.BR \-H ", " \-\-hybrid
+Hybrid mode: interpret + JIT hot paths.
+.TP
+.BR \-C ", " \-\-ccodegen
+Generate C code.
+.TP
+.BR \-n ", " \-\-native
+Generate x86-64 native code.
+.TP
+.BR \-\-aot
+AOT compile to executable (x86-64 + Mach-O).
+.TP
+.BR \-w ", " \-\-wasm
+Generate WebAssembly.
+.TP
+.BR \-i ", " \-\-repl
+Start REPL interactive mode.
+.SH OPTIONS
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Set output file.
+.TP
+.BR \-O\fILEVEL\fR
+Set optimization level (0-3).
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose output.
+.TP
+.BR \-\-time
+Show compilation time.
+.TP
+.BR \-\-show\-ir
+Show generated IR/code.
+.TP
+.BR \-\-diagnostics\-json
+Output diagnostics as JSON.
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.SH FILES
+.TP
+.I ~/.claw/cache/builds
+AOT build cache directory.
+.SH SEE ALSO
+.BR claw-lsp (1),
+.BR claw-repl (1)
+.SH AUTHOR
+Claw Compiler Team
+.SH LICENSE
+MIT

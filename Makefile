@@ -524,18 +524,30 @@ $(DEBUG_BUILD_DIR)/%.o: %.cpp
 
 PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
+MANDIR = $(PREFIX)/share/man/man1
+BASHCOMPDIR = $(PREFIX)/share/bash-completion/completions
+ZSHCOMPDIR = $(PREFIX)/share/zsh/site-functions
 
 install: all
 	@echo "Installing Claw Compiler..."
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@cp claw claw-lsp claw-repl $(DESTDIR)$(BINDIR)/
-	@echo "Installation complete to $(DESTDIR)$(BINDIR)"
+	@mkdir -p $(DESTDIR)$(MANDIR)
+	@cp man/claw.1 $(DESTDIR)$(MANDIR)/
+	@mkdir -p $(DESTDIR)$(BASHCOMPDIR)
+	@cp completions/claw.bash $(DESTDIR)$(BASHCOMPDIR)/claw
+	@mkdir -p $(DESTDIR)$(ZSHCOMPDIR)
+	@cp completions/claw.zsh $(DESTDIR)$(ZSHCOMPDIR)/_claw
+	@echo "Installation complete to $(DESTDIR)$(PREFIX)"
 
 uninstall:
 	@rm -f $(DESTDIR)$(BINDIR)/claw
 	@rm -f $(DESTDIR)$(BINDIR)/claw-lsp
 	@rm -f $(DESTDIR)$(BINDIR)/claw-repl
-	@echo "Uninstalled from $(DESTDIR)$(BINDIR)"
+	@rm -f $(DESTDIR)$(MANDIR)/claw.1
+	@rm -f $(DESTDIR)$(BASHCOMPDIR)/claw
+	@rm -f $(DESTDIR)$(ZSHCOMPDIR)/_claw
+	@echo "Uninstalled from $(DESTDIR)$(PREFIX)"
 
 # ============================================================================
 # 测试目标
