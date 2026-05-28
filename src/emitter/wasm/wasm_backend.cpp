@@ -567,10 +567,29 @@ bool WasmCodeGenerator::generate_from_program(std::shared_ptr<ast::Program> prog
         }
         return false;
     }
-    (void)output;
-    (void)verbose;
-    // TODO: re-implement using current AST
-    return false;
+
+    // Step 1: AST → IR
+    claw::IRGenerator ir_gen;
+    auto ir_module = ir_gen.generate(program.get());
+    if (!ir_module) {
+        if (verbose) {
+            std::cerr << "[WASM] IR generation failed\n";
+        }
+        return false;
+    }
+
+    // Step 2: IR → WASM
+    if (!generate(*ir_module)) {
+        if (verbose) {
+            std::cerr << "[WASM] WASM code generation failed\n";
+        }
+        return false;
+    }
+
+    // Step 3: Encode WASM module to binary
+    auto binary = module_.encode();
+    output.assign(reinterpret_cast<const char*>(binary.data()), binary.size());
+    return true;
 }
 
 void WasmCodeGenerator::emit_instruction(const WasmInstruction& inst) {

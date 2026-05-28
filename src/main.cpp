@@ -27,7 +27,7 @@
 #include "codegen/linker_integration.h"
 #include "common/parse_cache.h"
 #include "common/compilation_cache.h"
-// #include "emitter/wasm/wasm_backend.h"  // TODO: fix ast::Module → ast::Program
+#include "emitter/wasm/wasm_backend.h"
 #include "pipeline/execution_engine.h"
 #include "optimizer/tree_shaker.h"
 #include "optimizer/constant_folder.h"
@@ -1304,10 +1304,6 @@ int main(int argc, char** argv) {
 
         case CompileOptions::Mode::WebAssembly:
             {
-                // TODO: fix wasm backend - ast::Module → ast::Program
-                std::cerr << "WebAssembly backend temporarily disabled (pending AST migration)\n";
-                success = false;
-                /*
                 claw::wasm::WasmModule wasm_module;
                 claw::wasm::WasmCodeGenerator wasm_gen(wasm_module);
                 std::string output;
@@ -1326,7 +1322,6 @@ int main(int argc, char** argv) {
                 } else {
                     std::cerr << "WebAssembly generation failed\n";
                 }
-                */
             }
             break;
             

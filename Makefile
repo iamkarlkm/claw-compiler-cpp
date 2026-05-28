@@ -117,6 +117,8 @@ CORE_SOURCES = \
     src/emitter/riscv_emitter.cpp \
     src/codegen/x86_64_codegen.cpp \
     src/emitter/reg_alloc.cpp \
+    src/emitter/wasm/wasm_backend.cpp \
+    src/emitter/wasm/wasm_ir_generator.cpp \
     src/jit/jit_compiler.cpp \
     src/jit/jit_runtime.cpp \
     src/jit/jit_stdlib_integration.cpp \
