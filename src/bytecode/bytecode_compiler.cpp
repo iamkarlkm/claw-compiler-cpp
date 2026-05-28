@@ -1465,7 +1465,6 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
         }
     }
 
-    std::cerr << "[BC DEBUG] compileCallExpr callee kind=" << (int)expr.get_callee()->get_kind() << "\n";
     // Method call: obj.method(args...)
     if (expr.get_callee()->get_kind() == ast::Expression::Kind::Member) {
         const auto* member = static_cast<const ast::MemberExpr*>(expr.get_callee());

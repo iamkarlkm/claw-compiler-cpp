@@ -473,7 +473,6 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         }
 
         // 字节码编译 - 使用兼容层
-        std::cerr << "[MAIN DEBUG] About to compile bytecode\n";
         BytecodeCompiler compiler;
         module = compiler.compile(*program);
 
