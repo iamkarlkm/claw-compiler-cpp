@@ -5,9 +5,12 @@
 CXX = clang++
 LLVM_PREFIX := $(shell llvm-config --prefix 2>/dev/null || /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
 LLVM_LIBDIR := $(shell llvm-config --libdir 2>/dev/null || echo $(LLVM_PREFIX)/lib)
-CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-LDFLAGS = -lpthread -lreadline -L$(LLVM_LIBDIR) -lLLVM
+# readline: prefer pkg-config, fall back to -lreadline
+READLINE_LIBS := $(shell pkg-config --libs readline 2>/dev/null || echo -lreadline)
+READLINE_CFLAGS := $(shell pkg-config --cflags readline 2>/dev/null || echo)
+LDFLAGS = -lpthread $(READLINE_LIBS) -L$(LLVM_LIBDIR) -lLLVM
 
 # Link-time optimization (optional)
 LTO ?= 0
@@ -20,14 +23,21 @@ endif
 CLAW_ENABLE_WEBTRANSPORT ?= 1
 ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
     CXXFLAGS += -DCLAW_ENABLE_WEBTRANSPORT
-    # libmsquic auto-detection (Homebrew, system, or user-specified)
-    MSQUIC_PREFIX := $(shell \
-        if [ -d /usr/local/opt/libmsquic ]; then echo /usr/local/opt/libmsquic; \
-        elif [ -d /opt/homebrew/opt/libmsquic ]; then echo /opt/homebrew/opt/libmsquic; \
-        elif [ -d /usr/lib/msquic ]; then echo /usr/lib/msquic; \
-        else echo /usr/local/Cellar/libmsquic/2.5.7; fi)
-    CXXFLAGS += -I$(MSQUIC_PREFIX)/include
-    LDFLAGS += -L$(MSQUIC_PREFIX)/lib -lmsquic
+    # libmsquic: prefer pkg-config, then Homebrew/system paths
+    MSQUIC_PKG := $(shell pkg-config --exists libmsquic 2>/dev/null && echo 1 || echo 0)
+    ifeq ($(MSQUIC_PKG),1)
+        CXXFLAGS += $(shell pkg-config --cflags libmsquic)
+        LDFLAGS += $(shell pkg-config --libs libmsquic)
+        MSQUIC_PREFIX := $(shell pkg-config --variable=prefix libmsquic 2>/dev/null || echo "")
+    else
+        MSQUIC_PREFIX := $(shell \
+            if [ -d /usr/local/opt/libmsquic ]; then echo /usr/local/opt/libmsquic; \
+            elif [ -d /opt/homebrew/opt/libmsquic ]; then echo /opt/homebrew/opt/libmsquic; \
+            elif [ -d /usr/lib/msquic ]; then echo /usr/lib/msquic; \
+            else echo /usr/local/Cellar/libmsquic/2.5.7; fi)
+        CXXFLAGS += -I$(MSQUIC_PREFIX)/include
+        LDFLAGS += -L$(MSQUIC_PREFIX)/lib -lmsquic
+    endif
 endif
 
 # Detect OS
