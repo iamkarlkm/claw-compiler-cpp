@@ -137,6 +137,7 @@ struct CompileOptions {
     bool show_time = false;
     bool show_ir = false;
     bool diagnostics_json = false;
+    bool show_version = false;
 };
 
 // ============================================================================
@@ -202,6 +203,10 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
         
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
+            return false;
+        }
+        else if (arg == "--version") {
+            opts.show_version = true;
             return false;
         }
         else if (arg == "-t" || arg == "--tokens") {
@@ -1008,6 +1013,10 @@ int main(int argc, char** argv) {
     CompileOptions opts;
 
     if (!parse_args(argc, argv, opts)) {
+        if (opts.show_version) {
+            std::cout << "claw " << CLAW_VERSION << "\n";
+            return 0;
+        }
         return 1;
     }
     
