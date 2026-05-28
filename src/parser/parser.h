@@ -3114,8 +3114,8 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return parse_command_expression();
     }
 
-    // Identifier
-    if (check(TokenType::Identifier)) {
+    // Identifier (including self)
+    if (check(TokenType::Identifier) || check(TokenType::Kw_self)) {
         advance();  // consume identifier first
         auto name = previous().text;
         return std::make_unique<ast::IdentifierExpr>(name, span_from(previous()));
@@ -3450,7 +3450,7 @@ inline std::unique_ptr<ast::Statement> Parser::parse_impl_statement() {
             advance(); // consume '('
 
             while (!check(TokenType::RParen) && !is_at_end()) {
-                if (check(TokenType::Identifier)) {
+                if (check(TokenType::Identifier) || check(TokenType::Kw_self)) {
                     advance();
                     std::string param_name = previous().text;
                     std::string param_type;

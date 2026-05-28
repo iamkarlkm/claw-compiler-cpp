@@ -111,6 +111,7 @@ enum class OpCode : uint8_t {
     RET,                // Return from function
     RET_NULL,           // Return null
     CALL_EXT,           // Call external function
+    CALL_METHOD,        // Call method on object (runtime dispatch)
 
     // Functions (4)
     DEFINE_FUNC = 0xB0, // Define function
@@ -126,11 +127,12 @@ enum class OpCode : uint8_t {
     ARRAY_LEN,          // Get array length
     ARRAY_PUSH,         // Push to array
 
-    // Objects/Structs (4)
+    // Objects/Structs (5)
     ALLOC_OBJ = 0xD0,   // Allocate object/struct
     LOAD_FIELD,         // Load struct field
     STORE_FIELD,        // Store struct field
     OBJ_TYPE,           // Get object type
+    ALLOC_OBJ_TYPE,     // Allocate object with type name (operand = string idx)
 
     // Tuples (3)
     CREATE_TUPLE = 0xE0,// Create tuple

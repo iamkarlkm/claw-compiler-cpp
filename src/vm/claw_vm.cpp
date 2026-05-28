@@ -1064,10 +1064,22 @@ void GarbageCollector::sweep(VMRuntime& runtime) {
 
 bool ClawVM::load_module(const bytecode::Module& module) {
     current_module = module;
+    method_table.clear();
 
     // Setup globals from module
     for (size_t i = 0; i < module.global_names.size(); i++) {
         runtime.define_global(module.global_names[i]);
+    }
+
+    // Build method dispatch table from mangled function names: Type__method
+    for (size_t i = 0; i < module.functions.size(); i++) {
+        const std::string& name = module.functions[i].name;
+        size_t pos = name.find("__");
+        if (pos != std::string::npos && pos > 0) {
+            std::string type_name = name.substr(0, pos);
+            std::string method_name = name.substr(pos + 2);
+            method_table[type_name][method_name] = static_cast<int32_t>(i);
+        }
     }
 
     return true;
@@ -1427,6 +1439,7 @@ bool ClawVM::dispatch() {
     if (op == static_cast<int32_t>(bytecode::OpCode::RET)) return op_ret();
     if (op == static_cast<int32_t>(bytecode::OpCode::RET_NULL)) return op_ret_null();
     if (op == static_cast<int32_t>(bytecode::OpCode::CALL_EXT)) return op_call_ext();
+    if (op == static_cast<int32_t>(bytecode::OpCode::CALL_METHOD)) return op_call_method();
     
     // Functions
     if (op == static_cast<int32_t>(bytecode::OpCode::DEFINE_FUNC)) return op_define_func();
@@ -1444,6 +1457,7 @@ bool ClawVM::dispatch() {
     
     // Objects
     if (op == static_cast<int32_t>(bytecode::OpCode::ALLOC_OBJ)) return op_alloc_obj();
+    if (op == static_cast<int32_t>(bytecode::OpCode::ALLOC_OBJ_TYPE)) return op_alloc_obj_type();
     if (op == static_cast<int32_t>(bytecode::OpCode::LOAD_FIELD)) return op_load_field();
     if (op == static_cast<int32_t>(bytecode::OpCode::STORE_FIELD)) return op_store_field();
     if (op == static_cast<int32_t>(bytecode::OpCode::OBJ_TYPE)) return op_obj_type();
@@ -2143,6 +2157,105 @@ bool ClawVM::op_call_ext() {
         }
     }
     runtime.push(result);
+    return true;
+}
+
+bool ClawVM::op_call_method() {
+    int32_t packed = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    int32_t str_idx = packed & 0xFFFF;
+    int32_t arg_count = (packed >> 16) & 0xFFFF;
+
+    std::string method_name;
+    if (str_idx >= 0 && str_idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        method_name = current_module.constants.values[str_idx].str;
+    }
+
+    // Pop arguments (self is the last one popped)
+    std::vector<Value> args;
+    args.reserve(arg_count);
+    for (int i = 0; i < arg_count; i++) {
+        args.push_back(runtime.pop());
+    }
+    std::reverse(args.begin(), args.end());
+
+    if (args.empty()) {
+        error("Method call requires at least self argument");
+        return false;
+    }
+
+    Value& self = args[0];
+    std::string type_name;
+    if (self.tag == ValueTag::OBJECT) {
+        type_name = std::get<std::shared_ptr<ObjectValue>>(self.data)->type_name;
+    }
+
+    if (type_name.empty()) {
+        error("Method call on non-object type");
+        return false;
+    }
+
+    auto type_it = method_table.find(type_name);
+    if (type_it == method_table.end()) {
+        error("No methods found for type: " + type_name);
+        return false;
+    }
+
+    auto method_it = type_it->second.find(method_name);
+    if (method_it == type_it->second.end()) {
+        error("Method not found: " + type_name + "." + method_name);
+        return false;
+    }
+
+    int32_t func_idx = method_it->second;
+    if (func_idx < 0 || func_idx >= static_cast<int32_t>(current_module.functions.size())) {
+        error("Invalid method function index");
+        return false;
+    }
+
+    // Create closure for the method
+    auto closure = std::make_shared<ClosureValue>();
+    closure->function = std::make_shared<FunctionValue>();
+    closure->function->func_id = func_idx;
+    closure->function->arity = current_module.functions[func_idx].arity;
+    closure->function->local_count = current_module.functions[func_idx].local_count;
+    closure->function->max_stack = 256; // default max stack
+    closure->function->name = current_module.functions[func_idx].name;
+
+    // Save current IP in current frame
+    if (!runtime.call_frames.empty()) {
+        runtime.call_frames.back().ip = ip;
+    }
+
+    // Create new call frame
+    if (static_cast<size_t>(runtime.frame_count) >= MAX_CALL_FRAMES) {
+        error("Call stack overflow");
+        return false;
+    }
+
+    // Push closure and args back onto stack for the call
+    runtime.push(Value{ValueTag::CLOSURE, closure});
+    for (const auto& arg : args) {
+        runtime.push(arg);
+    }
+
+    CallFrame frame;
+    frame.closure = closure;
+    frame.ip = 0;
+    frame.base_stack = runtime.stack_top - arg_count;
+    frame.slot_count = closure->function->max_stack > 0 ? closure->function->max_stack : 256;
+    frame.local_count = closure->function->local_count;
+
+    runtime.call_frames.push_back(frame);
+    runtime.frame_count++;
+
+    // Reserve stack space for locals
+    runtime.stack_top = frame.base_stack + frame.local_count;
+
+    // Update current function
+    current_function_idx = func_idx;
+    current_function = &current_module.functions[func_idx];
+    ip = 0;
+
     return true;
 }
 
@@ -2962,6 +3075,20 @@ bool ClawVM::op_alloc_obj() {
     obj->type_name.clear();
     obj->fields.clear();
     obj->marked = false;
+    runtime.push(Value::object_v(obj));
+    return true;
+}
+
+bool ClawVM::op_alloc_obj_type() {
+    int32_t str_idx = static_cast<int32_t>(current_function->code[ip - 1].operand);
+    auto obj = runtime.object_pool.acquire();
+    obj->fields.clear();
+    obj->marked = false;
+    if (str_idx >= 0 && str_idx < static_cast<int32_t>(current_module.constants.values.size())) {
+        obj->type_name = current_module.constants.values[str_idx].str;
+    } else {
+        obj->type_name.clear();
+    }
     runtime.push(Value::object_v(obj));
     return true;
 }

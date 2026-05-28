@@ -951,6 +951,58 @@ public:
         return result;
     }
 
+    // Execute an impl method with arguments
+    // self_var: if non-null, bound as 'self' in the method scope
+    Value execute_impl_method(const claw::ast::ImplMethod& method,
+                              const std::vector<Value>& args,
+                              RuntimeValue* self_var = nullptr) {
+        // Push new variable scope (stack frame)
+        variable_stack.push_back(std::map<std::string, RuntimeValue>());
+
+        // Bind self if provided
+        if (self_var) {
+            variable_stack.back()["self"] = *self_var;
+        }
+
+        // Bind parameters into current stack frame
+        const auto& params = method.params;
+        size_t arg_offset = self_var ? 1 : 0;  // Skip self param if self was bound
+        for (size_t i = arg_offset; i < params.size() && (i - arg_offset) < args.size(); i++) {
+            std::string param_name = params[i].first;
+            if (param_name == "self" && self_var) continue;  // Already bound
+            RuntimeValue param_val;
+            param_val.type_name = params[i].second;
+            param_val.size = 1;
+            param_val.scalar = args[i - arg_offset];
+            variable_stack.back()[param_name] = param_val;
+        }
+
+        // Save caller's return state
+        Value saved_return_value = return_value;
+        bool saved_return_flag = return_flag;
+
+        // Reset return state for this frame
+        return_value = Value();
+        return_flag = false;
+
+        // Execute method body
+        if (method.body) {
+            execute_block(method.body.get());
+        }
+
+        // Capture this frame's return value
+        Value result = return_value;
+
+        // Pop stack frame
+        variable_stack.pop_back();
+
+        // Restore caller's return state
+        return_flag = saved_return_flag;
+        return_value = saved_return_value;
+
+        return result;
+    }
+
     // Execute a block — each block gets its own scope
     void execute_block(claw::ast::ASTNode* node) {
         if (!node) return;
@@ -2113,7 +2165,6 @@ public:
     // Evaluate function call
     Value evaluate_call(claw::ast::CallExpr* call) {
         claw::ast::Expression* callee = call->get_callee();
-
         if (callee->get_kind() == claw::ast::Expression::Kind::Identifier) {
             auto* ident = static_cast<claw::ast::IdentifierExpr*>(callee);
             std::string func_name = ident->get_name();
@@ -2166,6 +2217,45 @@ public:
         if (callee->get_kind() == claw::ast::Expression::Kind::Lambda) {
             auto* lambda = static_cast<claw::ast::LambdaExpr*>(callee);
             return execute_lambda(lambda, call->get_arguments());
+        }
+
+        // Method call: obj.method() or Type.method()
+        if (callee->get_kind() == claw::ast::Expression::Kind::Member) {
+            auto* member = static_cast<claw::ast::MemberExpr*>(callee);
+            std::string method_name = member->get_member();
+
+            // Determine the type name for method lookup
+            std::string type_name;
+            RuntimeValue* obj_var = nullptr;
+
+            // If object is an identifier, check if it's a variable (instance) or type name
+            auto* obj_ident = dynamic_cast<claw::ast::IdentifierExpr*>(member->get_object());
+            if (obj_ident) {
+                obj_var = scoped_get(obj_ident->get_name());
+                if (obj_var && obj_var->is_struct()) {
+                    type_name = obj_var->type_name;
+                } else {
+                    // Treat as type name for static method calls like Point.new()
+                    type_name = obj_ident->get_name();
+                }
+            }
+
+            // Search impl registry for the method
+            if (!type_name.empty()) {
+                auto it = impl_registry.find(type_name);
+                if (it != impl_registry.end()) {
+                    for (const auto& m : it->second) {
+                        if (m.name == method_name) {
+                            // Build argument list from call args (self is handled separately)
+                            std::vector<Value> args;
+                            for (const auto& arg : call->get_arguments()) {
+                                args.push_back(evaluate(arg.get()));
+                            }
+                            return execute_impl_method(m, args, obj_var);
+                        }
+                    }
+                }
+            }
         }
 
         return Value();

@@ -688,7 +688,10 @@ public:
     
 private:
     bytecode::Module current_module;
-    
+
+    // Method dispatch table: type_name -> method_name -> function_index
+    std::map<std::string, std::map<std::string, int32_t>> method_table;
+
     // Instruction handlers
     bool op_nop();
     bool op_push();
@@ -777,7 +780,8 @@ private:
     bool op_ret();
     bool op_ret_null();
     bool op_call_ext();
-    
+    bool op_call_method();
+
     // Functions
     bool op_define_func();
     bool op_closure();
@@ -794,6 +798,7 @@ private:
     
     // Objects
     bool op_alloc_obj();
+    bool op_alloc_obj_type();
     bool op_load_field();
     bool op_store_field();
     bool op_obj_type();

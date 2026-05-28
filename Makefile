@@ -801,6 +801,14 @@ TEST_STRUCT_SOURCES = tests/test_struct.cpp \
     src/type/pattern_checker.cpp \
     src/type/type_inference.cpp
 
+TEST_IMPL_METHODS_SOURCES = tests/test_impl_methods.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp
+
 TEST_FOR_IN_SOURCES = tests/test_for_in.cpp \
     src/ast/ast.cpp \
     src/ast/clone.cpp \
@@ -847,6 +855,14 @@ test-struct: tests/test_struct
 	@./tests/test_struct
 
 .PHONY: test-struct
+
+tests/test_impl_methods: tests/test_impl_methods.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_IMPL_METHODS_SOURCES)
+
+test-impl-methods: tests/test_impl_methods
+	@./tests/test_impl_methods
+
+.PHONY: test-impl-methods
 
 tests/test_for_in: tests/test_for_in.cpp src/lexer/lexer.h src/parser/parser.h tests/claw_test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_FOR_IN_SOURCES)

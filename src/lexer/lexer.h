@@ -359,6 +359,7 @@ inline void Lexer::scan_identifier() {
         type == TokenType::Kw_true ||
         type == TokenType::Kw_false ||
         type == TokenType::Kw_null ||
+        type == TokenType::Kw_self ||
         (type >= TokenType::Type_u8 && type <= TokenType::Type_dma_buffer)) {
         tokens.emplace_back(type, span, text);  // Store original text
     } else {

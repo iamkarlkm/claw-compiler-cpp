@@ -73,6 +73,7 @@ private:
     // 编译方法
     void compileModule(const ast::Program& module);
     void compileFunction(const ast::FunctionStmt& func);
+    void compileImplMethodFunction(const std::string& mangled_name, const ast::ImplMethod& method);
     void compileStatement(const Stmt& stmt);
     void compileExpression(const Expr& expr);
     

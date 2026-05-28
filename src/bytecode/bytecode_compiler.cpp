@@ -170,6 +170,80 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
     in_async_function_ = prevInAsync;
 }
 
+void BytecodeCompiler::compileImplMethodFunction(const std::string& mangled_name, const ast::ImplMethod& method) {
+    bytecode::Function byteFunc;
+    byteFunc.name = mangled_name;
+    byteFunc.arity = static_cast<uint32_t>(method.params.size());
+    byteFunc.local_count = byteFunc.arity;
+
+    // Record parameter types for JIT
+    for (const auto& param : method.params) {
+        const std::string& type_name = param.second;
+        if (type_name == "f64" || type_name == "f32" || type_name == "float") {
+            byteFunc.param_types.push_back(bytecode::ValueType::F64);
+        } else if (type_name == "string" || type_name == "str") {
+            byteFunc.param_types.push_back(bytecode::ValueType::STRING);
+        } else if (type_name == "bool") {
+            byteFunc.param_types.push_back(bytecode::ValueType::BOOL);
+        } else {
+            byteFunc.param_types.push_back(bytecode::ValueType::I64);
+        }
+    }
+
+    // Record return type for JIT
+    const std::string& ret_type = method.return_type;
+    if (ret_type == "f64" || ret_type == "f32" || ret_type == "float") {
+        byteFunc.return_type = bytecode::ValueType::F64;
+    } else if (ret_type == "string" || ret_type == "str") {
+        byteFunc.return_type = bytecode::ValueType::STRING;
+    } else if (ret_type == "bool") {
+        byteFunc.return_type = bytecode::ValueType::BOOL;
+    } else {
+        byteFunc.return_type = bytecode::ValueType::I64;
+    }
+
+    // Save old context
+    auto prevCtx = std::move(ctx_);
+    bool prevInAsync = in_async_function_;
+    ctx_ = std::make_unique<CompilationContext>();
+    ctx_->currentFunction = std::make_shared<bytecode::Function>(byteFunc);
+    ctx_->isClosure = false;
+    ctx_->scopeStack.emplace_back();
+    ctx_->nextSlot = 0;
+    in_async_function_ = false;
+
+    // Allocate parameter slots
+    int slot = 0;
+    for (const auto& param : method.params) {
+        ctx_->scopeStack.back()[param.first] = slot++;
+    }
+    ctx_->nextSlot = slot;
+
+    // Compile function body
+    if (method.body) {
+        compileBlockStmt(*method.body);
+    }
+
+    // Add implicit return if none exists
+    if (ctx_->currentFunction->code.empty() ||
+        ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
+        emitOp(bytecode::OpCode::RET_NULL);
+    }
+
+    // Update local_count to reflect all allocated locals
+    ctx_->currentFunction->local_count = std::max(
+        ctx_->currentFunction->local_count,
+        static_cast<uint32_t>(ctx_->nextSlot)
+    );
+
+    // Add to module
+    module_->functions.push_back(*ctx_->currentFunction);
+
+    // Restore old context
+    ctx_ = std::move(prevCtx);
+    in_async_function_ = prevInAsync;
+}
+
 // ========== 语句编译 ==========
 
 void BytecodeCompiler::compileStatement(const Stmt& stmt) {
@@ -1080,6 +1154,9 @@ void BytecodeCompiler::compileImplStmt(const ast::ImplStmt& stmt) {
         : stmt.get_target_type();
     for (const auto& method : stmt.get_methods()) {
         implRegistry_[key].push_back(method);
+        // Compile method as a bytecode function with mangled name
+        std::string mangled = key + "__" + method.name;
+        compileImplMethodFunction(mangled, method);
     }
 }
 
@@ -1350,7 +1427,8 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
         auto sit = structRegistry_.find(name);
         if (sit != structRegistry_.end()) {
             const auto& field_names = sit->second;
-            emitOp(bytecode::OpCode::ALLOC_OBJ);
+            int type_name_idx = findOrAddString(name);
+            emitOp1(bytecode::OpCode::ALLOC_OBJ_TYPE, type_name_idx);
             const auto& args = expr.get_arguments();
             for (size_t i = 0; i < args.size() && i < field_names.size(); ++i) {
                 compileExpression(*args[i]);
@@ -1385,6 +1463,22 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
             }
             return;
         }
+    }
+
+    std::cerr << "[BC DEBUG] compileCallExpr callee kind=" << (int)expr.get_callee()->get_kind() << "\n";
+    // Method call: obj.method(args...)
+    if (expr.get_callee()->get_kind() == ast::Expression::Kind::Member) {
+        const auto* member = static_cast<const ast::MemberExpr*>(expr.get_callee());
+        // Push object as implicit self argument
+        compileExpression(*member->get_object());
+        // Push explicit arguments
+        for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
+            compileExpression(**it);
+        }
+        int arg_count = static_cast<int>(expr.get_arguments().size()) + 1; // +1 for self
+        int method_name_idx = findOrAddString(member->get_member());
+        emitOp2(bytecode::OpCode::CALL_METHOD, method_name_idx, arg_count);
+        return;
     }
 
     for (auto it = expr.get_arguments().begin(); it != expr.get_arguments().end(); ++it) {
