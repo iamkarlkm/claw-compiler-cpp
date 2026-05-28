@@ -184,7 +184,7 @@ TEST_VM_EVALUATOR_SOURCES = src/auto_scheduler/vm_evaluator.cpp src/auto_schedul
     src/vm/claw_vm.cpp src/vm/webtransport_backend.cpp src/jit/jit_runtime.cpp src/ml/ml_cost_model.cpp src/ml/ml_cost_model_adapter.cpp \
     src/bytecode/bytecode.cpp src/bytecode/bytecode_compiler.cpp src/stdlib/stdlib.cpp
 # Note: test-tensorir removed - no test file exists
-TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/ir/ir.cpp src/ir/ir_enhanced.cpp src/test/test_wasm_ir.cpp
+TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_generator.cpp src/ir/ir_generator_enhanced.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/test/test_wasm_ir.cpp
 TEST_ATTRIBUTE_SOURCES = src/frontend/attribute.cpp src/test/test_attribute.cpp
 TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/test/test_doc_generator.cpp
 TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp test/benchmark_ir_passes.cpp
