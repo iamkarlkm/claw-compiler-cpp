@@ -67,6 +67,62 @@ std::unique_ptr<ast::Expression> AlgebraicSimplifier::try_simplify_binary(const 
         }
     }
 
+    // x - x -> 0 (for side-effect-free expressions: literals and identifiers)
+    if (op == TokenType::Op_minus) {
+        if (left->get_kind() == ast::Expression::Kind::Literal &&
+            right->get_kind() == ast::Expression::Kind::Literal) {
+            auto& l_lit = static_cast<const ast::LiteralExpr&>(*left);
+            auto& r_lit = static_cast<const ast::LiteralExpr&>(*right);
+            if (l_lit.get_value() == r_lit.get_value()) {
+                return std::make_unique<ast::LiteralExpr>(ast::LiteralExpr::Value(int64_t(0)), bin.get_span());
+            }
+        }
+        if (left->get_kind() == ast::Expression::Kind::Identifier &&
+            right->get_kind() == ast::Expression::Kind::Identifier) {
+            auto& l_id = static_cast<const ast::IdentifierExpr&>(*left);
+            auto& r_id = static_cast<const ast::IdentifierExpr&>(*right);
+            if (l_id.get_name() == r_id.get_name()) {
+                return std::make_unique<ast::LiteralExpr>(ast::LiteralExpr::Value(int64_t(0)), bin.get_span());
+            }
+        }
+    }
+
+    // Strength reduction: x * 2 -> x + x, 2 * x -> x + x
+    if (op == TokenType::Op_star) {
+        if (is_int_literal(*right, 2)) {
+            return std::make_unique<ast::BinaryExpr>(TokenType::Op_plus,
+                clone_expr(*left), clone_expr(*left), bin.get_span());
+        }
+        if (is_int_literal(*left, 2)) {
+            return std::make_unique<ast::BinaryExpr>(TokenType::Op_plus,
+                clone_expr(*right), clone_expr(*right), bin.get_span());
+        }
+    }
+
+    // Self-comparison simplification
+    // x < x -> false, x > x -> false
+    // x <= x -> true, x >= x -> true
+    if (op == TokenType::Op_lt || op == TokenType::Op_gt) {
+        if (left->get_kind() == ast::Expression::Kind::Identifier &&
+            right->get_kind() == ast::Expression::Kind::Identifier) {
+            auto& l_id = static_cast<const ast::IdentifierExpr&>(*left);
+            auto& r_id = static_cast<const ast::IdentifierExpr&>(*right);
+            if (l_id.get_name() == r_id.get_name()) {
+                return std::make_unique<ast::LiteralExpr>(false, bin.get_span());
+            }
+        }
+    }
+    if (op == TokenType::Op_lte || op == TokenType::Op_gte) {
+        if (left->get_kind() == ast::Expression::Kind::Identifier &&
+            right->get_kind() == ast::Expression::Kind::Identifier) {
+            auto& l_id = static_cast<const ast::IdentifierExpr&>(*left);
+            auto& r_id = static_cast<const ast::IdentifierExpr&>(*right);
+            if (l_id.get_name() == r_id.get_name()) {
+                return std::make_unique<ast::LiteralExpr>(true, bin.get_span());
+            }
+        }
+    }
+
     // x && true -> x, true && x -> x
     // x && false -> false, false && x -> false
     if (op == TokenType::Op_and) {
@@ -153,6 +209,28 @@ void AlgebraicSimplifier::simplify_expression(std::unique_ptr<ast::Expression>& 
         case ast::Expression::Kind::Unary: {
             auto& un = static_cast<ast::UnaryExpr&>(*expr);
             simplify_expression(un.mutable_operand());
+            // -(-x) -> x
+            if (un.get_operator() == TokenType::Op_minus) {
+                auto* inner = un.get_operand();
+                if (inner && inner->get_kind() == ast::Expression::Kind::Unary) {
+                    auto& inner_un = static_cast<ast::UnaryExpr&>(*inner);
+                    if (inner_un.get_operator() == TokenType::Op_minus) {
+                        expr = inner_un.release_operand();
+                        stats_.expressions_simplified++;
+                    }
+                }
+            }
+            // !(!x) -> x
+            if (un.get_operator() == TokenType::Op_bang) {
+                auto* inner = un.get_operand();
+                if (inner && inner->get_kind() == ast::Expression::Kind::Unary) {
+                    auto& inner_un = static_cast<ast::UnaryExpr&>(*inner);
+                    if (inner_un.get_operator() == TokenType::Op_bang) {
+                        expr = inner_un.release_operand();
+                        stats_.expressions_simplified++;
+                    }
+                }
+            }
             break;
         }
         case ast::Expression::Kind::Call: {
