@@ -199,7 +199,7 @@ TEST_COMPACT_AST_SOURCES = src/ast/ast_compact_repr.cpp src/ast/ast.cpp src/ast/
     test-benchmark test-cuda test-package test-debugger \
     test-auto-scheduler test-wasm test-attribute test-docgen test-vm-evaluator \
     test-ir-passes test-lexer test-aot test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast \
-    test-enum test-struct test-for-in test-struct-bytecode test-parser \
+    test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-parser \
     test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock \
     test-command-stream test-webtransport-bridge test-stream-operators
 
@@ -262,7 +262,7 @@ claw-repl: src/repl_main.cpp $(CORE_NON_MAIN_OBJECTS)
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
