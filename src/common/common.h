@@ -24,7 +24,7 @@ namespace ast {
 
 // Version info
 #define CLAW_VERSION_MAJOR 0
-#define CLAW_VERSION_MINOR 1
+#define CLAW_VERSION_MINOR 2
 #define CLAW_VERSION_PATCH 0
 
 namespace claw {
