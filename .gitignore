@@ -73,4 +73,5 @@ CLAUDE.md
 .brain/state/
 # brain:end gitignore-session
 version
+!VERSION
 claw-coverage
