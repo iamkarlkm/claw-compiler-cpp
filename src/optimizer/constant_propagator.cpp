@@ -105,7 +105,7 @@ void ConstantPropagator::propagate_statement(
                 propagate_expression(*while_stmt.get_condition(), constants);
             }
             if (while_stmt.get_body()) {
-                auto body_constants = constants;
+                std::unordered_map<std::string, const ast::Expression*> body_constants;
                 propagate_statement(static_cast<ast::Statement&>(*while_stmt.get_body()), body_constants);
             }
             constants.clear();
@@ -117,7 +117,7 @@ void ConstantPropagator::propagate_statement(
                 propagate_expression(*for_stmt.get_iterable(), constants);
             }
             if (for_stmt.get_body()) {
-                auto body_constants = constants;
+                std::unordered_map<std::string, const ast::Expression*> body_constants;
                 propagate_statement(static_cast<ast::Statement&>(*for_stmt.get_body()), body_constants);
             }
             constants.clear();
@@ -126,7 +126,7 @@ void ConstantPropagator::propagate_statement(
         case ast::Statement::Kind::Loop: {
             auto& loop = static_cast<ast::LoopStmt&>(stmt);
             if (loop.get_body()) {
-                auto body_constants = constants;
+                std::unordered_map<std::string, const ast::Expression*> body_constants;
                 propagate_statement(static_cast<ast::Statement&>(*loop.get_body()), body_constants);
             }
             constants.clear();

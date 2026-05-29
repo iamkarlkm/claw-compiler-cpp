@@ -227,9 +227,9 @@ CLAW_TEST(no_propagate_across_while) {
     optimizer::PropagationStats stats;
     bool changed = optimizer::propagate_constants(program, &stats);
 
-    // Propagation happens inside the while body, but outer constants are cleared after
-    CLAW_ASSERT(changed);
-    CLAW_ASSERT_EQ(stats.variables_replaced, 1);
+    // Outer constants are not propagated into loop bodies
+    CLAW_ASSERT_FALSE(changed);
+    CLAW_ASSERT_EQ(stats.variables_replaced, 0);
 
     return test::TestStatus::Pass;
 }
