@@ -200,6 +200,18 @@ fn main() {
 - **多目标支持**: x86-64 / ARM64 / RISC-V64
 - **线性扫描寄存器分配器**
 
+### AST 优化器
+编译器在 AST 层执行多遍优化，支持 `-O0` / `-O1` / `-O2` / `-O3`：
+- **常量传播 (Constant Propagation)**: 将变量引用替换为已知的常量值
+- **常量折叠 (Constant Folding)**: 编译期计算常量表达式
+- **代数简化 (Algebraic Simplification)**: `x + 0 → x`、`x * 1 → x`、`-(-x) → x`、强度消减
+- **死代码消除 (Dead Code Elimination)**: 删除不可达代码和无用赋值
+- **控制流简化 (Control Flow Simplification)**: `if true { A } else { B } → A`
+- **函数内联 (Function Inlining)**: 小函数自动内联
+- **尾调用优化 (Tail Call Optimization)**: 递归尾调用转循环
+- **树摇 (Tree Shaking)**: 删除未使用的函数和变量
+- **迭代收敛**: `-O2`/`-O3` 下多轮优化直到无法再改进
+
 ### 包管理器
 - `Claw.toml` 清单解析 (TOML-like 语法)
 - SemVer 版本解析与约束匹配 (`^`, `~`, `>=`, 范围)
@@ -300,6 +312,15 @@ make test-cuda         # CUDA 代码生成 (17 测试)
 make test-package      # 包管理器 (24 测试)
 make test-attribute    # 属性/宏系统 (17 测试)
 make test-docgen       # 文档生成器 (16 测试)
+make test-constant-folder       # 常量折叠
+make test-constant-propagator   # 常量传播
+make test-algebraic-simplifier  # 代数简化
+make test-dead-code-eliminator  # 死代码消除
+make test-control-flow-simplifier # 控制流简化
+make test-function-inliner      # 函数内联
+make test-tail-call-optimizer   # 尾调用优化
+make test-tree-shaker           # 树摇
+make test-peephole-optimizer    # 窥孔优化
 make test-ir-passes    # IR 优化遍
 make test-lexer        # 词法分析器 (29 测试)
 make test-aot                 # AOT 端到端测试 (17 测试)
