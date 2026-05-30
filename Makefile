@@ -516,10 +516,12 @@ $(COVERAGE_DIR)/%.o: %.cpp
 claw-coverage: $(COVERAGE_OBJECTS)
 	$(CXX) $(COVERAGE_FLAGS) -o claw-coverage $(COVERAGE_OBJECTS) $(LDFLAGS)
 
-coverage: clean claw-coverage
+coverage:
 	@echo "Running coverage build..."
 	@command -v lcov >/dev/null 2>&1 || { echo "ERROR: lcov not found. Install with: brew install lcov  (macOS) or apt install lcov (Linux)"; exit 1; }
 	@command -v genhtml >/dev/null 2>&1 || { echo "ERROR: genhtml not found. Install with: brew install lcov  (macOS) or apt install lcov (Linux)"; exit 1; }
+	@$(MAKE) clean
+	@$(MAKE) claw-coverage
 	@rm -rf coverage-report
 	@mkdir -p coverage-report
 	@echo "Running tests with coverage instrumentation..."
