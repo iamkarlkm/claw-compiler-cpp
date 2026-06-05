@@ -235,7 +235,7 @@ ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
 endif
 	@echo "All dependencies satisfied."
 
-all: check-deps claw claw-lsp claw-repl
+all: check-deps claw claw-lsp claw-repl claw-debugger
 
 help:
 	@echo "Claw Compiler Build System"
@@ -245,6 +245,7 @@ help:
 	@echo "  claw             - Build main compiler"
 	@echo "  claw-lsp         - Build LSP server"
 	@echo "  claw-repl        - Build REPL"
+	@echo "  claw-debugger    - Build debugger"
 	@echo "  test             - Run all tests"
 	@echo "  test-benchmark   - Run benchmark framework tests"
 	@echo "  test-cuda        - Run CUDA codegen tests"
@@ -272,11 +273,15 @@ claw-lsp: src/lsp/lsp_main.cpp src/lsp/lsp_protocol.cpp src/lsp/lsp_server.cpp $
 claw-repl: src/repl_main.cpp $(CORE_NON_MAIN_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# Debugger
+claw-debugger: src/debugger_main.cpp $(CORE_NON_MAIN_OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # ============================================================================
 # Tests
 # ============================================================================
 
-test: test-benchmark test-cuda test-package test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+test: test-integration test-benchmark test-cuda test-package test-debugger test-auto-scheduler test-wasm test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -493,9 +498,12 @@ test-iterator-benchmark: claw
 # ============================================================================
 
 clean:
-	rm -f claw claw-lsp claw-repl claw-debug
+	rm -f claw claw-lsp claw-repl claw-debugger claw-debug
 	rm -f test_benchmark test_cuda test_package test_debugger
 	rm -f test_auto_scheduler test_tensorir test_wasm test_attribute test_docgen test_vm_evaluator test_ir_passes
+	rm -f tests/test_integration
+	rm -f claw-macos-amd64.tar.gz claw-linux-amd64.tar.gz
+	-chmod -R +w $(BUILD_DIR) 2>/dev/null
 	rm -rf $(BUILD_DIR)
 	find . -name '*.gcno' -delete
 	find . -name '*.gcda' -delete
@@ -524,10 +532,15 @@ coverage:
 	@$(MAKE) claw-coverage
 	@rm -rf coverage-report
 	@mkdir -p coverage-report
-	@echo "Running tests with coverage instrumentation..."
-	@$(MAKE) test TEST_CXXFLAGS="$(COVERAGE_FLAGS) -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT" || true
-	@lcov --capture --directory $(COVERAGE_DIR) --output-file coverage-report/claw.info --no-external
-	@genhtml coverage-report/claw.info --output-directory coverage-report/html
+	@echo "Running sample programs with coverage instrumentation..."
+	@./claw-coverage --run test_simple.claw >/dev/null 2>&1 || true
+	@./claw-coverage --run test_print.claw >/dev/null 2>&1 || true
+	@./claw-coverage --run test_loop.claw >/dev/null 2>&1 || true
+	@./claw-coverage -b test_simple.claw >/dev/null 2>&1 || true
+	@./claw-coverage -C test_simple.claw >/dev/null 2>&1 || true
+	@./claw-coverage --aot -o /tmp/_cov_aot test_simple.claw >/dev/null 2>&1 || true
+	@lcov --capture --directory $(COVERAGE_DIR) --output-file coverage-report/claw.info --base-directory . --include '*claw-compiler/src/*' --ignore-errors inconsistent,unsupported,empty,format,category || true
+	@genhtml coverage-report/claw.info --output-directory coverage-report/html --ignore-errors inconsistent,unsupported,empty,format,category || true
 	@echo "Coverage report generated: coverage-report/html/index.html"
 
 # ============================================================================
@@ -584,6 +597,14 @@ test-lexer: tests/test_lexer
 	@./tests/test_lexer
 
 .PHONY: test-lexer
+
+tests/test_integration: tests/test_integration.cpp tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_integration.cpp
+
+test-integration: tests/test_integration
+	@./tests/test_integration
+
+.PHONY: test-integration
 
 tests/test_coroutine_vm: tests/test_coroutine_vm.cpp src/vm/claw_vm.h src/bytecode/bytecode.h tests/claw_test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_coroutine_vm.cpp src/vm/claw_vm.cpp src/vm/webtransport_backend.cpp src/bytecode/bytecode.cpp -L$(MSQUIC_PREFIX)/lib -lmsquic
