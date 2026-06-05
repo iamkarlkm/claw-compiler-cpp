@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install llvm
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> $GITHUB_ENV
+
+      - name: Build release binaries
+        run: make all
+
+      - name: Run tests
+        run: make test
+
+      - name: Package
+        run: |
+          mkdir -p claw-macos/bin
+          cp claw claw-lsp claw-repl claw-debugger claw-macos/bin/
+          cp -r docs claw-macos/
+          cp README.md LICENSE claw-macos/ 2>/dev/null || true
+          tar czf claw-macos-amd64.tar.gz claw-macos
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-macos-amd64
+          path: claw-macos-amd64.tar.gz
+
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev
+
+      - name: Build release binaries
+        run: make all CXX=clang++
+
+      - name: Run tests
+        run: make test CXX=clang++
+
+      - name: Package
+        run: |
+          mkdir -p claw-linux/bin
+          cp claw claw-lsp claw-repl claw-debugger claw-linux/bin/
+          cp -r docs claw-linux/
+          cp README.md LICENSE claw-linux/ 2>/dev/null || true
+          tar czf claw-linux-amd64.tar.gz claw-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-linux-amd64
+          path: claw-linux-amd64.tar.gz
+
+  checksums:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        id: hash
+        run: |
+          cd artifacts
+          sha256sum */*.tar.gz > ../SHA256SUMS
+          cat ../SHA256SUMS
+          echo "hashes=$(cat ../SHA256SUMS | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: SHA256SUMS
+
+  create-release:
+    needs: [checksums]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: checksums
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*
+            SHA256SUMS
+          generate_release_notes: true
+
+  docker:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
