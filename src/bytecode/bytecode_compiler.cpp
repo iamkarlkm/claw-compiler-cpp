@@ -150,10 +150,17 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
         }
     }
     
-    // 如果没有显式返回，添加 null 返回
+    // 如果没有显式返回，处理隐式返回
     if (ctx_->currentFunction->code.empty() ||
         ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
-        emitOp(bytecode::OpCode::RET_NULL);
+        // 如果最后一条指令是 POP（来自表达式语句），将其替换为 RET
+        // 以支持隐式返回（函数体最后一个表达式的值作为返回值）
+        if (!ctx_->currentFunction->code.empty() &&
+            ctx_->currentFunction->code.back().op == bytecode::OpCode::POP) {
+            ctx_->currentFunction->code.back().op = bytecode::OpCode::RET;
+        } else {
+            emitOp(bytecode::OpCode::RET_NULL);
+        }
     }
     
     // Update local_count to reflect all allocated locals
@@ -227,7 +234,12 @@ void BytecodeCompiler::compileImplMethodFunction(const std::string& mangled_name
     // Add implicit return if none exists
     if (ctx_->currentFunction->code.empty() ||
         ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
-        emitOp(bytecode::OpCode::RET_NULL);
+        if (!ctx_->currentFunction->code.empty() &&
+            ctx_->currentFunction->code.back().op == bytecode::OpCode::POP) {
+            ctx_->currentFunction->code.back().op = bytecode::OpCode::RET;
+        } else {
+            emitOp(bytecode::OpCode::RET_NULL);
+        }
     }
 
     // Update local_count to reflect all allocated locals
@@ -530,6 +542,8 @@ void BytecodeCompiler::compileMatchStmt(const ast::MatchStmt& stmt) {
                     emitConst(v);
                 } else if constexpr (std::is_same_v<T, char>) {
                     emitConst(std::string(1, v));
+                } else {
+                    // monostate, ArrayValue, DictValue, SetValue not valid in literal patterns
                 }
             }, lp->get_value());
             emitOp(bytecode::OpCode::EQ);
@@ -1266,6 +1280,17 @@ void BytecodeCompiler::compileExpression(const Expr& expr) {
         case ast::Expression::Kind::Identifier:
             compileIdentifierExpr(static_cast<const ast::IdentifierExpr&>(expr));
             break;
+        case ast::Expression::Kind::Path: {
+            const auto& path = static_cast<const ast::PathExpr&>(expr);
+            std::string full_name;
+            const auto& segments = path.get_segments();
+            for (size_t i = 0; i < segments.size(); i++) {
+                if (i > 0) full_name += "::";
+                full_name += segments[i];
+            }
+            emitLoadGlobal(full_name);
+            break;
+        }
         case ast::Expression::Kind::Binary:
             compileBinaryExpr(static_cast<const ast::BinaryExpr&>(expr));
             break;
@@ -1297,8 +1322,51 @@ void BytecodeCompiler::compileExpression(const Expr& expr) {
         case ast::Expression::Kind::Command:
             compileCommandExpr(static_cast<const ast::CommandExpr&>(expr));
             break;
+        case ast::Expression::Kind::InterpolatedString:
+            compileInterpolatedStringExpr(static_cast<const ast::InterpolatedStringExpr&>(expr));
+            break;
         default:
             errorf("Unknown expression type: %d", (int)expr.get_kind());
+    }
+}
+
+void BytecodeCompiler::compileInterpolatedStringExpr(const ast::InterpolatedStringExpr& expr) {
+    const auto& segments = expr.get_segments();
+    if (segments.empty()) {
+        emitConst(std::string(""));
+        return;
+    }
+
+    // Compile first segment
+    compileFirstSegment(segments[0]);
+
+    // For each subsequent segment, compile it and then concatenate
+    for (size_t i = 1; i < segments.size(); i++) {
+        compileSegment(segments[i]);
+        // Convert to string if needed, then concatenate
+        int str_idx = findOrAddString("str_concat");
+        emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 2);
+    }
+}
+
+void BytecodeCompiler::compileFirstSegment(const ast::InterpolatedStringExpr::Segment& seg) {
+    if (seg.is_expr) {
+        compileExpression(*seg.expr);
+        // Ensure it's a string by calling string() builtin
+        int str_idx = findOrAddString("string");
+        emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 1);
+    } else {
+        emitConst(seg.text);
+    }
+}
+
+void BytecodeCompiler::compileSegment(const ast::InterpolatedStringExpr::Segment& seg) {
+    if (seg.is_expr) {
+        compileExpression(*seg.expr);
+        int str_idx = findOrAddString("string");
+        emitOp2(bytecode::OpCode::CALL_EXT, str_idx, 1);
+    } else {
+        emitConst(seg.text);
     }
 }
 
@@ -1380,6 +1448,24 @@ void BytecodeCompiler::compileCallExpr(const ast::CallExpr& expr) {
         "channel", "ch_send", "ch_recv", "ch_try_send", "ch_try_recv", "ch_close",
         "stream_next", "stream_map", "stream_filter", "stream_buffer", "stream_merge",
         "command_send", "command_register",
+        // I/O
+        "read_file", "write_file", "append_file",
+        // String
+        "str_len", "str_contains", "str_find", "str_replace", "str_split",
+        "str_upper", "str_lower", "str_trim", "str_substring", "str_starts_with",
+        "str_ends_with", "str_reverse", "str_repeat", "str_join", "format",
+        // Math
+        "abs", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "pow",
+        "exp", "log", "log10", "floor", "ceil", "round", "trunc", "min", "max",
+        "sign", "pi", "e", "random", "random_int", "random_seed",
+        // Array
+        "arr_len", "arr_push", "arr_pop", "arr_insert", "arr_remove", "arr_sort",
+        "arr_reverse", "arr_find", "arr_contains", "arr_unique", "arr_concat",
+        "arr_slice", "arr_range", "arr_fill",
+        // File
+        "file_exists", "file_remove", "file_rename", "file_size", "mkdir",
+        // Type conversion
+        "to_int", "to_float", "to_string", "to_bool", "type_of",
 #ifdef CLAW_ENABLE_WEBTRANSPORT
         "wt_connect", "wt_send", "wt_recv", "wt_recv_timeout", "wt_close", "wt_ready",
         "wt_open_stream", "wt_stream_send", "wt_stream_recv", "wt_stream_close",
