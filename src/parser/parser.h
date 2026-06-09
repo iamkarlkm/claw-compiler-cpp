@@ -75,10 +75,12 @@ private:
     std::unique_ptr<ast::Statement> parse_let_statement();
     std::unique_ptr<ast::Statement> parse_const_statement();
     std::unique_ptr<ast::Statement> parse_if_statement();
+    std::unique_ptr<ast::Statement> parse_if_let_statement();
     std::unique_ptr<ast::Statement> parse_match_statement();
     std::unique_ptr<ast::Statement> parse_for_statement();
     std::unique_ptr<ast::Statement> parse_for_await_statement();
     std::unique_ptr<ast::Statement> parse_while_statement();
+    std::unique_ptr<ast::Statement> parse_while_let_statement();
     std::unique_ptr<ast::Statement> parse_loop_statement();
     std::unique_ptr<ast::Statement> parse_return_statement();
     std::unique_ptr<ast::Statement> parse_break_statement();
@@ -96,11 +98,13 @@ private:
     std::unique_ptr<ast::Statement> parse_enum_statement();
     std::unique_ptr<ast::Statement> parse_impl_statement();
     std::unique_ptr<ast::Statement> parse_trait_statement();
+    std::unique_ptr<ast::Statement> parse_type_alias_statement();
     std::unique_ptr<ast::Statement> parse_use_statement();
     std::unique_ptr<ast::Statement> parse_module_statement();
 
     // Helper methods
     std::unique_ptr<ast::Statement> parse_block_statement();
+    std::unique_ptr<ast::Expression> parse_interpolated_string(const Token& tok);
     SourceSpan span_from(const Token& start, const Token& end) const;
     SourceSpan span_from(const Token& start) const;
     
@@ -181,20 +185,30 @@ inline Token& Parser::advance() {
 // Synchronization point for error recovery
 inline Token& Parser::synchronize() {
     advance();
-    
+
     while (!is_at_end()) {
         if (previous().type == TokenType::Semicolon) {
             return peek();
         }
-        
+
         if (check_any({TokenType::Kw_fn, TokenType::Kw_let, TokenType::Kw_if,
-                     TokenType::Kw_for, TokenType::Kw_return})) {
+                     TokenType::Kw_for, TokenType::Kw_return, TokenType::Kw_while,
+                     TokenType::Kw_loop, TokenType::Kw_match, TokenType::Kw_try,
+                     TokenType::Kw_throw, TokenType::Kw_break, TokenType::Kw_continue,
+                     TokenType::Kw_struct, TokenType::Kw_enum, TokenType::Kw_use,
+                     TokenType::Kw_mod, TokenType::Kw_trait, TokenType::Kw_impl,
+                     TokenType::Kw_publish, TokenType::Kw_subscribe, TokenType::Kw_handle,
+                     TokenType::Kw_async, TokenType::Kw_serial, TokenType::Kw_process})) {
             return peek();
         }
-        
+
+        if (check(TokenType::RBrace)) {
+            return peek();
+        }
+
         advance();
     }
-    
+
     return peek();
 }
 
@@ -216,6 +230,7 @@ inline std::unique_ptr<ast::Program> Parser::parse() {
 
     while (!is_at_end()) {
         // Try parsing without exception
+        size_t errors_before = reporter ? reporter->get_error_count() : 0;
         auto decl = parse_declaration();
         if (decl) {
             program->add_declaration(std::move(decl));
@@ -226,7 +241,8 @@ inline std::unique_ptr<ast::Program> Parser::parse() {
             }
         } else if (!is_at_end()) {
             // Parse failed, try to recover
-            if (reporter) {
+            // Only report generic error if no specific error was already reported
+            if (reporter && reporter->get_error_count() == errors_before) {
                 reporter->error("Parse error at token", span_from(peek()), "P999");
             }
             synchronize();
@@ -303,6 +319,11 @@ inline std::unique_ptr<ast::Statement> Parser::parse_declaration() {
     // Check for trait declaration
     if (check(TokenType::Kw_trait)) {
         return parse_trait_statement();
+    }
+
+    // Check for type alias declaration
+    if (check(TokenType::Kw_type)) {
+        return parse_type_alias_statement();
     }
 
     // Check for impl block
@@ -821,12 +842,17 @@ inline std::unique_ptr<ast::Statement> Parser::parse_const_statement() {
 // Parse if statement
 inline std::unique_ptr<ast::Statement> Parser::parse_if_statement() {
     auto if_stmt = std::make_unique<ast::IfStmt>(span_from(peek()));
-    
+
     // Expect 'if'
     if (!match(TokenType::Kw_if)) {
         return nullptr;
     }
-    
+
+    // Check for 'if let'
+    if (check(TokenType::Kw_let)) {
+        return parse_if_let_statement();
+    }
+
     // Parse condition
     auto condition = parse_expression();
     
@@ -863,6 +889,82 @@ inline std::unique_ptr<ast::Statement> Parser::parse_if_statement() {
     }
     
     return if_stmt;
+}
+
+// Parse if let statement: if let pattern = expr { body } else { body }
+// Desugars to: { let __if_let_s = expr; match __if_let_s { pattern => body, _ => else_body } }
+inline std::unique_ptr<ast::Statement> Parser::parse_if_let_statement() {
+    // 'if' already consumed; expect 'let'
+    if (!match(TokenType::Kw_let)) {
+        return nullptr;
+    }
+
+    auto span = span_from(previous());
+
+    // Parse pattern
+    auto pattern = parse_pattern();
+    if (!pattern) {
+        return nullptr;
+    }
+
+    // Expect '='
+    if (!check(TokenType::Op_eq_assign)) {
+        if (reporter) {
+            reporter->error("Expected '=' after pattern in if let", span_from(peek()), "P071");
+        }
+        return nullptr;
+    }
+    advance(); // consume '='
+
+    // Parse initializer expression
+    auto init = parse_expression();
+
+    // Parse then body
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after if let initializer", span_from(peek()), "P072");
+        }
+        return nullptr;
+    }
+    auto then_body = parse_block();
+
+    // Parse optional else body
+    std::unique_ptr<ast::Statement> else_body;
+    if (check(TokenType::Kw_else)) {
+        advance(); // consume 'else'
+        if (check(TokenType::Kw_if)) {
+            // else if: parse as nested if statement
+            else_body = parse_if_statement();
+        } else if (check(TokenType::LBrace)) {
+            else_body = parse_block();
+        } else {
+            if (reporter) {
+                reporter->error("Expected 'if' or '{' after 'else'", span_from(peek()), "P015");
+            }
+            return nullptr;
+        }
+    }
+
+    // Desugar into block with let + match
+    auto block = std::make_unique<ast::BlockStmt>(span);
+
+    auto let_stmt = std::make_unique<ast::LetStmt>("__if_let_s", span);
+    let_stmt->set_initializer(std::move(init));
+    block->add_statement(std::move(let_stmt));
+
+    auto match_expr = std::make_unique<ast::IdentifierExpr>("__if_let_s", span);
+    auto match_stmt = std::make_unique<ast::MatchStmt>(std::move(match_expr), span);
+    match_stmt->add_case(std::move(pattern), std::move(then_body));
+
+    if (else_body) {
+        match_stmt->add_case(std::make_unique<ast::WildcardPattern>(span), std::move(else_body));
+    } else {
+        auto empty_block = std::make_unique<ast::BlockStmt>(span);
+        match_stmt->add_case(std::make_unique<ast::WildcardPattern>(span), std::move(empty_block));
+    }
+
+    block->add_statement(std::move(match_stmt));
+    return block;
 }
 
 // Parse match statement
@@ -1033,7 +1135,12 @@ inline std::unique_ptr<ast::Statement> Parser::parse_while_statement() {
     if (!match(TokenType::Kw_while)) {
         return nullptr;
     }
-    
+
+    // Check for 'while let'
+    if (check(TokenType::Kw_let)) {
+        return parse_while_let_statement();
+    }
+
     // Parse condition
     auto condition = parse_expression();
     
@@ -1048,6 +1155,61 @@ inline std::unique_ptr<ast::Statement> Parser::parse_while_statement() {
     
     return std::make_unique<ast::WhileStmt>(std::move(condition), std::move(body),
                                             span_from(previous()));
+}
+
+// Parse while let statement: while let pattern = expr { body }
+// Desugars to: loop { let __wl_s = expr; match __wl_s { pattern => body, _ => break } }
+inline std::unique_ptr<ast::Statement> Parser::parse_while_let_statement() {
+    // 'while' already consumed; expect 'let'
+    if (!match(TokenType::Kw_let)) {
+        return nullptr;
+    }
+
+    auto span = span_from(previous());
+
+    // Parse pattern
+    auto pattern = parse_pattern();
+    if (!pattern) {
+        return nullptr;
+    }
+
+    // Expect '='
+    if (!check(TokenType::Op_eq_assign)) {
+        if (reporter) {
+            reporter->error("Expected '=' after pattern in while let", span_from(peek()), "P073");
+        }
+        return nullptr;
+    }
+    advance(); // consume '='
+
+    // Parse initializer expression
+    auto init = parse_expression();
+
+    // Parse body
+    if (!check(TokenType::LBrace)) {
+        if (reporter) {
+            reporter->error("Expected '{' after while let initializer", span_from(peek()), "P074");
+        }
+        return nullptr;
+    }
+    auto body = parse_block();
+
+    // Desugar into loop with let + match + break
+    auto loop_block = std::make_unique<ast::BlockStmt>(span);
+
+    auto let_stmt = std::make_unique<ast::LetStmt>("__wl_s", span);
+    let_stmt->set_initializer(std::move(init));
+    loop_block->add_statement(std::move(let_stmt));
+
+    auto match_expr = std::make_unique<ast::IdentifierExpr>("__wl_s", span);
+    auto match_stmt = std::make_unique<ast::MatchStmt>(std::move(match_expr), span);
+    match_stmt->add_case(std::move(pattern), std::move(body));
+    match_stmt->add_case(std::make_unique<ast::WildcardPattern>(span),
+                         std::make_unique<ast::BreakStmt>(span));
+
+    loop_block->add_statement(std::move(match_stmt));
+
+    return std::make_unique<ast::LoopStmt>(std::move(loop_block), span);
 }
 
 // Parse loop statement (infinite loop)
@@ -1437,6 +1599,7 @@ inline std::unique_ptr<ast::Statement> Parser::parse_block() {
             continue;
         }
         
+        size_t errors_before = reporter ? reporter->get_error_count() : 0;
         auto stmt = parse_declaration();
         if (stmt) {
             // Consume optional semicolon for statements inside blocks
@@ -1446,7 +1609,14 @@ inline std::unique_ptr<ast::Statement> Parser::parse_block() {
             }
             block->add_statement(std::move(stmt));
         } else {
-            break;
+            // Statement failed to parse - try to recover and continue
+            if (!is_at_end() && !check(TokenType::RBrace)) {
+                // Only report generic error if no specific error was already reported
+                if (reporter && reporter->get_error_count() == errors_before) {
+                    reporter->error("Parse error at token", span_from(peek()), "P999");
+                }
+                synchronize();
+            }
         }
     }
     
@@ -2422,6 +2592,12 @@ inline std::unique_ptr<ast::Pattern> Parser::parse_primary_pattern() {
         return std::make_unique<ast::LiteralPattern>(
             ast::LiteralPattern::Value(val), span_from(previous()));
     }
+    if (check(TokenType::RawString)) {
+        std::string val = peek().text;
+        advance();
+        return std::make_unique<ast::LiteralPattern>(
+            ast::LiteralPattern::Value(val), span_from(previous()));
+    }
     if (match(TokenType::Kw_true)) {
         return std::make_unique<ast::LiteralPattern>(
             true, span_from(previous()));
@@ -3001,7 +3177,19 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         advance();
         return std::make_unique<ast::IdentifierExpr>("<error>", span_from(tok));
     }
-    
+
+    // Raw string literal
+    if (check(TokenType::RawString)) {
+        const Token& tok = peek();
+        if (tok.value.index() == 3) {  // std::string
+            auto value = std::get<3>(tok.value);
+            advance();
+            return std::make_unique<ast::LiteralExpr>(LiteralValue(value), span_from(tok));
+        }
+        advance();
+        return std::make_unique<ast::IdentifierExpr>("<error>", span_from(tok));
+    }
+
     // Byte literal
     if (check(TokenType::ByteLiteral)) {
         const Token& tok = peek();  // Get current token
@@ -3014,10 +3202,17 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return std::make_unique<ast::IdentifierExpr>("<error>", span_from(tok));
     }
     
-    // Array literal [a, b, c]
+    // Interpolated string literal f"hello {name}!"
+    if (check(TokenType::InterpolatedString)) {
+        const Token& tok = peek();
+        advance();
+        return parse_interpolated_string(tok);
+    }
+
+    // Array literal [a, b, c] or list comprehension [x*2 for x in arr if x > 0]
     if (check(TokenType::LBracket)) {
         advance(); // consume '['
-        
+
         // Check for empty array: []
         if (check(TokenType::RBracket)) {
             advance(); // consume ']'
@@ -3026,16 +3221,64 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
                 span_from(previous())
             );
         }
-        
+
+        auto first_expr = parse_expression();
+
+        // Check for list comprehension: [expr for x in iter if cond]
+        if (check(TokenType::Kw_for)) {
+            advance(); // consume 'for'
+
+            if (!check(TokenType::Identifier)) {
+                if (reporter) {
+                    reporter->error("Expected loop variable after 'for'", span_from(peek()), "P094");
+                }
+                return std::make_unique<ast::ArrayExpr>(
+                    std::vector<std::unique_ptr<ast::Expression>>{}, span_from(previous()));
+            }
+            advance();
+            std::string loop_var = previous().text;
+
+            if (!check(TokenType::Kw_in)) {
+                if (reporter) {
+                    reporter->error("Expected 'in' after loop variable", span_from(peek()), "P095");
+                }
+                return std::make_unique<ast::ArrayExpr>(
+                    std::vector<std::unique_ptr<ast::Expression>>{}, span_from(previous()));
+            }
+            advance(); // consume 'in'
+
+            auto iterable = parse_expression();
+
+            // Optional filter condition
+            std::unique_ptr<ast::Expression> filter;
+            if (check(TokenType::Kw_if)) {
+                advance(); // consume 'if'
+                filter = parse_expression();
+            }
+
+            if (!check(TokenType::RBracket)) {
+                if (reporter) {
+                    reporter->error("Expected ']' after list comprehension", span_from(peek()), "P096");
+                }
+            } else {
+                advance(); // consume ']'
+            }
+
+            return std::make_unique<ast::ListComprehensionExpr>(
+                std::move(first_expr), std::move(loop_var),
+                std::move(iterable), std::move(filter), span_from(previous()));
+        }
+
+        // Regular array literal
         std::vector<std::unique_ptr<ast::Expression>> elements;
-        elements.push_back(parse_expression());
-        
+        elements.push_back(std::move(first_expr));
+
         while (check(TokenType::Comma)) {
             advance(); // consume ','
             if (check(TokenType::RBracket)) break; // trailing comma
             elements.push_back(parse_expression());
         }
-        
+
         if (!check(TokenType::RBracket)) {
             if (reporter) {
                 reporter->error("Expected ']' after array elements", span_from(peek()), "P050");
@@ -3043,14 +3286,33 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         } else {
             advance(); // consume ']'
         }
-        
+
         return std::make_unique<ast::ArrayExpr>(std::move(elements), span_from(previous()));
     }
     
-    // Lambda expression: fn(a: i64, b: i64) -> i64 { a + b }
+    // Lambda expression: fn [x, y](a: i64, b: i64) -> i64 { a + b }
     if (check(TokenType::Kw_fn)) {
         advance(); // consume 'fn'
         auto lambda = std::make_unique<ast::LambdaExpr>(span_from(previous()));
+
+        // Parse optional capture list: [x, y]
+        if (check(TokenType::LBracket)) {
+            advance(); // consume '['
+            std::vector<std::string> captures;
+            while (!check(TokenType::RBracket) && !is_at_end()) {
+                if (check(TokenType::Identifier)) {
+                    advance();
+                    captures.push_back(previous().text);
+                }
+                if (check(TokenType::Comma)) {
+                    advance();
+                }
+            }
+            if (check(TokenType::RBracket)) {
+                advance(); // consume ']'
+            }
+            lambda->set_captures(std::move(captures));
+        }
 
         // Parse parameters
         std::vector<std::pair<std::string, std::string>> params;
@@ -3114,10 +3376,29 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         return parse_command_expression();
     }
 
-    // Identifier (including self)
+    // Identifier (including self) or path expression
     if (check(TokenType::Identifier) || check(TokenType::Kw_self)) {
         advance();  // consume identifier first
         auto name = previous().text;
+
+        // Check for path expression: ident (:: ident)*
+        if (check(TokenType::ScopeResolution)) {
+            std::vector<std::string> segments;
+            segments.push_back(name);
+            while (check(TokenType::ScopeResolution)) {
+                advance(); // consume '::'
+                if (!check(TokenType::Identifier) && !check(TokenType::Kw_self)) {
+                    if (reporter) {
+                        reporter->error("Expected identifier after '::'", span_from(peek()), "P090");
+                    }
+                    break;
+                }
+                advance();
+                segments.push_back(previous().text);
+            }
+            return std::make_unique<ast::PathExpr>(std::move(segments), span_from(previous()));
+        }
+
         return std::make_unique<ast::IdentifierExpr>(name, span_from(previous()));
     }
 
@@ -3169,13 +3450,165 @@ inline std::unique_ptr<ast::Expression> Parser::parse_primary() {
         
         return std::make_unique<ast::TupleExpr>(std::move(elements), span_from(previous()));
     }
-    
+
+    // Dict literal {k: v, ...}, Set literal {elem1, ...}, or comprehensions
+    if (check(TokenType::LBrace)) {
+        advance(); // consume '{'
+
+        // Empty dict: {}
+        if (check(TokenType::RBrace)) {
+            advance(); // consume '}'
+            return std::make_unique<ast::DictExpr>(
+                std::vector<std::pair<std::unique_ptr<ast::Expression>, std::unique_ptr<ast::Expression>>>{},
+                span_from(previous())
+            );
+        }
+
+        // Parse first expression to determine if dict or set
+        auto first_expr = parse_expression();
+
+        // Check if it's a dict entry (key: value)
+        if (check(TokenType::Colon)) {
+            advance(); // consume ':'
+            auto first_value = parse_expression();
+
+            // Dict comprehension: {k: v for x in iter if cond}
+            if (check(TokenType::Kw_for)) {
+                advance(); // consume 'for'
+                if (!check(TokenType::Identifier)) {
+                    if (reporter) reporter->error("Expected loop variable after 'for'", span_from(peek()), "P094");
+                    return std::make_unique<ast::DictExpr>(std::vector<std::pair<std::unique_ptr<ast::Expression>, std::unique_ptr<ast::Expression>>>{}, span_from(previous()));
+                }
+                advance();
+                std::string loop_var = previous().text;
+                if (!check(TokenType::Kw_in)) {
+                    if (reporter) reporter->error("Expected 'in' after loop variable", span_from(peek()), "P095");
+                    return std::make_unique<ast::DictExpr>(std::vector<std::pair<std::unique_ptr<ast::Expression>, std::unique_ptr<ast::Expression>>>{}, span_from(previous()));
+                }
+                advance(); // consume 'in'
+                auto iterable = parse_expression();
+                std::unique_ptr<ast::Expression> filter;
+                if (check(TokenType::Kw_if)) {
+                    advance(); // consume 'if'
+                    filter = parse_expression();
+                }
+                if (check(TokenType::RBrace)) advance();
+                return std::make_unique<ast::DictComprehensionExpr>(
+                    std::move(first_expr), std::move(first_value), std::move(loop_var),
+                    std::move(iterable), std::move(filter), span_from(previous()));
+            }
+
+            // Regular dict literal
+            std::vector<std::pair<std::unique_ptr<ast::Expression>, std::unique_ptr<ast::Expression>>> entries;
+            entries.emplace_back(std::move(first_expr), std::move(first_value));
+
+            while (check(TokenType::Comma)) {
+                advance(); // consume ','
+                if (check(TokenType::RBrace)) break; // trailing comma
+                auto key = parse_expression();
+                if (!check(TokenType::Colon)) {
+                    if (reporter) reporter->error("Expected ':' after dict key", span_from(peek()), "P091");
+                    break;
+                }
+                advance(); // consume ':'
+                auto value = parse_expression();
+                entries.emplace_back(std::move(key), std::move(value));
+            }
+
+            if (!check(TokenType::RBrace)) {
+                if (reporter) reporter->error("Expected '}' after dict entries", span_from(peek()), "P092");
+            } else {
+                advance(); // consume '}'
+            }
+
+            return std::make_unique<ast::DictExpr>(std::move(entries), span_from(previous()));
+        } else {
+            // Set comprehension: {x for x in iter if cond}
+            if (check(TokenType::Kw_for)) {
+                advance(); // consume 'for'
+                if (!check(TokenType::Identifier)) {
+                    if (reporter) reporter->error("Expected loop variable after 'for'", span_from(peek()), "P094");
+                    return std::make_unique<ast::SetExpr>(std::vector<std::unique_ptr<ast::Expression>>{}, span_from(previous()));
+                }
+                advance();
+                std::string loop_var = previous().text;
+                if (!check(TokenType::Kw_in)) {
+                    if (reporter) reporter->error("Expected 'in' after loop variable", span_from(peek()), "P095");
+                    return std::make_unique<ast::SetExpr>(std::vector<std::unique_ptr<ast::Expression>>{}, span_from(previous()));
+                }
+                advance(); // consume 'in'
+                auto iterable = parse_expression();
+                std::unique_ptr<ast::Expression> filter;
+                if (check(TokenType::Kw_if)) {
+                    advance(); // consume 'if'
+                    filter = parse_expression();
+                }
+                if (check(TokenType::RBrace)) advance();
+                return std::make_unique<ast::SetComprehensionExpr>(
+                    std::move(first_expr), std::move(loop_var),
+                    std::move(iterable), std::move(filter), span_from(previous()));
+            }
+
+            // Regular set literal
+            std::vector<std::unique_ptr<ast::Expression>> elements;
+            elements.push_back(std::move(first_expr));
+
+            while (check(TokenType::Comma)) {
+                advance(); // consume ','
+                if (check(TokenType::RBrace)) break; // trailing comma
+                elements.push_back(parse_expression());
+            }
+
+            if (!check(TokenType::RBrace)) {
+                if (reporter) reporter->error("Expected '}' after set elements", span_from(peek()), "P093");
+            } else {
+                advance(); // consume '}'
+            }
+
+            return std::make_unique<ast::SetExpr>(std::move(elements), span_from(previous()));
+        }
+    }
+
     // Error
     if (reporter) {
         reporter->error("Expected expression", span_from(peek()), "P044");
     }
-    
+
     return std::make_unique<ast::IdentifierExpr>("<error>", span_from(peek()));
+}
+
+// Parse interpolated string: f"hello {name}!"
+inline std::unique_ptr<ast::Expression> Parser::parse_interpolated_string(const Token& tok) {
+    if (tok.value.index() != 6) {
+        return std::make_unique<ast::LiteralExpr>(
+            LiteralValue(std::string("<error>")), tok.span);
+    }
+
+    auto segments = std::get<6>(tok.value);
+    std::vector<ast::InterpolatedStringExpr::Segment> result_segments;
+
+    for (const auto& seg : segments) {
+        if (!seg.is_expr) {
+            result_segments.push_back({false, seg.text, nullptr});
+        } else {
+            // Parse expression from raw text using temporary lexer/parser
+            Lexer expr_lexer(seg.text, "<interpolated>");
+            auto expr_tokens = expr_lexer.scan_all();
+            // Ensure EOF token exists
+            if (expr_tokens.empty() || expr_tokens.back().type != TokenType::EndOfFile) {
+                expr_tokens.emplace_back(TokenType::EndOfFile, SourceSpan());
+            }
+            Parser expr_parser(expr_tokens);
+            expr_parser.set_reporter(reporter);
+            auto expr = expr_parser.parse_expression();
+            if (!expr) {
+                expr = std::make_unique<ast::IdentifierExpr>("<error>", tok.span);
+            }
+            result_segments.push_back({true, seg.text, std::move(expr)});
+        }
+    }
+
+    return std::make_unique<ast::InterpolatedStringExpr>(std::move(result_segments), tok.span);
 }
 
 // Parse enum declaration
@@ -3390,6 +3823,57 @@ inline std::unique_ptr<ast::Statement> Parser::parse_trait_statement() {
     }
 
     return trait_stmt;
+}
+
+// Parse type alias declaration: type NewName = OldType
+inline std::unique_ptr<ast::Statement> Parser::parse_type_alias_statement() {
+    if (!match(TokenType::Kw_type)) {
+        return nullptr;
+    }
+
+    if (!check(TokenType::Identifier)) {
+        if (reporter) {
+            reporter->error("Expected type alias name after 'type'", span_from(peek()), "P078");
+        }
+        return nullptr;
+    }
+    advance();
+    std::string alias_name = previous().text;
+
+    if (!check(TokenType::Op_eq_assign)) {
+        if (reporter) {
+            reporter->error("Expected '=' after type alias name", span_from(peek()), "P079");
+        }
+        return nullptr;
+    }
+    advance(); // consume '='
+
+    // Parse target type name
+    std::string target_type;
+    if (check(TokenType::Identifier) || check_any({
+        TokenType::Type_u8, TokenType::Type_u16, TokenType::Type_u32,
+        TokenType::Type_u64, TokenType::Type_usize,
+        TokenType::Type_i8, TokenType::Type_i16, TokenType::Type_i32,
+        TokenType::Type_i64, TokenType::Type_isize,
+        TokenType::Type_f32, TokenType::Type_f64,
+        TokenType::Type_bool, TokenType::Type_char, TokenType::Type_byte})) {
+        advance();
+        target_type = previous().text;
+    } else {
+        if (reporter) {
+            reporter->error("Expected type name after '='", span_from(peek()), "P080");
+        }
+        return nullptr;
+    }
+
+    auto alias_stmt = std::make_unique<ast::TypeAliasStmt>(alias_name, target_type, span_from(previous()));
+
+    // Optional semicolon
+    if (check(TokenType::Semicolon)) {
+        advance();
+    }
+
+    return alias_stmt;
 }
 
 // Parse impl block

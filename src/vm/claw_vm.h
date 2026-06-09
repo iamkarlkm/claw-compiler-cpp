@@ -263,6 +263,7 @@ struct Value {
 
     // String representation
     std::string to_string() const;
+    std::string to_print_string() const;
     std::string type_name() const;
     
     // Equality
@@ -666,6 +667,11 @@ public:
 
     // Execute single instruction (for debugging)
     bool step();
+
+    // Debug execution: setup, step, finish
+    bool execute_begin();
+    Value execute_finish();
+    int32_t peek_opcode() const;
 
     // Reset VM state
     void reset();

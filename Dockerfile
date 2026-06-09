@@ -1,15 +1,11 @@
-# Claw Compiler - Multi-stage Docker build
-# Supports: Linux (bytecode, interpreter, C codegen modes)
-# Note: AOT native codegen targets macOS Mach-O; use --mode=bytecode on Linux.
-
+# syntax=docker/dockerfile:1
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-
 RUN apt-get update && apt-get install -y \
     clang \
     llvm \
-    llvm-dev \
+    lld \
     libreadline-dev \
     make \
     && rm -rf /var/lib/apt/lists/*
@@ -17,18 +13,21 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 COPY . .
 
-# Disable WebTransport (libmsquic not available in Ubuntu repos)
-RUN make all CLAW_ENABLE_WEBTRANSPORT=0 CXX=clang++
+ENV CLAW_ENABLE_WEBTRANSPORT=0
+RUN make all CXX=clang++
 
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     libreadline8 \
+    llvm \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/claw /usr/local/bin/
-COPY --from=builder /build/claw-lsp /usr/local/bin/
-COPY --from=builder /build/claw-repl /usr/local/bin/
+COPY --from=builder /build/claw /usr/local/bin/claw
+COPY --from=builder /build/claw-lsp /usr/local/bin/claw-lsp
+COPY --from=builder /build/claw-repl /usr/local/bin/claw-repl
+COPY --from=builder /build/claw-debugger /usr/local/bin/claw-debugger
 
+WORKDIR /src
 ENTRYPOINT ["claw"]
 CMD ["--help"]

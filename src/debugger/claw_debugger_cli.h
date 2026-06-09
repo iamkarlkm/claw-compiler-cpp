@@ -63,6 +63,7 @@ private:
     std::unique_ptr<Debugger> debugger_;
     std::vector<CLICommand> commands_;
     bool interactive_mode_ = false;
+    std::string source_file_;
     
     // Command handlers
     bool handle_quit(Debugger& dbg, const std::vector<std::string>& args);

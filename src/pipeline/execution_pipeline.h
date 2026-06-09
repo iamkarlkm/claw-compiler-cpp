@@ -49,7 +49,7 @@ struct CompilationResult {
     std::shared_ptr<ast::Program> ast;
     
     // 字节码结果
-    std::unique_ptr<bytecode::Module> bytecode_module;
+    std::shared_ptr<bytecode::Module> bytecode_module;
     
     // C 代码生成结果
     std::string generated_ccode;
@@ -106,7 +106,7 @@ private:
     std::vector<Token> lex(const std::string& source, DiagnosticReporter& reporter);
     std::shared_ptr<ast::Program> parse(const std::vector<Token>& tokens, 
                                          DiagnosticReporter& reporter);
-    std::unique_ptr<bytecode::Module> compile_to_bytecode(std::shared_ptr<ast::Program> ast);
+    std::shared_ptr<bytecode::Module> compile_to_bytecode(std::shared_ptr<ast::Program> ast);
     Value run_interpreter(std::shared_ptr<ast::Program> ast);
     Value run_bytecode(const bytecode::Module& module);
     Value run_jit(const bytecode::Module& module);

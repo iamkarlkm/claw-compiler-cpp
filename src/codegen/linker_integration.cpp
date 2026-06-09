@@ -98,6 +98,9 @@ bool LinkerIntegration::compile_runtime_stub() {
     // Compile to object
     runtime_object_path_ = "/tmp/claw_aot_runtime.o";
     std::string cmd = "cc -c -O2 ";
+#ifdef __APPLE__
+    cmd += "-mmacosx-version-min=10.15 ";
+#endif
     cmd += tmp_src;
     cmd += " -o ";
     cmd += runtime_object_path_;

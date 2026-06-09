@@ -113,8 +113,13 @@ make uninstall            # 移除已安装的二进制文件
 ### Docker
 
 ```bash
+# 本地构建
 docker build -t claw .
 docker run --rm -v $(pwd):/src claw --run /src/program.claw
+
+# 使用 GitHub Container Registry
+docker pull ghcr.io/yourusername/claw-compiler:v0.2.0
+docker run --rm -v $(pwd):/src ghcr.io/yourusername/claw-compiler:v0.2.0 --run /src/program.claw
 ```
 
 ### Homebrew (草稿)
@@ -124,6 +129,38 @@ brew tap yourusername/claw
 brew install claw --with-libmsquic   # 启用 WebTransport
 brew install claw                    # 禁用 WebTransport
 ```
+
+### 发布流程
+
+```bash
+# 本地打标签并推送，触发 GitHub Actions 自动发布
+./scripts/release.sh 0.2.1
+git push origin main --tags
+```
+
+发布工作流会自动：
+1. 在 macOS / Linux 上构建并测试
+2. 打包二进制文件并上传到 GitHub Release
+3. 构建并推送 Docker 镜像到 ghcr.io
+4. 生成 Release Notes
+5. 生成 SHA256 校验和并对产物进行 GPG 签名
+
+#### 验证发布产物
+
+下载发布页中的 `.asc` 签名文件和 `SHA256SUMS` 后：
+
+```bash
+# 导入发布公钥（首次使用）
+gpg --import claw-release.pub
+
+# 验证校验和文件签名
+gpg --verify SHA256SUMS.asc SHA256SUMS
+
+# 验证产物完整性
+sha256sum -c SHA256SUMS
+```
+
+> 在 GitHub 仓库设置中添加 `GPG_PRIVATE_KEY` 和 `GPG_PASSPHRASE` Secret 后，签名步骤会自动执行。
 
 ### 使用
 
@@ -148,6 +185,14 @@ gcc program.c -o program
 # REPL 交互式环境
 ./claw-repl
 ```
+
+### 文档
+
+- [快速入门](docs/getting-started.md) — 15 分钟上手教程
+- [标准库参考](docs/stdlib-reference.md) — 内置函数完整列表
+- [语言规范](docs/claw-language-spec.md) — 语法与语义详细说明
+- [内存模型](docs/claw-memory-model.md) — 所有权与生命周期
+- [Python vs Claw 语法对比](docs/python_vs_claw_syntax_comparison.md)
 
 ### 示例
 

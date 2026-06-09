@@ -97,15 +97,27 @@ bool MachOWriter::write(const std::string& path) {
     const size_t SYMTAB_CMD_SIZE = 24;
     const size_t NLIST_SIZE = 16;
     const size_t RELOC_SIZE = 8;
+    const size_t BUILD_VERSION_CMD_SIZE = 24;
+    const uint32_t LC_BUILD_VERSION = 0x32;
+    const uint32_t PLATFORM_MACOS = 1;
 
-    uint32_t ncmds = 2; // LC_SEGMENT_64 + LC_SYMTAB
+    uint32_t ncmds = 3; // LC_BUILD_VERSION + LC_SEGMENT_64 + LC_SYMTAB
     size_t seg_cmd_total = SEGMENT_CMD_SIZE + sections_.size() * SECTION_SIZE;
-    size_t sizeofcmds = seg_cmd_total + SYMTAB_CMD_SIZE;
+    size_t sizeofcmds = BUILD_VERSION_CMD_SIZE + seg_cmd_total + SYMTAB_CMD_SIZE;
     size_t data_start = HEADER_SIZE + sizeofcmds;
 
     // === 预留 Header ===
     size_t header_pos = out.size();
     out.resize(out.size() + HEADER_SIZE, 0);
+
+    // === 写入 LC_BUILD_VERSION ===
+    // Suppresses linker warning: "no platform load command found"
+    push_le(out, LC_BUILD_VERSION);
+    push_le(out, static_cast<uint32_t>(BUILD_VERSION_CMD_SIZE));
+    push_le(out, PLATFORM_MACOS);
+    push_le(out, uint32_t(0x000A0F00)); // minos: macOS 10.15.0
+    push_le(out, uint32_t(0x000A0F00)); // sdk:  macOS 10.15.0
+    push_le(out, uint32_t(0));          // ntools
 
     // === 预留 LC_SEGMENT_64 ===
     size_t segment_cmd_pos = out.size();

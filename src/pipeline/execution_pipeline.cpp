@@ -2,7 +2,7 @@
 
 #include "execution_pipeline.h"
 #include "../interpreter/interpreter.h"
-#include "../bytecode/bytecode_compiler_simple.h"
+#include "../bytecode/bytecode_compiler.h"
 #include "../codegen/c_codegen.h"
 #include "../pipeline/execution_engine.h"
 #include "../vm/claw_vm.h"
@@ -66,40 +66,37 @@ std::shared_ptr<ast::Program> ExecutionPipeline::parse(const std::vector<Token>&
     return program;
 }
 
-std::unique_ptr<bytecode::Module> ExecutionPipeline::compile_to_bytecode(
+std::shared_ptr<bytecode::Module> ExecutionPipeline::compile_to_bytecode(
     std::shared_ptr<ast::Program> ast) {
     if (!ast) return nullptr;
-    
+
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     try {
-        // 使用 SimpleBytecodeCompiler 将 AST 转换为字节码
-        SimpleBytecodeCompiler compiler;
-        // debugInfo_ is not a member; use false for now
-        compiler.setDebugInfo(false);
-        
-        auto result_module = compiler.compile(ast);
-        
+        BytecodeCompiler compiler;
+        compiler.setDebugInfo(true);
+
+        auto result_module = compiler.compile(*ast);
+
         if (!result_module) {
             if (verbose_) {
                 std::cerr << "  [Bytecode] Compilation failed: " << compiler.getLastError() << "\n";
             }
             return nullptr;
         }
-        
+
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-        
+
         if (verbose_) {
             std::cout << "  [Bytecode] Compiled in " << duration.count() << "us\n";
             std::cout << "    Functions: " << result_module->functions.size() << "\n";
             std::cout << "    Constants: " << result_module->constants.size() << "\n";
             std::cout << "    Globals: " << result_module->global_names.size() << "\n";
         }
-        
-        // codegen_time_us is tracked in CompilationResult, not here
+
         return result_module;
-        
+
     } catch (const std::exception& e) {
         if (verbose_) {
             std::cerr << "  [Bytecode] Exception: " << e.what() << "\n";

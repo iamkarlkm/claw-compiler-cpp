@@ -1,0 +1,17 @@
+{
+  "timestamp": 2026-06-03T15:30:30Z,
+  "git_sha": 3f87c75,
+  "results": [
+    {"benchmark":"fibonacci","mode":"run","time_ms":1579},
+    {"benchmark":"fibonacci","mode":"bytecode","time_ms":1552},
+    {"benchmark":"fibonacci","mode":"jit","time_ms":266},
+    {"benchmark":"sum","mode":"run","time_ms":234},
+    {"benchmark":"sum","mode":"bytecode","time_ms":269},
+    {"benchmark":"sum","mode":"jit","time_ms":223},
+    {"benchmark":"prime","mode":"run","time_ms":240},
+    {"benchmark":"prime","mode":"bytecode","time_ms":279},
+    {"benchmark":"prime","mode":"jit","time_ms":242}
+  ]
+}
+
+Benchmark results written to benchmark/results/benchmark_2026-06-03T15:30:30Z.json

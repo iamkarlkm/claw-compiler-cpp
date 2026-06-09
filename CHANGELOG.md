@@ -7,12 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- CI pipeline via GitHub Actions (macOS + Linux).
+- CI pipeline via GitHub Actions (macOS + Linux + Windows).
+- Coverage reporting via `make coverage` with lcov 2.x.
+- Release workflow with GPG-signed artifacts and Docker images.
 - `LICENSE` file (MIT).
 - `VERSION` and `CHANGELOG.md` for release tracking.
 
 ### Fixed
+- AOT linker warning on macOS by adding `-mmacosx-version-min=10.15` to runtime stub compilation.
+- Debugger segfault on exit by clearing event callback before member destruction.
+- JIT `main` returning garbage due to missing `pop rax` in `emit_return_op` and void stdlib builtins.
+- Bytecode compiler `return;` emitting incorrect double `PUSH` instructions; now emits `RET_NULL`.
+- Bytecode implicit return logic now correctly handles `RET_NULL`.
 - Makefile linker errors for `claw-repl` and `claw-lsp` by linking full core objects.
+- CLI `--mode=bytecode` argument parsing failed to recognize `--mode=xxx` syntax; now matches `--mode=` prefix correctly.
+- VM `print`/`println` quoting strings with `"..."` while AST interpreter printed raw strings; added `to_print_string()` for user-facing output.
+- AST interpreter missing array/string builtins (`arr_range`, `arr_len`, `arr_push`, `str_len`, `str_upper`, `str_contains`).
 
 ## [0.2.0]
 

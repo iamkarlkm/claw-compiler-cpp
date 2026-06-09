@@ -5,8 +5,8 @@
 CXX = clang++
 LLVM_PREFIX := $(shell llvm-config --prefix 2>/dev/null || /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
 LLVM_LIBDIR := $(shell llvm-config --libdir 2>/dev/null || echo $(LLVM_PREFIX)/lib)
-CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 # readline: prefer pkg-config, fall back to -lreadline
 READLINE_LIBS := $(shell pkg-config --libs readline 2>/dev/null || echo -lreadline)
 READLINE_CFLAGS := $(shell pkg-config --cflags readline 2>/dev/null || echo)
@@ -445,6 +445,19 @@ test-aot: claw
 	@rm -f /tmp/_aot_*.claw /tmp/_aot_simple /tmp/_aot_simple.o /tmp/_aot_if /tmp/_aot_if.o /tmp/_aot_if2 /tmp/_aot_if2.o /tmp/_aot_loop /tmp/_aot_loop.o /tmp/_aot_func /tmp/_aot_func.o /tmp/_aot_rec /tmp/_aot_rec.o /tmp/_aot_nested /tmp/_aot_nested.o /tmp/_aot_eq /tmp/_aot_eq.o /tmp/_aot_ne /tmp/_aot_ne.o /tmp/_aot_le /tmp/_aot_le.o /tmp/_aot_ge /tmp/_aot_ge.o /tmp/_aot_zeroarg /tmp/_aot_zeroarg.o /tmp/_aot_3arg /tmp/_aot_3arg.o /tmp/_aot_neg /tmp/_aot_neg.o /tmp/_aot_and /tmp/_aot_and.o /tmp/_aot_or /tmp/_aot_or.o /tmp/_aot_not /tmp/_aot_not.o
 	@echo "AOT tests passed"
 
+test-jit: claw
+	@echo "=== JIT Compilation Tests ==="
+	@echo "fn main() { println(42); }" > /tmp/_jit_lit.claw
+	@test "`./claw --jit /tmp/_jit_lit.claw 2>/dev/null | grep '^42$$'`" = "42" || (echo "JIT literal print failed"; exit 1)
+	@echo "fn add(a,b){ return a+b; } fn main(){ println(add(3,4)); }" > /tmp/_jit_func.claw
+	@test "`./claw --jit /tmp/_jit_func.claw 2>/dev/null | grep '^7$$'`" = "7" || (echo "JIT function call failed"; exit 1)
+	@echo "fn factorial(n){ if n<=1 { return 1; } return n*factorial(n-1); } fn main(){ println(factorial(5)); }" > /tmp/_jit_rec.claw
+	@test "`./claw --jit /tmp/_jit_rec.claw 2>/dev/null | grep '^120$$'`" = "120" || (echo "JIT recursion failed"; exit 1)
+	@echo "fn main() { let a = 5; if a > 3 { println(100); } else { println(200); } }" > /tmp/_jit_if.claw
+	@test "`./claw --jit /tmp/_jit_if.claw 2>/dev/null | grep '^100$$'`" = "100" || (echo "JIT if-true failed"; exit 1)
+	@rm -f /tmp/_jit_*.claw
+	@echo "JIT tests passed"
+
 test-bytecode-opt: claw
 	@echo "=== Bytecode VM Optimization Tests (-O1) ==="
 	@rm -rf ~/.claw/cache/compile/*
@@ -601,7 +614,7 @@ test-lexer: tests/test_lexer
 tests/test_integration: tests/test_integration.cpp tests/claw_test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_integration.cpp
 
-test-integration: tests/test_integration
+test-integration: tests/test_integration claw
 	@./tests/test_integration
 
 .PHONY: test-integration

@@ -15,6 +15,7 @@
 #include <random>
 #include <algorithm>
 #include <numeric>
+#include <cctype>
 #include "ast/ast.h"
 #include "ast/pattern.h"
 #include "lexer/token.h"
@@ -524,6 +525,68 @@ public:
             }
             return {false};
         };
+
+        // Array builtins
+        builtins["arr_len"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {int64_t(0)};
+            if (auto* arr = std::get_if<std::shared_ptr<ArrayValue>>(&args[0])) {
+                return {int64_t((*arr)->elements.size())};
+            }
+            return {int64_t(0)};
+        };
+
+        builtins["arr_push"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.size() < 2) return {Value()};
+            if (auto* arr = std::get_if<std::shared_ptr<ArrayValue>>(&args[0])) {
+                (*arr)->elements.push_back(args[1]);
+                return {args[0]};
+            }
+            return {Value()};
+        };
+
+        builtins["arr_range"] = [](std::vector<Value> args) -> std::vector<Value> {
+            int64_t start = 0, end = 0, step = 1;
+            if (!args.empty() && std::holds_alternative<int64_t>(args[0])) start = std::get<int64_t>(args[0]);
+            if (args.size() > 1 && std::holds_alternative<int64_t>(args[1])) end = std::get<int64_t>(args[1]);
+            if (args.size() > 2 && std::holds_alternative<int64_t>(args[2])) step = std::get<int64_t>(args[2]);
+            if (step == 0) step = 1;
+            auto arr = std::make_shared<ArrayValue>();
+            if (step > 0) {
+                for (int64_t i = start; i < end; i += step) arr->elements.push_back(i);
+            } else {
+                for (int64_t i = start; i > end; i += step) arr->elements.push_back(i);
+            }
+            return {arr};
+        };
+
+        // String builtins
+        builtins["str_len"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {int64_t(0)};
+            if (std::holds_alternative<std::string>(args[0])) {
+                return {int64_t(std::get<std::string>(args[0]).size())};
+            }
+            return {int64_t(0)};
+        };
+
+        builtins["str_upper"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.empty()) return {std::string("")};
+            if (std::holds_alternative<std::string>(args[0])) {
+                std::string s = std::get<std::string>(args[0]);
+                for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                return {s};
+            }
+            return {std::string("")};
+        };
+
+        builtins["str_contains"] = [](std::vector<Value> args) -> std::vector<Value> {
+            if (args.size() < 2) return {false};
+            if (std::holds_alternative<std::string>(args[0]) && std::holds_alternative<std::string>(args[1])) {
+                const std::string& s = std::get<std::string>(args[0]);
+                const std::string& sub = std::get<std::string>(args[1]);
+                return {s.find(sub) != std::string::npos};
+            }
+            return {false};
+        };
     }
 
     // Convert value to string
@@ -799,6 +862,7 @@ public:
     bool throw_flag = false;
     Value exception_value;
     claw::ast::Program* current_program = nullptr;
+    bool repl_mode = false;
 
     // Struct registry: name -> list of (field_name, field_type)
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> struct_registry;
@@ -904,7 +968,7 @@ public:
                 std::cerr << "\n";
                 throw_flag = false;
             }
-        } else {
+        } else if (!repl_mode) {
             std::cerr << "Error: No main function found\n";
         }
     }
@@ -935,7 +999,7 @@ public:
 
         // Execute function body
         if (fn->get_body()) {
-            execute_block(fn->get_body());
+            execute_body(fn->get_body(), true);
         }
 
         // Capture this frame's return value
@@ -987,7 +1051,7 @@ public:
 
         // Execute method body
         if (method.body) {
-            execute_block(method.body.get());
+            execute_body(method.body.get(), true);
         }
 
         // Capture this frame's return value
@@ -1019,6 +1083,62 @@ public:
         }
 
         pop_scope();
+    }
+
+    // Execute a function/impl/lambda body with optional implicit return
+    void execute_body(claw::ast::ASTNode* body, bool allow_implicit_return) {
+        if (!body) return;
+
+        if (auto* stmt = dynamic_cast<claw::ast::Statement*>(body)) {
+            if (stmt->get_kind() == claw::ast::Statement::Kind::Block) {
+                auto* block = static_cast<claw::ast::BlockStmt*>(body);
+                push_scope();
+                for (size_t i = 0; i < block->get_statements().size(); i++) {
+                    auto& s = block->get_statements()[i];
+                    bool is_last = (i + 1 == block->get_statements().size());
+                    if (is_last && allow_implicit_return && !return_flag &&
+                        s->get_kind() == claw::ast::Statement::Kind::Expression) {
+                        auto* expr_stmt = static_cast<claw::ast::ExprStmt*>(s.get());
+                        auto* expr = expr_stmt->get_expr();
+                        // Avoid re-evaluating assignment expressions as implicit return
+                        if (expr->get_kind() == claw::ast::Expression::Kind::Binary) {
+                            auto* bin = static_cast<claw::ast::BinaryExpr*>(expr);
+                            if (bin->get_operator() == claw::TokenType::Op_eq_assign) {
+                                execute_binary_assignment(bin);
+                            } else {
+                                return_value = evaluate(expr);
+                            }
+                        } else {
+                            return_value = evaluate(expr);
+                        }
+                    } else {
+                        execute_statement(s.get());
+                    }
+                    if (break_flag || continue_flag || return_flag || throw_flag) break;
+                }
+                pop_scope();
+            } else if (allow_implicit_return && !return_flag &&
+                       stmt->get_kind() == claw::ast::Statement::Kind::Expression) {
+                auto* expr_stmt = static_cast<claw::ast::ExprStmt*>(stmt);
+                auto* expr = expr_stmt->get_expr();
+                if (expr->get_kind() == claw::ast::Expression::Kind::Binary) {
+                    auto* bin = static_cast<claw::ast::BinaryExpr*>(expr);
+                    if (bin->get_operator() == claw::TokenType::Op_eq_assign) {
+                        execute_binary_assignment(bin);
+                    } else {
+                        return_value = evaluate(expr);
+                    }
+                } else {
+                    return_value = evaluate(expr);
+                }
+            } else {
+                execute_statement(stmt);
+            }
+        } else if (auto* expr = dynamic_cast<claw::ast::Expression*>(body)) {
+            if (allow_implicit_return) {
+                return_value = evaluate(expr);
+            }
+        }
     }
 
     // Execute a statement
@@ -2284,30 +2404,7 @@ public:
         return_flag = false;
 
         // Execute body
-        auto* body = lambda->get_body();
-        if (auto* stmt = dynamic_cast<claw::ast::Statement*>(body)) {
-            if (stmt->get_kind() == claw::ast::Statement::Kind::Block) {
-                auto* block = static_cast<claw::ast::BlockStmt*>(body);
-                push_scope();
-                for (size_t i = 0; i < block->get_statements().size(); i++) {
-                    auto& s = block->get_statements()[i];
-                    execute_statement(s.get());
-                    // Capture last expression statement value as implicit return
-                    if (i == block->get_statements().size() - 1 &&
-                        s->get_kind() == claw::ast::Statement::Kind::Expression &&
-                        !return_flag) {
-                        auto* expr_stmt = static_cast<claw::ast::ExprStmt*>(s.get());
-                        return_value = evaluate(expr_stmt->get_expr());
-                    }
-                    if (break_flag || continue_flag || return_flag || throw_flag) break;
-                }
-                pop_scope();
-            } else {
-                execute_statement(stmt);
-            }
-        } else if (auto* expr = dynamic_cast<claw::ast::Expression*>(body)) {
-            return_value = evaluate(expr);
-        }
+        execute_body(lambda->get_body(), true);
 
         Value result = return_value;
 

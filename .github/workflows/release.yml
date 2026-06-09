@@ -74,8 +74,78 @@ jobs:
           name: claw-linux-amd64
           path: claw-linux-amd64.tar.gz
 
+  build-windows:
+    runs-on: windows-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-llvm
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-readline
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkg-config
+
+      - name: Build release binaries
+        run: make all CXX=clang++
+
+      - name: Run tests
+        run: make test CXX=clang++
+
+      - name: Package
+        run: |
+          mkdir -p claw-windows/bin
+          cp claw.exe claw-lsp.exe claw-repl.exe claw-debugger.exe claw-windows/bin/ 2>/dev/null || cp claw claw-lsp claw-repl claw-debugger claw-windows/bin/
+          cp -r docs claw-windows/
+          cp README.md LICENSE claw-windows/ 2>/dev/null || true
+          zip -r claw-windows-amd64.zip claw-windows
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-windows-amd64
+          path: claw-windows-amd64.zip
+
+  build-deb:
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev dpkg-dev
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: claw-linux-amd64
+
+      - name: Build .deb package
+        run: |
+          chmod +x scripts/build-deb.sh
+          ./scripts/build-deb.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-deb
+          path: dist/*.deb
+
   checksums:
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
@@ -85,19 +155,44 @@ jobs:
         with:
           path: artifacts
 
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --yes --pinentry-mode loopback --import
+
       - name: Generate checksums
         id: hash
         run: |
           cd artifacts
-          sha256sum */*.tar.gz > ../SHA256SUMS
+          sha256sum */*.tar.gz */*.zip */*.deb 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz */*.zip 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz > ../SHA256SUMS
           cat ../SHA256SUMS
           echo "hashes=$(cat ../SHA256SUMS | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - name: Sign artifacts
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cd artifacts
+          for f in */*.tar.gz */*.zip */*.deb 2>/dev/null; do
+            [ -f "$f" ] || continue
+            gpg --detach-sign --armor --passphrase "$GPG_PASSPHRASE" --batch --yes --pinentry-mode loopback "$f"
+          done
+          gpg --detach-sign --armor --passphrase "$GPG_PASSPHRASE" --batch --yes --pinentry-mode loopback ../SHA256SUMS
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
           name: checksums
           path: SHA256SUMS
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: |
+            artifacts/**/*.asc
+            SHA256SUMS.asc
 
   create-release:
     needs: [checksums]
@@ -115,12 +210,19 @@ jobs:
         with:
           name: checksums
 
+      - name: Download signatures
+        uses: actions/download-artifact@v4
+        with:
+          name: signatures
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*
             SHA256SUMS
+            SHA256SUMS.asc
+            *.asc
           generate_release_notes: true
 
   docker:

@@ -141,14 +141,29 @@ enum class TokenType {
     Invalid
 };
 
+// Interpolated string segments (for f"..." literals)
+struct InterpolatedStringSegment {
+    bool is_expr;
+    std::string text;  // literal text or raw expression source
+
+    bool operator==(const InterpolatedStringSegment& other) const {
+        return is_expr == other.is_expr && text == other.text;
+    }
+    bool operator!=(const InterpolatedStringSegment& other) const {
+        return !(*this == other);
+    }
+};
+using InterpolatedStringSegments = std::vector<InterpolatedStringSegment>;
+
 // Token literal value variant
 using LiteralValue = std::variant<
-    std::monostate,    // No value
-    int64_t,           // Integer
-    double,            // Float
-    std::string,       // String/Identifier
-    char,              // Character
-    bool               // Boolean
+    std::monostate,               // No value (index 0)
+    int64_t,                      // Integer (index 1)
+    double,                       // Float (index 2)
+    std::string,                  // String/Identifier (index 3)
+    char,                         // Character (index 4)
+    bool,                         // Boolean (index 5)
+    InterpolatedStringSegments    // Interpolated string segments (index 6)
 >;
 
 // Token representation
@@ -356,7 +371,8 @@ inline bool Token::is_literal() const {
     return type == TokenType::IntegerLiteral ||
            type == TokenType::FloatLiteral ||
            type == TokenType::StringLiteral ||
-           type == TokenType::ByteLiteral;
+           type == TokenType::ByteLiteral ||
+           type == TokenType::InterpolatedString;
 }
 
 inline bool Token::is_operator() const {

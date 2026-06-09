@@ -104,6 +104,7 @@ std::string ResultFormatter::format_timing(double parse_ms, double check_ms, dou
 
 REPL::REPL() {
     interp_ = std::make_unique<interpreter::Interpreter>();
+    interp_->repl_mode = true;
     completion_engine_ = std::make_unique<CompletionEngine>();
     state_.running = true;
 }
@@ -121,7 +122,7 @@ void REPL::print_banner() {
         "                  __/ |    \n"
         "                 |___/     \n"
         "\033[0m\n";
-    std::cout << "Claw Language REPL v0.1.0\n";
+    std::cout << "Claw Language REPL v0.2.0\n";
     std::cout << "Type :help for commands, :quit to exit.\n\n";
 }
 
@@ -245,7 +246,7 @@ void REPL::print_help() {
 }
 
 void REPL::print_version() {
-    std::cout << "Claw Language REPL v0.1.0\n";
+    std::cout << "Claw Language REPL v0.2.0\n";
 }
 
 void REPL::clear_screen() { std::cout << "\033[2J\033[H"; }

@@ -125,6 +125,13 @@ std::string Value::to_string() const {
     }
 }
 
+std::string Value::to_print_string() const {
+    switch (tag) {
+        case ValueTag::STRING: return std::get<std::string>(data);
+        default: return to_string();
+    }
+}
+
 std::string Value::type_name() const {
     switch (tag) {
         case ValueTag::NIL: return "nil";
@@ -273,13 +280,13 @@ void VMRuntime::close_upvalues(int32_t slot_idx) {
 void VMRuntime::setup_builtins() {
     // Print function
     builtins["print"] = [](VMRuntime& rt) {
-        std::cout << rt.peek().to_string();
+        std::cout << rt.peek().to_print_string();
         return Value::nil();
     };
 
     // Println function
     builtins["println"] = [](VMRuntime& rt) {
-        std::cout << rt.peek().to_string() << std::endl;
+        std::cout << rt.peek().to_print_string() << std::endl;
         return Value::nil();
     };
 
@@ -314,6 +321,14 @@ void VMRuntime::setup_builtins() {
     // String function
     builtins["string"] = [](VMRuntime& rt) {
         return Value::string_v(rt.peek().to_string());
+    };
+
+    // String concat function (takes 2 args from stack)
+    builtins["str_concat"] = [](VMRuntime& rt) {
+        if (rt.stack_top < 2) return Value::string_v("");
+        std::string b = rt.peek().to_string();
+        std::string a = rt.stack[rt.stack_top - 2].to_string();
+        return Value::string_v(a + b);
     };
 
     // Bool function
@@ -867,6 +882,641 @@ void VMRuntime::setup_builtins() {
         return Value::bool_v(true);
     };
 #endif
+
+    // ============================================================================
+    // I/O builtins
+    // ============================================================================
+    builtins["read_file"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        std::string path = rt.peek().as_string();
+        std::ifstream file(path);
+        std::string content;
+        if (file.is_open()) {
+            content = std::string((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
+            file.close();
+        }
+        return Value::string_v(content);
+    };
+
+    builtins["write_file"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string content = rt.peek().as_string();
+        std::string path = rt.stack[rt.stack_top - 2].as_string();
+        std::ofstream file(path);
+        bool ok = file.is_open();
+        if (ok) {
+            file << content;
+            file.close();
+        }
+        return Value::bool_v(ok);
+    };
+
+    builtins["append_file"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string content = rt.peek().as_string();
+        std::string path = rt.stack[rt.stack_top - 2].as_string();
+        std::ofstream file(path, std::ios::app);
+        bool ok = file.is_open();
+        if (ok) {
+            file << content;
+            file.close();
+        }
+        return Value::bool_v(ok);
+    };
+
+    // ============================================================================
+    // String builtins
+    // ============================================================================
+    builtins["str_len"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        Value& v = rt.peek();
+        if (v.is_string()) {
+            return Value::int_v(static_cast<int64_t>(v.as_string().size()));
+        }
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            return Value::int_v(static_cast<int64_t>(arr ? arr->elements.size() : 0));
+        }
+        return Value::int_v(0);
+    };
+
+    builtins["str_contains"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string sub = rt.peek().as_string();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        return Value::bool_v(s.find(sub) != std::string::npos);
+    };
+
+    builtins["str_find"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(-1);
+        std::string sub = rt.peek().as_string();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        size_t pos = s.find(sub);
+        return Value::int_v(pos == std::string::npos ? -1 : static_cast<int64_t>(pos));
+    };
+
+    builtins["str_replace"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 3) return Value::string_v("");
+        std::string to = rt.peek().as_string();
+        std::string from = rt.stack[rt.stack_top - 2].as_string();
+        std::string s = rt.stack[rt.stack_top - 3].as_string();
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.length(), to);
+            pos += to.length();
+        }
+        return Value::string_v(s);
+    };
+
+    builtins["str_split"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::array_v(rt.array_pool.acquire());
+        std::string delim = rt.peek().as_string();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        auto arr = rt.array_pool.acquire();
+        size_t start = 0, end = 0;
+        while ((end = s.find(delim, start)) != std::string::npos) {
+            arr->elements.push_back(Value::string_v(s.substr(start, end - start)));
+            start = end + delim.length();
+        }
+        arr->elements.push_back(Value::string_v(s.substr(start)));
+        return Value::array_v(arr);
+    };
+
+    builtins["str_upper"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        std::string s = rt.peek().as_string();
+        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return Value::string_v(s);
+    };
+
+    builtins["str_lower"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        std::string s = rt.peek().as_string();
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return Value::string_v(s);
+    };
+
+    builtins["str_trim"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        std::string s = rt.peek().as_string();
+        size_t a = s.find_first_not_of(" \t\n\r");
+        if (a == std::string::npos) return Value::string_v("");
+        size_t b = s.find_last_not_of(" \t\n\r");
+        return Value::string_v(s.substr(a, b - a + 1));
+    };
+
+    builtins["str_substring"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 3) return Value::string_v("");
+        int64_t len = rt.peek().as_int();
+        int64_t start = rt.stack[rt.stack_top - 2].as_int();
+        std::string s = rt.stack[rt.stack_top - 3].as_string();
+        if (start < 0) start = 0;
+        if (start >= static_cast<int64_t>(s.length())) return Value::string_v("");
+        auto max_len = static_cast<size_t>(s.length() - start);
+        auto actual_len = len > 0 ? std::min(static_cast<size_t>(len), max_len) : max_len;
+        return Value::string_v(s.substr(start, actual_len));
+    };
+
+    builtins["str_starts_with"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string prefix = rt.peek().as_string();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        return Value::bool_v(s.rfind(prefix, 0) == 0);
+    };
+
+    builtins["str_ends_with"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string suffix = rt.peek().as_string();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        if (suffix.length() > s.length()) return Value::bool_v(false);
+        return Value::bool_v(s.compare(s.length() - suffix.length(), suffix.length(), suffix) == 0);
+    };
+
+    builtins["str_reverse"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        std::string s = rt.peek().as_string();
+        std::reverse(s.begin(), s.end());
+        return Value::string_v(s);
+    };
+
+    builtins["str_repeat"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::string_v("");
+        int64_t n = rt.peek().as_int();
+        std::string s = rt.stack[rt.stack_top - 2].as_string();
+        if (n <= 0) return Value::string_v("");
+        std::string result;
+        result.reserve(s.length() * n);
+        for (int64_t i = 0; i < n; ++i) result += s;
+        return Value::string_v(result);
+    };
+
+    builtins["str_join"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::string_v("");
+        std::string delim = rt.peek().as_string();
+        Value arr_val = rt.stack[rt.stack_top - 2];
+        std::string result;
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr) {
+                for (size_t i = 0; i < arr->elements.size(); ++i) {
+                    if (i > 0) result += delim;
+                    result += arr->elements[i].to_string();
+                }
+            }
+        }
+        return Value::string_v(result);
+    };
+
+    builtins["format"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::string_v("");
+        std::string arg = rt.peek().to_string();
+        std::string fmt = rt.stack[rt.stack_top - 2].as_string();
+        size_t pos = fmt.find("{}");
+        if (pos != std::string::npos) {
+            fmt.replace(pos, 2, arg);
+        }
+        return Value::string_v(fmt);
+    };
+
+    // ============================================================================
+    // Math builtins
+    // ============================================================================
+    builtins["abs"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        Value v = rt.peek();
+        if (v.is_int()) {
+            int64_t x = v.as_int();
+            return Value::int_v(x < 0 ? -x : x);
+        }
+        return Value::float_v(std::fabs(v.as_float()));
+    };
+
+    builtins["sin"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::sin(rt.peek().as_float()));
+    };
+
+    builtins["cos"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::cos(rt.peek().as_float()));
+    };
+
+    builtins["tan"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::tan(rt.peek().as_float()));
+    };
+
+    builtins["asin"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::asin(rt.peek().as_float()));
+    };
+
+    builtins["acos"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::acos(rt.peek().as_float()));
+    };
+
+    builtins["atan"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::atan(rt.peek().as_float()));
+    };
+
+    builtins["atan2"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::float_v(0.0);
+        double y = rt.peek().as_float();
+        double x = rt.stack[rt.stack_top - 2].as_float();
+        return Value::float_v(std::atan2(y, x));
+    };
+
+    builtins["sqrt"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::sqrt(rt.peek().as_float()));
+    };
+
+    builtins["pow"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::float_v(0.0);
+        double exp = rt.peek().as_float();
+        double base = rt.stack[rt.stack_top - 2].as_float();
+        return Value::float_v(std::pow(base, exp));
+    };
+
+    builtins["exp"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::exp(rt.peek().as_float()));
+    };
+
+    builtins["log"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::log(rt.peek().as_float()));
+    };
+
+    builtins["log10"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::log10(rt.peek().as_float()));
+    };
+
+    builtins["floor"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::floor(rt.peek().as_float()));
+    };
+
+    builtins["ceil"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::ceil(rt.peek().as_float()));
+    };
+
+    builtins["round"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::round(rt.peek().as_float()));
+    };
+
+    builtins["trunc"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(std::trunc(rt.peek().as_float()));
+    };
+
+    builtins["min"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(0);
+        Value b = rt.peek();
+        Value a = rt.stack[rt.stack_top - 2];
+        if (a.is_int() && b.is_int()) {
+            return Value::int_v(std::min(a.as_int(), b.as_int()));
+        }
+        return Value::float_v(std::min(a.as_float(), b.as_float()));
+    };
+
+    builtins["max"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(0);
+        Value b = rt.peek();
+        Value a = rt.stack[rt.stack_top - 2];
+        if (a.is_int() && b.is_int()) {
+            return Value::int_v(std::max(a.as_int(), b.as_int()));
+        }
+        return Value::float_v(std::max(a.as_float(), b.as_float()));
+    };
+
+    builtins["mod"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(0);
+        Value b = rt.peek();
+        Value a = rt.stack[rt.stack_top - 2];
+        if (a.is_int() && b.is_int()) {
+            return Value::int_v(a.as_int() % b.as_int());
+        }
+        return Value::float_v(std::fmod(a.as_float(), b.as_float()));
+    };
+
+    builtins["sign"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        Value v = rt.peek();
+        if (v.is_int()) {
+            int64_t iv = v.as_int();
+            return Value::int_v((iv > 0) - (iv < 0));
+        }
+        double fv = v.as_float();
+        return Value::int_v((fv > 0) - (fv < 0));
+    };
+
+    builtins["pi"] = [](VMRuntime&) -> Value {
+        return Value::float_v(3.14159265358979323846);
+    };
+
+    builtins["e"] = [](VMRuntime&) -> Value {
+        return Value::float_v(2.71828182845904523536);
+    };
+
+    builtins["random"] = [](VMRuntime&) -> Value {
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        static std::uniform_real_distribution<> dis(0.0, 1.0);
+        return Value::float_v(dis(gen));
+    };
+
+    builtins["random_int"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(0);
+        int64_t max = rt.peek().as_int();
+        int64_t min = rt.stack[rt.stack_top - 2].as_int();
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<int64_t> dist(min, max);
+        return Value::int_v(dist(gen));
+    };
+
+    builtins["random_seed"] = [](VMRuntime&) -> Value {
+        return Value::nil();
+    };
+
+    // ============================================================================
+    // Array builtins
+    // ============================================================================
+    builtins["arr_len"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        Value v = rt.peek();
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            return Value::int_v(static_cast<int64_t>(arr ? arr->elements.size() : 0));
+        }
+        return Value::int_v(0);
+    };
+
+    builtins["arr_push"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::nil();
+        Value elem = rt.peek();
+        Value arr_val = rt.stack[rt.stack_top - 2];
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr) arr->elements.push_back(elem);
+        }
+        return arr_val;
+    };
+
+    builtins["arr_pop"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::nil();
+        Value v = rt.peek();
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            if (arr && !arr->elements.empty()) {
+                Value result = arr->elements.back();
+                arr->elements.pop_back();
+                return result;
+            }
+        }
+        return Value::nil();
+    };
+
+    builtins["arr_insert"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 3) return Value::nil();
+        Value val = rt.peek();
+        int64_t idx = rt.stack[rt.stack_top - 2].as_int();
+        Value arr_val = rt.stack[rt.stack_top - 3];
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr && idx >= 0 && idx <= static_cast<int64_t>(arr->elements.size())) {
+                arr->elements.insert(arr->elements.begin() + idx, val);
+            }
+        }
+        return arr_val;
+    };
+
+    builtins["arr_remove"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::nil();
+        int64_t idx = rt.peek().as_int();
+        Value arr_val = rt.stack[rt.stack_top - 2];
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr && idx >= 0 && idx < static_cast<int64_t>(arr->elements.size())) {
+                arr->elements.erase(arr->elements.begin() + idx);
+            }
+        }
+        return arr_val;
+    };
+
+    builtins["arr_sort"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::nil();
+        Value v = rt.peek();
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            if (arr) {
+                std::sort(arr->elements.begin(), arr->elements.end(),
+                    [](const Value& a, const Value& b) {
+                        return a.as_float() < b.as_float();
+                    });
+            }
+        }
+        return v;
+    };
+
+    builtins["arr_reverse"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::nil();
+        Value v = rt.peek();
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            if (arr) std::reverse(arr->elements.begin(), arr->elements.end());
+        }
+        return v;
+    };
+
+    builtins["arr_find"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::int_v(-1);
+        Value val = rt.peek();
+        Value arr_val = rt.stack[rt.stack_top - 2];
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr) {
+                for (size_t i = 0; i < arr->elements.size(); ++i) {
+                    if (arr->elements[i].to_string() == val.to_string()) {
+                        return Value::int_v(static_cast<int64_t>(i));
+                    }
+                }
+            }
+        }
+        return Value::int_v(-1);
+    };
+
+    builtins["arr_contains"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        Value val = rt.peek();
+        Value arr_val = rt.stack[rt.stack_top - 2];
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr) {
+                for (const auto& elem : arr->elements) {
+                    if (elem.to_string() == val.to_string()) {
+                        return Value::bool_v(true);
+                    }
+                }
+            }
+        }
+        return Value::bool_v(false);
+    };
+
+    builtins["arr_unique"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::array_v(rt.array_pool.acquire());
+        Value v = rt.peek();
+        if (v.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(v.data);
+            if (arr) {
+                auto result = rt.array_pool.acquire();
+                for (const auto& elem : arr->elements) {
+                    bool found = false;
+                    for (const auto& u : result->elements) {
+                        if (u.to_string() == elem.to_string()) { found = true; break; }
+                    }
+                    if (!found) result->elements.push_back(elem);
+                }
+                return Value::array_v(result);
+            }
+        }
+        return v;
+    };
+
+    builtins["arr_concat"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::array_v(rt.array_pool.acquire());
+        Value b_val = rt.peek();
+        Value a_val = rt.stack[rt.stack_top - 2];
+        auto result = rt.array_pool.acquire();
+        if (a_val.is_array()) {
+            auto a = std::get<std::shared_ptr<ArrayValue>>(a_val.data);
+            if (a) for (const auto& v : a->elements) result->elements.push_back(v);
+        }
+        if (b_val.is_array()) {
+            auto b = std::get<std::shared_ptr<ArrayValue>>(b_val.data);
+            if (b) for (const auto& v : b->elements) result->elements.push_back(v);
+        }
+        return Value::array_v(result);
+    };
+
+    builtins["arr_slice"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 3) return Value::array_v(rt.array_pool.acquire());
+        int64_t end = rt.peek().as_int();
+        int64_t start = rt.stack[rt.stack_top - 2].as_int();
+        Value arr_val = rt.stack[rt.stack_top - 3];
+        auto result = rt.array_pool.acquire();
+        if (arr_val.is_array()) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(arr_val.data);
+            if (arr) {
+                auto sz = arr->elements.size();
+                if (start < 0) start = 0;
+                if (end > static_cast<int64_t>(sz)) end = sz;
+                for (auto i = start; i < end; ++i) result->elements.push_back(arr->elements[i]);
+            }
+        }
+        return Value::array_v(result);
+    };
+
+    builtins["arr_range"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 3) return Value::array_v(rt.array_pool.acquire());
+        int64_t step = rt.peek().as_int();
+        int64_t end = rt.stack[rt.stack_top - 2].as_int();
+        int64_t start = rt.stack[rt.stack_top - 3].as_int();
+        auto result = rt.array_pool.acquire();
+        if (step != 0) {
+            if (step > 0) {
+                for (int64_t i = start; i < end; i += step) result->elements.push_back(Value::int_v(i));
+            } else {
+                for (int64_t i = start; i > end; i += step) result->elements.push_back(Value::int_v(i));
+            }
+        }
+        return Value::array_v(result);
+    };
+
+    builtins["arr_fill"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::array_v(rt.array_pool.acquire());
+        Value val = rt.peek();
+        int64_t n = rt.stack[rt.stack_top - 2].as_int();
+        auto result = rt.array_pool.acquire();
+        for (int64_t i = 0; i < n; ++i) result->elements.push_back(val);
+        return Value::array_v(result);
+    };
+
+    // ============================================================================
+    // File builtins
+    // ============================================================================
+    builtins["file_exists"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        std::string path = rt.peek().as_string();
+        std::ifstream file(path);
+        return Value::bool_v(file.is_open());
+    };
+
+    builtins["file_remove"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        std::string path = rt.peek().as_string();
+        return Value::bool_v(std::remove(path.c_str()) == 0);
+    };
+
+    builtins["file_rename"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 2) return Value::bool_v(false);
+        std::string new_path = rt.peek().as_string();
+        std::string old_path = rt.stack[rt.stack_top - 2].as_string();
+        return Value::bool_v(std::rename(old_path.c_str(), new_path.c_str()) == 0);
+    };
+
+    builtins["file_size"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        std::string path = rt.peek().as_string();
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        int64_t size = 0;
+        if (file.is_open()) {
+            size = file.tellg();
+            file.close();
+        }
+        return Value::int_v(size);
+    };
+
+    builtins["mkdir"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        std::string path = rt.peek().as_string();
+        return Value::bool_v(std::filesystem::create_directory(path));
+    };
+
+    // ============================================================================
+    // Type conversion builtins
+    // ============================================================================
+    builtins["to_int"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::int_v(0);
+        return Value::int_v(static_cast<int64_t>(rt.peek().as_float()));
+    };
+
+    builtins["to_float"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::float_v(0.0);
+        return Value::float_v(rt.peek().as_float());
+    };
+
+    builtins["to_string"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("");
+        return Value::string_v(rt.peek().to_string());
+    };
+
+    builtins["to_bool"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::bool_v(false);
+        return Value::bool_v(rt.peek().as_bool());
+    };
+
+    builtins["type_of"] = [](VMRuntime& rt) -> Value {
+        if (rt.stack_top < 1) return Value::string_v("nil");
+        return Value::string_v(rt.peek().type_name());
+    };
 }
 
 // ============================================================================
@@ -1098,13 +1748,13 @@ bool ClawVM::load_module_from_file(const std::string& path) {
     return load_module(*module_opt);
 }
 
-Value ClawVM::execute() {
+bool ClawVM::execute_begin() {
     running = true;
     instructions_executed = 0;
     ip = 0;
     current_function = nullptr;
     current_function_idx = 0;
-    
+
     try {
         // Find main function in module
         int32_t main_idx = -1;
@@ -1114,12 +1764,14 @@ Value ClawVM::execute() {
                 break;
             }
         }
-        
+
         if (main_idx < 0) {
-            error("No main function found in bytecode module");
-            return Value::nil();
+            last_error = "No main function found in bytecode module";
+            had_error = true;
+            running = false;
+            return false;
         }
-        
+
         // Setup current function context
         current_function_idx = static_cast<uint32_t>(main_idx);
         current_function = &current_module.functions[current_function_idx];
@@ -1150,25 +1802,52 @@ Value ClawVM::execute() {
             runtime.stack_top = frame.base_stack + current_function->local_count;
         }
 
+        return true;
+
+    } catch (const std::exception& e) {
+        error(e.what());
+        had_error = true;
+        running = false;
+        return false;
+    }
+}
+
+Value ClawVM::execute_finish() {
+    if (runtime.stack_top > 0) {
+        return runtime.pop();
+    }
+    return Value::nil();
+}
+
+int32_t ClawVM::peek_opcode() const {
+    if (!current_function || ip < 0 || ip >= static_cast<int32_t>(current_function->code.size())) {
+        return -1;
+    }
+    return static_cast<int32_t>(current_function->code[ip].op);
+}
+
+Value ClawVM::execute() {
+    if (!execute_begin()) {
+        return Value::nil();
+    }
+
+    try {
         // Run dispatch loop
         while (running && dispatch()) {
             instructions_executed++;
-            
+
             // GC trigger
             if (runtime.gc_enabled && runtime.bytes_allocated > runtime.gc_threshold) {
                 GarbageCollector::collect(runtime);
             }
         }
-        
+
     } catch (const std::exception& e) {
         error(e.what());
         had_error = true;
     }
-    
-    if (runtime.stack_top > 0) {
-        return runtime.pop();
-    }
-    return Value::nil();
+
+    return execute_finish();
 }
 
 Value ClawVM::execute_closure(Value closure_val, const std::vector<Value>& args) {
@@ -3417,7 +4096,51 @@ bool ClawVM::op_ext() {
             runtime.push(Value::string_v(line));
             return true;
         }
-        
+        case 4: { // read_file
+            if (stack.empty()) return true;
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            std::ifstream file(path);
+            std::string content;
+            if (file.is_open()) {
+                content = std::string((std::istreambuf_iterator<char>(file)),
+                                      std::istreambuf_iterator<char>());
+                file.close();
+            }
+            runtime.push(Value::string_v(content));
+            return true;
+        }
+        case 5: { // write_file
+            if (stack.size() < 2) return true;
+            std::string content = stack.back().as_string();
+            stack.pop_back();
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            std::ofstream file(path);
+            bool ok = file.is_open();
+            if (ok) {
+                file << content;
+                file.close();
+            }
+            runtime.push(Value::bool_v(ok));
+            return true;
+        }
+        case 6: { // append_file
+            if (stack.size() < 2) return true;
+            std::string content = stack.back().as_string();
+            stack.pop_back();
+            std::string path = stack.back().as_string();
+            stack.pop_back();
+            std::ofstream file(path, std::ios::app);
+            bool ok = file.is_open();
+            if (ok) {
+                file << content;
+                file.close();
+            }
+            runtime.push(Value::bool_v(ok));
+            return true;
+        }
+
         // ========== 字符串函数 (10-29) ==========
         case 10: { // str_len
             if (stack.empty()) return true;

@@ -14,15 +14,19 @@ Primary runtime: `unknown`
 - `.brain/`
 - `.claude/`
 - `build/`
-- `build_lsp/`
 - `build_new/`
-- `build_test/`
+- `claw-debug.dSYM/`
 - `claw_test.dSYM/`
+- `completions/`
 - `dev-logs/`
-- `dev-reports/`
 - `docs/`
+- `examples/`
+- `homebrew/`
+- `man/`
+- `scripts/`
 - `src/`
 - `test/`
+- `tests/`
 <!-- brain:end project-doc-overview -->
 
 ## Local Notes

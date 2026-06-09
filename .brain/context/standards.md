@@ -7,6 +7,11 @@ Use this file for implementation and review expectations.
 
 - Preserve existing repo conventions and testing workflows.
 - Prefer narrow, reviewable changes over broad speculative rewrites.
+
+## CI
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/pages.yml`
 <!-- brain:end context-standards -->
 
 ## Local Notes

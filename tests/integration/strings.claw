@@ -1,0 +1,6 @@
+fn main() {
+    let s = "hello"
+    println(str_len(s))
+    println(str_upper(s))
+    println(str_contains(s, "ell"))
+}

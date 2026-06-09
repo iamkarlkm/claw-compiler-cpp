@@ -90,6 +90,7 @@ void BytecodeCompiler::compileModule(const ast::Program& module) {
 void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
     bytecode::Function byteFunc;
     byteFunc.name = func.get_name();
+    byteFunc.source_file = func.get_span().start.filename;
     byteFunc.arity = static_cast<uint32_t>(func.get_params().size());
     byteFunc.local_count = byteFunc.arity;
 
@@ -141,18 +142,22 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
         emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_CREATE));
     }
 
-    // 编译函数体
+    // 编译函数体（尾上下文：最后一条表达式的值作为隐式返回）
     if (func.get_body()) {
+        bool savedTail = isTailContext_;
+        isTailContext_ = true;
         if (auto* block = dynamic_cast<const ast::BlockStmt*>(func.get_body())) {
             compileBlockStmt(*block);
         } else if (auto* stmt = dynamic_cast<const ast::Statement*>(func.get_body())) {
             compileStatement(*stmt);
         }
+        isTailContext_ = savedTail;
     }
-    
+
     // 如果没有显式返回，处理隐式返回
     if (ctx_->currentFunction->code.empty() ||
-        ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
+        (ctx_->currentFunction->code.back().op != bytecode::OpCode::RET &&
+         ctx_->currentFunction->code.back().op != bytecode::OpCode::RET_NULL)) {
         // 如果最后一条指令是 POP（来自表达式语句），将其替换为 RET
         // 以支持隐式返回（函数体最后一个表达式的值作为返回值）
         if (!ctx_->currentFunction->code.empty() &&
@@ -162,7 +167,7 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
             emitOp(bytecode::OpCode::RET_NULL);
         }
     }
-    
+
     // Update local_count to reflect all allocated locals
     ctx_->currentFunction->local_count = std::max(
         ctx_->currentFunction->local_count,
@@ -180,6 +185,7 @@ void BytecodeCompiler::compileFunction(const ast::FunctionStmt& func) {
 void BytecodeCompiler::compileImplMethodFunction(const std::string& mangled_name, const ast::ImplMethod& method) {
     bytecode::Function byteFunc;
     byteFunc.name = mangled_name;
+    byteFunc.source_file = method.span.start.filename;
     byteFunc.arity = static_cast<uint32_t>(method.params.size());
     byteFunc.local_count = byteFunc.arity;
 
@@ -226,14 +232,18 @@ void BytecodeCompiler::compileImplMethodFunction(const std::string& mangled_name
     }
     ctx_->nextSlot = slot;
 
-    // Compile function body
+    // Compile function body (tail context)
     if (method.body) {
+        bool savedTail = isTailContext_;
+        isTailContext_ = true;
         compileBlockStmt(*method.body);
+        isTailContext_ = savedTail;
     }
 
     // Add implicit return if none exists
     if (ctx_->currentFunction->code.empty() ||
-        ctx_->currentFunction->code.back().op != bytecode::OpCode::RET) {
+        (ctx_->currentFunction->code.back().op != bytecode::OpCode::RET &&
+         ctx_->currentFunction->code.back().op != bytecode::OpCode::RET_NULL)) {
         if (!ctx_->currentFunction->code.empty() &&
             ctx_->currentFunction->code.back().op == bytecode::OpCode::POP) {
             ctx_->currentFunction->code.back().op = bytecode::OpCode::RET;
@@ -259,6 +269,9 @@ void BytecodeCompiler::compileImplMethodFunction(const std::string& mangled_name
 // ========== 语句编译 ==========
 
 void BytecodeCompiler::compileStatement(const Stmt& stmt) {
+    if (debugInfo_) {
+        setCurrentLine(static_cast<int>(stmt.get_span().start.line));
+    }
     switch (stmt.get_kind()) {
         case ast::Statement::Kind::Let:
             compileLetStmt(static_cast<const ast::LetStmt&>(stmt));
@@ -436,13 +449,21 @@ void BytecodeCompiler::compileIfStmt(const ast::IfStmt& stmt) {
                 exitScope();
             }
         }
-        
-        // Jump past all remaining branches
-        int afterBranchIdx = ctx_->currentFunction->code.size();
-        emitOp(bytecode::OpCode::JMP);
-        ctx_->pendingJumps.push_back({afterBranchIdx, 0, true});
-        afterBranchIdxs.push_back(afterBranchIdx);
-        
+
+        // Jump past all remaining branches, but only if this branch
+        // does not already end with a terminal instruction (RET/RET_NULL).
+        // Otherwise the JMP would be dead code with a target past the function end.
+        bool branch_terminates = !ctx_->currentFunction->code.empty() &&
+            (ctx_->currentFunction->code.back().op == bytecode::OpCode::RET ||
+             ctx_->currentFunction->code.back().op == bytecode::OpCode::RET_NULL);
+
+        if (!branch_terminates) {
+            int afterBranchIdx = ctx_->currentFunction->code.size();
+            emitOp(bytecode::OpCode::JMP);
+            ctx_->pendingJumps.push_back({afterBranchIdx, 0, true});
+            afterBranchIdxs.push_back(afterBranchIdx);
+        }
+
         // Patch the else jump to here
         patchJump(elseJumpIdx, ctx_->currentFunction->code.size());
     }
@@ -694,6 +715,8 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
             ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
 
             // body
+            bool savedTail = isTailContext_;
+            isTailContext_ = false;
             enterScope();
             if (body) {
                 if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
@@ -703,6 +726,7 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
                 }
             }
             exitScope();
+            isTailContext_ = savedTail;
 
             // continue target: increment section
             int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
@@ -762,6 +786,8 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
             emitOp(bytecode::OpCode::JMP_IF);
             ctx_->pendingJumps.push_back({exitJumpIdx, 0, true});
 
+            bool savedTail2 = isTailContext_;
+            isTailContext_ = false;
             enterScope();
             if (body) {
                 if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
@@ -771,6 +797,7 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
                 }
             }
             exitScope();
+            isTailContext_ = savedTail2;
 
             int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
 
@@ -832,6 +859,8 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
     emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
 
     // body
+    bool savedTail3 = isTailContext_;
+    isTailContext_ = false;
     enterScope();
     if (body) {
         if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
@@ -841,6 +870,7 @@ void BytecodeCompiler::compileForStmt(const ast::ForStmt& stmt) {
         }
     }
     exitScope();
+    isTailContext_ = savedTail3;
 
     int continueTargetIdx = static_cast<int>(ctx_->currentFunction->code.size());
 
@@ -920,6 +950,8 @@ void BytecodeCompiler::compileForAwaitStmt(const ast::ForAwaitStmt& stmt) {
     emitOp1(bytecode::OpCode::STORE_LOCAL, varSlot);
 
     // Body
+    bool savedTail6 = isTailContext_;
+    isTailContext_ = false;
     if (body) {
         if (auto* block = dynamic_cast<const ast::BlockStmt*>(body)) {
             compileBlockStmt(*block);
@@ -927,6 +959,7 @@ void BytecodeCompiler::compileForAwaitStmt(const ast::ForAwaitStmt& stmt) {
             compileStatement(*stmtNode);
         }
     }
+    isTailContext_ = savedTail6;
 
     // Jump back to loop start
     int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
@@ -964,6 +997,8 @@ void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
     emitOp(bytecode::OpCode::JMP_IF_NOT);
     ctx_->pendingJumps.push_back({condJumpIdx, 0, true});
 
+    bool savedTail4 = isTailContext_;
+    isTailContext_ = false;
     enterScope();
     auto* body = stmt.get_body();
     if (body) {
@@ -975,6 +1010,7 @@ void BytecodeCompiler::compileWhileStmt(const ast::WhileStmt& stmt) {
         }
     }
     exitScope();
+    isTailContext_ = savedTail4;
 
     // Jump back to loop start
     int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
@@ -1005,6 +1041,8 @@ void BytecodeCompiler::compileLoopStmt(const ast::LoopStmt& stmt) {
     loopCtx.scopeDepth = ctx_->scopeDepth;
     ctx_->loopStack.push_back(loopCtx);
 
+    bool savedTail5 = isTailContext_;
+    isTailContext_ = false;
     enterScope();
     auto* body = stmt.get_body();
     if (body) {
@@ -1015,6 +1053,7 @@ void BytecodeCompiler::compileLoopStmt(const ast::LoopStmt& stmt) {
         }
     }
     exitScope();
+    isTailContext_ = savedTail5;
 
     // Jump back to loop start
     int backOffset = loopStartIdx - (static_cast<int>(ctx_->currentFunction->code.size()) + 1);
@@ -1037,15 +1076,18 @@ void BytecodeCompiler::compileReturnStmt(const ast::ReturnStmt& stmt) {
     auto* value = stmt.get_value();
     if (value) {
         compileExpression(*value);
+        // async 函数返回前解析 Future
+        if (in_async_function_) {
+            emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_RESOLVE));
+        }
+        emitOp(bytecode::OpCode::RET);
     } else {
-        emitOp(bytecode::OpCode::PUSH);
-        emitOp1(bytecode::OpCode::PUSH, 0);
+        // async 函数返回前解析 Future
+        if (in_async_function_) {
+            emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_RESOLVE));
+        }
+        emitOp(bytecode::OpCode::RET_NULL);
     }
-    // async 函数返回前解析 Future
-    if (in_async_function_) {
-        emitOp1(bytecode::OpCode::EXT, static_cast<int>(bytecode::ExtOpCode::FUTURE_RESOLVE));
-    }
-    emitOp(bytecode::OpCode::RET);
 }
 
 void BytecodeCompiler::compileBreakStmt(const ast::BreakStmt& stmt) {
@@ -1074,8 +1116,14 @@ void BytecodeCompiler::compileContinueStmt(const ast::ContinueStmt& stmt) {
 }
 
 void BytecodeCompiler::compileBlockStmt(const ast::BlockStmt& block) {
-    for (auto& stmt : block.get_statements()) {
-        compileStatement(*stmt);
+    const auto& stmts = block.get_statements();
+    for (size_t i = 0; i < stmts.size(); ++i) {
+        bool savedTail = isTailContext_;
+        if (i != stmts.size() - 1) {
+            isTailContext_ = false;
+        }
+        compileStatement(*stmts[i]);
+        isTailContext_ = savedTail;
     }
 }
 
@@ -1106,7 +1154,11 @@ void BytecodeCompiler::compileExprStmt(const ast::ExprStmt& stmt) {
     }
 
     compileExpression(*expr);
-    emitOp(bytecode::OpCode::POP);
+    if (isTailContext_) {
+        emitOp(bytecode::OpCode::RET);
+    } else {
+        emitOp(bytecode::OpCode::POP);
+    }
 }
 
 void BytecodeCompiler::compilePublishStmt(const ast::PublishStmt& stmt) {
@@ -1273,6 +1325,9 @@ void BytecodeCompiler::compileBridgeStmt(const ast::BridgeStmt& stmt) {
 // ========== 表达式编译 ==========
 
 void BytecodeCompiler::compileExpression(const Expr& expr) {
+    if (debugInfo_) {
+        setCurrentLine(static_cast<int>(expr.get_span().start.line));
+    }
     switch (expr.get_kind()) {
         case ast::Expression::Kind::Literal:
             compileLiteralExpr(static_cast<const ast::LiteralExpr&>(expr));
@@ -1737,12 +1792,25 @@ int BytecodeCompiler::allocateLocal(const std::string& name) {
     return slot;
 }
 
+// ========== Debug info ==========
+
+void BytecodeCompiler::setCurrentLine(int line) {
+    currentLine_ = line;
+}
+
+void BytecodeCompiler::recordLine() {
+    if (debugInfo_ && ctx_->currentFunction) {
+        ctx_->currentFunction->line_numbers.push_back(currentLine_);
+    }
+}
+
 // ========== 指令生成辅助 ==========
 
 void BytecodeCompiler::emitOp(bytecode::OpCode op) {
     bytecode::Instruction inst;
     inst.op = op;
     ctx_->currentFunction->code.push_back(inst);
+    recordLine();
 }
 
 void BytecodeCompiler::emitOp1(bytecode::OpCode op, int operand) {
@@ -1750,6 +1818,7 @@ void BytecodeCompiler::emitOp1(bytecode::OpCode op, int operand) {
     inst.op = op;
     inst.operand = static_cast<uint32_t>(operand);
     ctx_->currentFunction->code.push_back(inst);
+    recordLine();
 }
 
 void BytecodeCompiler::emitOp2(bytecode::OpCode op, int operand1, int operand2) {
@@ -1759,6 +1828,7 @@ void BytecodeCompiler::emitOp2(bytecode::OpCode op, int operand1, int operand2) 
     // Lower 16 bits for operand1, upper 16 bits for operand2
     inst.operand = (static_cast<uint32_t>(operand2) << 16) | static_cast<uint32_t>(operand1);
     ctx_->currentFunction->code.push_back(inst);
+    recordLine();
 }
 
 void BytecodeCompiler::emitOpF(bytecode::OpCode op, double operand) {
@@ -1769,6 +1839,7 @@ void BytecodeCompiler::emitOpF(bytecode::OpCode op, double operand) {
     converter.d = operand;
     inst.operand = static_cast<uint32_t>(converter.i & 0xFFFFFFFF);
     ctx_->currentFunction->code.push_back(inst);
+    recordLine();
 }
 
 void BytecodeCompiler::emitOpS(bytecode::OpCode op, const std::string& operand) {
@@ -1780,6 +1851,7 @@ void BytecodeCompiler::emitJump(bytecode::OpCode op) {
     bytecode::Instruction inst;
     inst.op = op;
     ctx_->currentFunction->code.push_back(inst);
+    recordLine();
 }
 
 void BytecodeCompiler::patchJump(int jumpIdx, int targetIdx) {

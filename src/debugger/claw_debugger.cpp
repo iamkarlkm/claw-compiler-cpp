@@ -143,43 +143,39 @@ int Debugger::find_breakpoint_at(const DebugLocation& loc) const {
 
 int Debugger::run(const std::shared_ptr<bytecode::Module>& module,
                   const std::vector<std::string>& args) {
+    // Stop any existing execution
+    stop();
+
     module_ = module;
-    
-    // Load debug info
     load_debug_info(module);
-    
-    // Create VM
+
+    // Create VM and load module
     vm_ = std::make_shared<vm::ClawVM>();
-    
+    if (!vm_->load_module(*module)) {
+        state_.last_error = vm_->last_error;
+        return 1;
+    }
+
     // Setup execution
     state_.is_running = true;
     state_.is_paused = false;
     state_.is_terminated = false;
     state_.step_mode = StepMode::None;
-    
-    emit_event(DebugEvent(DebugEventType::Resume));
-    
-    try {
-        // Execute the module
-        vm::Value result = vm_->execute();
-        
+    stop_requested_ = false;
+
+    // Begin execution (setup main function frame)
+    if (!vm_->execute_begin()) {
+        state_.last_error = vm_->last_error;
         state_.is_terminated = true;
         state_.is_running = false;
-        
-        emit_event(DebugEvent(DebugEventType::Terminated));
-        
-        // Return integer result if applicable
-        if (result.is_int()) {
-            return static_cast<int>(result.as_int());
-        }
-        
-        return 0;
-    } catch (const std::exception& e) {
-        state_.last_error = e.what();
-        on_exception(e.what());
         return 1;
     }
-    
+
+    update_debug_state();
+
+    // Start execution thread
+    execution_thread_ = std::thread(&Debugger::execution_loop, this);
+
     return 0;
 }
 
@@ -187,71 +183,201 @@ void Debugger::continue_execution() {
     if (!state_.can_continue()) {
         return;
     }
-    
-    state_.step_mode = StepMode::None;
-    state_.is_paused = false;
-    
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        state_.step_mode = StepMode::None;
+        state_.is_paused = false;
+    }
+
     emit_event(DebugEvent(DebugEventType::Resume));
+    pause_cv_.notify_all();
 }
 
 void Debugger::step_over() {
     if (!state_.can_step()) {
         return;
     }
-    
-    state_.step_mode = StepMode::Over;
-    state_.is_paused = false;
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        step_start_frame_depth_ = vm_->runtime.frame_count;
+        state_.step_mode = StepMode::Over;
+        state_.is_paused = false;
+    }
+
+    pause_cv_.notify_all();
 }
 
 void Debugger::step_into() {
     if (!state_.can_step()) {
         return;
     }
-    
-    state_.step_mode = StepMode::Into;
-    state_.is_paused = false;
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        step_start_frame_depth_ = vm_->runtime.frame_count;
+        state_.step_mode = StepMode::Into;
+        state_.is_paused = false;
+    }
+
+    pause_cv_.notify_all();
 }
 
 void Debugger::step_out() {
     if (!state_.can_step()) {
         return;
     }
-    
-    state_.step_mode = StepMode::Out;
-    state_.is_paused = false;
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        step_start_frame_depth_ = vm_->runtime.frame_count;
+        state_.step_mode = StepMode::Out;
+        state_.is_paused = false;
+    }
+
+    pause_cv_.notify_all();
 }
 
 void Debugger::step_instruction() {
     if (!state_.can_step()) {
         return;
     }
-    
-    state_.step_mode = StepMode::Line;
-    state_.is_paused = false;
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        state_.step_mode = StepMode::Line;
+        state_.is_paused = false;
+    }
+
+    pause_cv_.notify_all();
 }
 
 void Debugger::pause() {
-    if (!state_.is_running || state_.is_paused) {
+    if (!state_.is_running || state_.is_paused || state_.is_terminated) {
         return;
     }
-    
-    state_.is_paused = true;
-    state_.step_mode = StepMode::None;
-    
+
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        state_.is_paused = true;
+    }
+
     update_debug_state();
     emit_event(DebugEvent(DebugEventType::Pause));
+    pause_cv_.notify_all();
 }
 
 void Debugger::stop() {
-    if (vm_) {
-        vm_->op_halt();
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        stop_requested_ = true;
+        state_.is_running = false;
+        state_.is_paused = false;
     }
-    
-    state_.is_running = false;
-    state_.is_paused = false;
-    state_.is_terminated = true;
-    
-    emit_event(DebugEvent(DebugEventType::Terminated));
+
+    pause_cv_.notify_all();
+
+    if (execution_thread_.joinable()) {
+        execution_thread_.join();
+    }
+
+    if (vm_) {
+        vm_->reset();
+    }
+
+    if (!state_.is_terminated) {
+        state_.is_terminated = true;
+        emit_event(DebugEvent(DebugEventType::Terminated));
+    }
+}
+
+void Debugger::wait_for_pause() {
+    std::unique_lock<std::mutex> lock(pause_mutex_);
+    pause_cv_.wait(lock, [this]() {
+        return state_.is_paused || state_.is_terminated || stop_requested_;
+    });
+}
+
+// ============================================================================
+// Execution Loop
+// ============================================================================
+
+void Debugger::execution_loop() {
+    while (vm_->running && !stop_requested_) {
+        // Wait if paused
+        {
+            std::unique_lock<std::mutex> lock(pause_mutex_);
+            if (state_.is_paused) {
+                pause_cv_.wait(lock, [this]() {
+                    return !state_.is_paused || stop_requested_ || state_.is_terminated;
+                });
+                if (stop_requested_ || state_.is_terminated) break;
+            }
+        }
+
+        // Execute one instruction
+        bool stepped = vm_->step();
+        if (!stepped) {
+            break;
+        }
+
+        update_debug_state();
+
+        // Check breakpoint
+        DebugLocation loc = current_vm_location();
+        int bp_id = find_breakpoint_at(loc);
+        if (bp_id > 0) {
+            auto it = breakpoints_.find(bp_id);
+            if (it != breakpoints_.end() && should_pause_at_breakpoint(it->second)) {
+                std::lock_guard<std::mutex> lock(pause_mutex_);
+                state_.is_paused = true;
+                state_.step_mode = StepMode::None;
+                on_breakpoint_hit(it->second);
+                pause_cv_.notify_all();
+                continue;
+            }
+        }
+
+        // Check step mode
+        if (state_.step_mode != StepMode::None) {
+            bool should_pause = false;
+            switch (state_.step_mode) {
+                case StepMode::Into:
+                case StepMode::Line:
+                    should_pause = true;
+                    break;
+                case StepMode::Over:
+                    should_pause = vm_->runtime.frame_count <= step_start_frame_depth_;
+                    break;
+                case StepMode::Out:
+                    should_pause = vm_->runtime.frame_count < step_start_frame_depth_;
+                    break;
+                default:
+                    break;
+            }
+            if (should_pause) {
+                std::lock_guard<std::mutex> lock(pause_mutex_);
+                state_.is_paused = true;
+                on_step_complete();
+                pause_cv_.notify_all();
+                continue;
+            }
+        }
+    }
+
+    // Execution ended
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        if (!state_.is_terminated) {
+            state_.is_terminated = true;
+            state_.is_running = false;
+            state_.is_paused = false;
+            update_debug_state();
+            emit_event(DebugEvent(DebugEventType::Terminated));
+        }
+        pause_cv_.notify_all();
+    }
 }
 
 // ============================================================================
@@ -482,16 +608,46 @@ void Debugger::update_debug_state() {
     if (!vm_) {
         return;
     }
-    
+
     // Update current location
     state_.current_location = current_vm_location();
-    
-    // Update call stack (simplified - full implementation would walk the VM stack)
+
+    // Update call stack from VM runtime
     state_.call_stack.clear();
-    
-    // Get local variables from VM
+    for (int32_t i = 0; i < vm_->runtime.frame_count; i++) {
+        StackFrame frame;
+        frame.frame_id = i;
+        auto& call_frame = vm_->runtime.call_frames[i];
+        if (call_frame.closure && call_frame.closure->function) {
+            frame.function_name = call_frame.closure->function->name;
+        } else {
+            frame.function_name = "<unknown>";
+        }
+        frame.current_location = state_.current_location;
+        frame.stack_depth = static_cast<size_t>(vm_->runtime.frame_count);
+        state_.call_stack.push_back(frame);
+    }
+
+    // Get local variables from current VM frame
     state_.current_variables.clear();
-    // In a full implementation, we'd extract locals from the VM's current frame
+    if (vm_->current_function && vm_->runtime.frame_count > 0) {
+        auto& frame = vm_->runtime.call_frames.back();
+        const auto& local_names = vm_->current_function->local_names;
+        int32_t base = frame.base_stack;
+
+        for (size_t i = 0; i < local_names.size() && i < vm_->current_function->local_count; i++) {
+            int32_t slot_idx = base + static_cast<int32_t>(i);
+            if (slot_idx >= 0 && slot_idx < vm_->runtime.stack_top) {
+                VariableInfo info;
+                info.name = local_names[i];
+                info.value = vm_->runtime.stack[slot_idx];
+                info.value_repr = value_to_string(info.value);
+                info.type_name = info.value.type_name();
+                info.is_local = true;
+                state_.current_variables.push_back(info);
+            }
+        }
+    }
 }
 
 void Debugger::on_breakpoint_hit(const Breakpoint& bp) {
@@ -549,10 +705,20 @@ DebugLocation Debugger::current_vm_location() const {
     if (!vm_) {
         return DebugLocation();
     }
-    
-    // Get current execution location from VM
-    // In a full implementation, this would query the VM's debug info
-    return DebugLocation();
+
+    DebugLocation loc;
+    loc.line = 0;
+    loc.column = 0;
+
+    if (vm_->current_function) {
+        loc.file = vm_->current_function->source_file;
+        uint32_t ip = vm_->ip >= 0 ? static_cast<uint32_t>(vm_->ip) : 0;
+        if (ip < vm_->current_function->line_numbers.size()) {
+            loc.line = vm_->current_function->line_numbers[ip];
+        }
+    }
+
+    return loc;
 }
 
 // ============================================================================

@@ -48,6 +48,8 @@ private:
     void scan_identifier();
     void scan_number();
     void scan_string();
+    void scan_interpolated_string();
+    void scan_raw_string();
     void scan_byte_literal();
     void scan_comment();
     
@@ -269,8 +271,10 @@ inline void Lexer::scan_token() {
             break;
             
         default:
-            // Could be identifier, keyword, or number
-            if (is_digit(c)) {
+            // Check for raw string literal: r"..."
+            if (c == 'r' && peek() == '"') {
+                scan_raw_string();
+            } else if (is_digit(c)) {
                 scan_number();
             } else if (is_alpha(c)) {
                 scan_identifier();
@@ -291,13 +295,19 @@ inline void Lexer::scan_identifier() {
     while (is_alphanumeric(peek())) {
         advance();
     }
-    
+
     // Get the text
     std::string text = substring(start, current);
-    
+
+    // Check for interpolated string prefix: f"..."
+    if (text == "f" && peek() == '"') {
+        scan_interpolated_string();
+        return;
+    }
+
     // Check for keywords
     TokenType type = KeywordMap::lookup(text);
-    
+
     // Check for type keywords
     if (type == TokenType::Identifier) {
         // Check if it's a built-in type
@@ -369,46 +379,53 @@ inline void Lexer::scan_identifier() {
 
 // Scan numeric literals
 inline void Lexer::scan_number() {
-    while (is_digit(peek())) {
+    while (is_digit(peek()) || (peek() == '_' && is_digit(peek_next()))) {
         advance();
     }
-    
+
     bool is_float = false;
-    
+
     // Just emit the number normally, the range operator will be handled by the '.' case
-    
+
     // Check for decimal point
-    if (peek() == '.' && is_digit(peek_next())) {
+    if (peek() == '.' && (is_digit(peek_next()) || peek_next() == '_')) {
         is_float = true;
         advance(); // consume '.'
-        
-        while (is_digit(peek())) {
+
+        while (is_digit(peek()) || (peek() == '_' && is_digit(peek_next()))) {
             advance();
         }
     }
-    
+
     // Check for exponent
     if (peek() == 'e' || peek() == 'E') {
         is_float = true;
         advance();
-        
+
         if (peek() == '+' || peek() == '-') {
             advance();
         }
-        
-        while (is_digit(peek())) {
+
+        while (is_digit(peek()) || (peek() == '_' && is_digit(peek_next()))) {
             advance();
         }
     }
-    
+
     std::string text = substring(start, current);
     SourceSpan span = make_span();
-    
+
+    // Remove underscores for parsing
+    std::string clean_text;
+    clean_text.reserve(text.size());
+    for (char c : text) {
+        if (c != '_') clean_text.push_back(c);
+    }
+
     if (is_float) {
-        double value = std::stod(text);
+        double value = std::stod(clean_text);
         tokens.emplace_back(TokenType::FloatLiteral, span, LiteralValue(value), text);
     } else {
-        int64_t value = std::stoll(text);
+        int64_t value = std::stoll(clean_text);
         tokens.emplace_back(TokenType::IntegerLiteral, span, LiteralValue(value), text);
     }
 }
@@ -452,9 +469,121 @@ inline void Lexer::scan_string() {
     }
     
     advance(); // consume closing "
-    
+
     SourceSpan span = make_span();
     tokens.emplace_back(TokenType::StringLiteral, span, LiteralValue(value), value);
+}
+
+// Scan raw string literal: r"..." (no escape sequences)
+inline void Lexer::scan_raw_string() {
+    // 'r' already consumed by scan_token()
+    advance(); // consume opening '"'
+
+    std::string value;
+    while (peek() != '"' && !is_at_end()) {
+        if (peek() == '\n') {
+            if (reporter) {
+                reporter->error("Unterminated raw string", make_span(), "E002");
+            }
+            break;
+        }
+        value += advance();
+    }
+
+    if (is_at_end()) {
+        if (reporter) {
+            reporter->error("Unterminated raw string", make_span(), "E002");
+        }
+        return;
+    }
+
+    advance(); // consume closing '"'
+
+    SourceSpan span = make_span();
+    tokens.emplace_back(TokenType::RawString, span, LiteralValue(value), value);
+}
+
+// Scan interpolated string literals: f"hello {name}!"
+inline void Lexer::scan_interpolated_string() {
+    advance(); // consume opening "
+
+    InterpolatedStringSegments segments;
+    std::string literal_text;
+
+    while (peek() != '"' && !is_at_end()) {
+        if (peek() == '\n') {
+            if (reporter) {
+                reporter->error("Unterminated interpolated string", make_span(), "E002");
+            }
+            break;
+        }
+
+        char c = advance();
+
+        if (c == '\\') {
+            char escaped = advance();
+            switch (escaped) {
+                case 'n': literal_text += '\n'; break;
+                case 't': literal_text += '\t'; break;
+                case 'r': literal_text += '\r'; break;
+                case '\\': literal_text += '\\'; break;
+                case '"': literal_text += '"'; break;
+                case '{': literal_text += '{'; break;
+                case '}': literal_text += '}'; break;
+                case '0': literal_text += '\0'; break;
+                default: literal_text += escaped; break;
+            }
+        } else if (c == '{') {
+            // Flush pending literal text
+            if (!literal_text.empty()) {
+                segments.push_back({false, literal_text});
+                literal_text.clear();
+            }
+
+            // Read expression until matching }
+            std::string expr_text;
+            int brace_depth = 1;
+            while (brace_depth > 0 && !is_at_end() && peek() != '"') {
+                char ec = advance();
+                if (ec == '{') brace_depth++;
+                else if (ec == '}') brace_depth--;
+
+                if (brace_depth > 0) {
+                    expr_text += ec;
+                }
+            }
+
+            if (brace_depth > 0) {
+                if (reporter) {
+                    reporter->error("Unclosed interpolation in string", make_span(), "E003");
+                }
+                return;
+            }
+
+            if (!expr_text.empty()) {
+                segments.push_back({true, expr_text});
+            }
+        } else {
+            literal_text += c;
+        }
+    }
+
+    if (is_at_end()) {
+        if (reporter) {
+            reporter->error("Unterminated interpolated string", make_span(), "E002");
+        }
+        return;
+    }
+
+    advance(); // consume closing "
+
+    // Flush remaining literal text
+    if (!literal_text.empty()) {
+        segments.push_back({false, literal_text});
+    }
+
+    SourceSpan span = make_span();
+    tokens.emplace_back(TokenType::InterpolatedString, span, LiteralValue(segments), substring(start, current));
 }
 
 // Scan byte literals (single quotes)

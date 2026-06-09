@@ -1,0 +1,6 @@
+fn main() {
+    let arr = arr_range(1, 4, 1)
+    println(arr_len(arr))
+    arr = arr_push(arr, 10)
+    println(arr_len(arr))
+}

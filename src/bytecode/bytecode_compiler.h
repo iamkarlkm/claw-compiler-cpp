@@ -114,6 +114,9 @@ private:
     void compileTupleExpr(const ast::TupleExpr& expr);
     void compileLambdaExpr(const ast::LambdaExpr& expr);
     void compileCommandExpr(const ast::CommandExpr& expr);
+    void compileInterpolatedStringExpr(const ast::InterpolatedStringExpr& expr);
+    void compileFirstSegment(const ast::InterpolatedStringExpr::Segment& seg);
+    void compileSegment(const ast::InterpolatedStringExpr::Segment& seg);
 
     // 作用域管理
     void enterScope();
@@ -144,12 +147,17 @@ private:
     // 错误处理
     void error(const std::string& msg);
     void errorf(const char* fmt, ...);
-    
+
+    // Debug info
+    void recordLine();
+    void setCurrentLine(int line);
+
     // 成员变量
     std::shared_ptr<BytecodeModule> module_;
     std::unique_ptr<CompilationContext> ctx_;
     std::string lastError_;
     bool debugInfo_ = false;
+    int currentLine_ = 0;
     int nextGlobalSlot_ = 0;
     std::unordered_map<std::string, int> globalVars_;
     std::unordered_map<std::string, std::vector<std::string>> structRegistry_;
@@ -159,6 +167,7 @@ private:
     std::unordered_map<std::string, std::string> variantToEnum_; // variant name -> enum name
     std::unordered_set<std::string> async_functions_;
     bool in_async_function_ = false;
+    bool isTailContext_ = false;  // 当前语句是否为尾上下文（值应作为隐式返回）
 };
 
 } // namespace claw

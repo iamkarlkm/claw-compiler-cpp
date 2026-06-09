@@ -135,7 +135,7 @@ std::string ParseCache::compute_key(const std::string& source,
                                     const std::string& filename) {
     // Key = SHA256(source + "\0" + filename + "\0" + version)
     // Bumping version invalidates stale caches when TokenType enum changes.
-    return sha256_string(source + "\0" + filename + "\0" + "v2");
+    return sha256_string(source + "\0" + filename + "\0" + "v4");
 }
 
 std::string ParseCache::cache_path(const std::string& key) {
@@ -164,7 +164,7 @@ bool ParseCache::has_cache(const std::string& source,
 //     [4]   e_off   uint32_t
 //     [4]   fn_len  uint32_t
 //     [fn_len] filename bytes (no null term)
-//     [1]   value_type  0=none,1=i64,2=f64,3=str,4=char,5=bool
+//     [1]   value_type  0=none,1=i64,2=f64,3=str,4=char,5=bool,6=interpolated_string_segments
 //     value payload (depends on value_type)
 //     [4]   text_len uint32_t
 //     [text_len] text bytes (no null term)
@@ -219,6 +219,7 @@ void ParseCache::save_tokens(const std::string& source,
         else if (std::holds_alternative<std::string>(tok.value)) vt = 3;
         else if (std::holds_alternative<char>(tok.value)) vt = 4;
         else if (std::holds_alternative<bool>(tok.value)) vt = 5;
+        else if (std::holds_alternative<InterpolatedStringSegments>(tok.value)) vt = 6;
         write_u8(out, vt);
 
         switch (vt) {
@@ -246,6 +247,16 @@ void ParseCache::save_tokens(const std::string& source,
             case 5: {
                 bool v = std::get<bool>(tok.value);
                 write_u8(out, v ? 1 : 0);
+                break;
+            }
+            case 6: {
+                const auto& segs = std::get<InterpolatedStringSegments>(tok.value);
+                write_u32(out, static_cast<uint32_t>(segs.size()));
+                for (const auto& seg : segs) {
+                    write_u8(out, seg.is_expr ? 1 : 0);
+                    write_u32(out, static_cast<uint32_t>(seg.text.size()));
+                    out.write(seg.text.data(), seg.text.size());
+                }
                 break;
             }
             default:
@@ -323,6 +334,21 @@ std::vector<Token> ParseCache::load_tokens() {
             case 5: {
                 uint8_t b = read_u8(in);
                 val = (b != 0);
+                break;
+            }
+            case 6: {
+                uint32_t seg_count = read_u32(in);
+                InterpolatedStringSegments segs;
+                segs.reserve(seg_count);
+                for (uint32_t i = 0; i < seg_count; i++) {
+                    uint8_t is_expr = read_u8(in);
+                    uint32_t seg_len = read_u32(in);
+                    std::string seg_text;
+                    seg_text.resize(seg_len);
+                    in.read(seg_text.data(), seg_len);
+                    segs.push_back({is_expr != 0, seg_text});
+                }
+                val = segs;
                 break;
             }
             default:

@@ -1831,11 +1831,12 @@ void MethodJITCompiler::emit_return_op(void*& code_ptr, bytecode::OpCode op) {
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
 
     switch (op) {
-        case bytecode::OpCode::RET:  // mov rsp, rbp; pop rbp; ret
-            code[0] = 0x48; code[1] = 0x89; code[2] = 0xec; // mov rsp, rbp
-            code[3] = 0x5d; // pop rbp
-            code[4] = 0xc3; // ret
-            code_ptr = &code[5];
+        case bytecode::OpCode::RET:  // pop rax; mov rsp, rbp; pop rbp; ret
+            code[0] = 0x58; // pop rax (return value)
+            code[1] = 0x48; code[2] = 0x89; code[3] = 0xec; // mov rsp, rbp
+            code[4] = 0x5d; // pop rbp
+            code[5] = 0xc3; // ret
+            code_ptr = &code[6];
             break;
         case bytecode::OpCode::RET_NULL:  // mov rsp, rbp; xor rax, rax; pop rbp; ret
             code[0] = 0x48; code[1] = 0x89; code[2] = 0xec; // mov rsp, rbp

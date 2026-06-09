@@ -12,6 +12,9 @@
 #include <functional>
 #include <optional>
 #include <variant>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 // #include "common/source_location.h"  // TODO: create this file
 #include "bytecode/bytecode.h"
@@ -283,7 +286,12 @@ public:
      * Stop debugging
      */
     void stop();
-    
+
+    /**
+     * Wait until execution pauses or terminates
+     */
+    void wait_for_pause();
+
     // =========================================================================
     // Inspection
     // =========================================================================
@@ -384,7 +392,19 @@ private:
     std::map<DebugLocation, int> location_to_breakpoint_;
     std::map<std::string, int> function_breakpoints_;
     
+    // Execution threading
+    std::thread execution_thread_;
+    std::mutex pause_mutex_;
+    std::condition_variable pause_cv_;
+    bool stop_requested_ = false;
+
+    // Step tracking
+    int32_t step_start_frame_depth_ = 0;
+    int32_t step_start_ip_ = 0;
+
     // Private methods
+    void execution_loop();
+    bool should_pause_here();
     int find_breakpoint_at(const DebugLocation& loc) const;
     bool should_pause_at_breakpoint(Breakpoint& bp);
     void update_debug_state();

@@ -3,11 +3,13 @@ claw
 claw-lsp
 claw-repl
 claw-debug
+claw-debugger
 claw-opt
 claw-tests
 *.o
 *.a
 *.so
+node_modules/
 *.dylib
 *.dSYM/
 
@@ -58,9 +60,14 @@ cmake_install.cmake
 dev-logs/
 test/
 dev-reports/
+
+# 基准测试结果（保留 baseline.json）
+benchmark/results/benchmark_*.json
+!benchmark/results/baseline.json
 AGENTS.md
 CLAUDE.md
 **/test_*
+!tests/test_integration.cpp
 **/*.ba*
 **/*.new*
 **/*.fix*
@@ -73,5 +80,6 @@ CLAUDE.md
 .brain/state/
 # brain:end gitignore-session
 version
-!VERSION
 claw-coverage
+coverage-report/
+claw-release.pub

@@ -1,6 +1,10 @@
 // claw_debugger_cli.cpp - Debugger CLI Implementation
 
 #include "debugger/claw_debugger_cli.h"
+#include "lexer/lexer.h"
+#include "parser/parser.h"
+#include "bytecode/bytecode_compiler.h"
+#include "common/common.h"
 #include <iostream>
 #include <sstream>
 #include <fstream>
@@ -19,7 +23,11 @@ DebuggerCLI::DebuggerCLI() : debugger_(create_debugger()) {
     register_commands();
 }
 
-DebuggerCLI::~DebuggerCLI() = default;
+DebuggerCLI::~DebuggerCLI() {
+    if (debugger_) {
+        debugger_->set_event_callback({});
+    }
+}
 
 void DebuggerCLI::register_commands() {
     commands_ = {
@@ -98,16 +106,12 @@ void DebuggerCLI::register_commands() {
 int DebuggerCLI::run_interactive(const std::string& source_file,
                                   const std::vector<std::string>& args) {
     interactive_mode_ = true;
-    
+    source_file_ = source_file;
+
     std::cout << "Claw Debugger - Interactive Mode\n";
     std::cout << "Type 'help' for available commands.\n";
     std::cout << "Source file: " << source_file << "\n\n";
-    
-    // Set up event callback to show status on events
-    debugger_->set_event_callback([this](const DebugEvent& event) {
-        print_status(debugger_->get_state());
-    });
-    
+
     // Main command loop
     bool running = true;
     while (running) {
@@ -117,8 +121,6 @@ int DebuggerCLI::run_interactive(const std::string& source_file,
         if (line.empty()) {
             continue;
         }
-        
-        add_history(line.c_str());
         
         running = execute_command(line);
     }
@@ -176,21 +178,29 @@ bool DebuggerCLI::handle_help(Debugger& dbg, const std::vector<std::string>& arg
 
 bool DebuggerCLI::handle_continue(Debugger& dbg, const std::vector<std::string>& args) {
     dbg.continue_execution();
+    dbg.wait_for_pause();
+    print_status(dbg.get_state());
     return true;
 }
 
 bool DebuggerCLI::handle_step(Debugger& dbg, const std::vector<std::string>& args) {
     dbg.step_into();
+    dbg.wait_for_pause();
+    print_status(dbg.get_state());
     return true;
 }
 
 bool DebuggerCLI::handle_next(Debugger& dbg, const std::vector<std::string>& args) {
     dbg.step_over();
+    dbg.wait_for_pause();
+    print_status(dbg.get_state());
     return true;
 }
 
 bool DebuggerCLI::handle_finish(Debugger& dbg, const std::vector<std::string>& args) {
     dbg.step_out();
+    dbg.wait_for_pause();
+    print_status(dbg.get_state());
     return true;
 }
 
@@ -370,9 +380,59 @@ bool DebuggerCLI::handle_info(Debugger& dbg, const std::vector<std::string>& arg
 }
 
 bool DebuggerCLI::handle_run(Debugger& dbg, const std::vector<std::string>& args) {
-    // This would compile and start debugging
-    // For now, just print a message
-    std::cout << "Run command - would start debugging\n";
+    if (source_file_.empty()) {
+        std::cout << "Error: No source file specified\n";
+        return true;
+    }
+
+    // Read source file
+    std::ifstream file(source_file_);
+    if (!file.is_open()) {
+        std::cout << "Error: Cannot open source file: " << source_file_ << "\n";
+        return true;
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string source = buffer.str();
+    file.close();
+
+    // Lexical analysis
+    Lexer lexer(source, source_file_);
+    auto tokens = lexer.scan_all();
+
+    // Parse
+    DiagnosticReporter reporter;
+    Parser parser(tokens);
+    parser.set_reporter(&reporter);
+    auto program = parser.parse();
+
+    if (reporter.has_errors() || !program) {
+        std::cout << "Error: Failed to parse source file\n";
+        reporter.print_diagnostics();
+        return true;
+    }
+
+    // Compile to bytecode
+    BytecodeCompiler compiler;
+    compiler.setDebugInfo(true);
+    auto module = compiler.compile(*program);
+
+    if (!module) {
+        std::cout << "Error: Bytecode compilation failed: " << compiler.getLastError() << "\n";
+        return true;
+    }
+
+    // Start debugging
+    int result = dbg.run(module);
+    if (result != 0) {
+        std::cout << "Error: Failed to start debugging\n";
+        return true;
+    }
+
+    // Wait for execution to pause or terminate
+    dbg.wait_for_pause();
+    print_status(dbg.get_state());
     return true;
 }
 
@@ -494,15 +554,16 @@ bool DebuggerCLI::execute_command(const std::string& line) {
 }
 
 std::string DebuggerCLI::readline() {
-    char* line = ::readline("(claw-dbg) ");
-    if (line == nullptr) {
+    char* input = ::readline(nullptr);
+    if (!input) {
         return "quit";
     }
-    
-    std::string result(line);
-    free(line);
-    
-    return result;
+    std::string line(input);
+    if (!line.empty()) {
+        add_history(input);
+    }
+    free(input);
+    return line;
 }
 
 // ============================================================================

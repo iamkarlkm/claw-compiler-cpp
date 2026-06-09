@@ -71,26 +71,28 @@ std::optional<JsonRpcRequest> LSPServer::parseRequest(const std::string& line) {
     try {
         auto json = jsonDecode(line);
         if (!json || !json->is_object()) return std::nullopt;
-        
+
         JsonRpcRequest request;
         auto obj = json->as_object();
-        
-        if (obj.count("id")) {
-            auto& id = obj["id"];
-            if (id->is_int()) request.id = std::to_string(id->int_val);
-            else if (id->is_string()) request.id = id->string_val;
-        }
-        
+
+        // JSON-RPC Request MUST have an id field
+        if (!obj.count("id")) return std::nullopt;
+
+        auto& id = obj["id"];
+        if (id->is_int()) request.id = std::to_string(id->int_val);
+        else if (id->is_string()) request.id = id->string_val;
+        else if (!id->is_null()) request.id = "0";
+
         if (obj.count("method")) {
             request.method = obj["method"]->string_val;
         }
-        
+
         if (obj.count("params")) {
             request.params = obj["params"];
         }
-        
+
         if (request.method.empty()) return std::nullopt;
-        
+
         return request;
     } catch (...) {
         return std::nullopt;
@@ -256,7 +258,7 @@ std::shared_ptr<JsonValue> LSPServer::handleInitialize(const std::shared_ptr<Jso
     
     auto serverInfo = json_object({
         {"name", json_string("Claw Language Server")},
-        {"version", json_string("0.1.0")}
+        {"version", json_string("0.2.0")}
     });
     
     return json_object({
@@ -274,21 +276,27 @@ std::shared_ptr<JsonValue> LSPServer::handleShutdown(const std::shared_ptr<JsonV
 std::shared_ptr<JsonValue> LSPServer::handleHover(const std::shared_ptr<JsonValue>& params) {
     auto textDocument = getObjectField(params, "textDocument");
     auto position = getObjectField(params, "position");
-    if (!textDocument || !position) return json_null();
-    
+    if (!textDocument || !position) {
+        return json_null();
+    }
+
     auto uri = getStringField(textDocument, "uri");
     auto line = getIntField(position, "line");
     auto character = getIntField(position, "character");
-    
-    if (!uri || !line || !character) return json_null();
-    
+
+    if (!uri || !line || !character) {
+        return json_null();
+    }
+
     std::lock_guard<std::mutex> lock(documents_mutex_);
     auto it = documents_.find(*uri);
-    if (it == documents_.end()) return json_null();
-    
+    if (it == documents_.end()) {
+        return json_null();
+    }
+
     auto& doc = it->second;
     auto word = getWordAt(doc->text, Position{*line, *character});
-    
+
     if (!word) return json_null();
     
     // 检查关键字
@@ -1096,13 +1104,17 @@ std::shared_ptr<JsonValue> LSPServer::handleDocumentRangeFormatting(const std::s
 
 void LSPServer::handleTextDocumentDidOpen(const std::shared_ptr<JsonValue>& params) {
     auto textDocument = getObjectField(params, "textDocument");
-    if (!textDocument) return;
-    
+    if (!textDocument) {
+        return;
+    }
+
     auto uri = getStringField(textDocument, "uri");
     auto text = getStringField(textDocument, "text");
     auto version = getIntField(textDocument, "version");
-    
-    if (!uri || !text) return;
+
+    if (!uri || !text) {
+        return;
+    }
     
     {
         std::lock_guard<std::mutex> lock(documents_mutex_);
@@ -1112,7 +1124,7 @@ void LSPServer::handleTextDocumentDidOpen(const std::shared_ptr<JsonValue>& para
         doc->version = version.value_or(1);
         documents_[*uri] = doc;
     }
-    
+
     auto doc = parseDocument(*uri, *text);
     sendDiagnostics(*uri, doc->diagnostics);
 }
@@ -1331,6 +1343,15 @@ void LSPServer::extractSymbolsFromStatement(ast::Statement* stmt,
                     param_sym.type = param.second; // 参数类型
                     param_sym.location = spanToLocation(uri, span);
                     symbols.push_back(param_sym);
+                }
+
+                // 提取函数体中的符号
+                if (auto* body = fn->get_body()) {
+                    if (auto* block = dynamic_cast<ast::BlockStmt*>(body)) {
+                        extractSymbolsFromBlock(block, uri, symbols);
+                    } else if (auto* stmt = dynamic_cast<ast::Statement*>(body)) {
+                        extractSymbolsFromStatement(stmt, uri, symbols);
+                    }
                 }
             }
             break;

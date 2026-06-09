@@ -163,7 +163,7 @@ private:
         std::cout << "  \\_____|_|\\__,_|\\__, |___/\n";
         std::cout << "                  __/ |    \n";
         std::cout << "                 |___/     \n";
-        std::cout << "\nClaw Language REPL v0.1.0 (Simplified)\n";
+        std::cout << "\nClaw Language REPL v0.2.0 (Simplified)\n";
         std::cout << "Type :help for commands, :quit to exit.\n\n";
     }
     
@@ -209,7 +209,7 @@ private:
             debug_mode_ = !debug_mode_;
             std::cout << "Debug mode: " << (debug_mode_ ? "ON" : "OFF") << "\n";
         } else if (cmd == ":version" || cmd == ":v") {
-            std::cout << "Claw Language REPL v0.1.0\n";
+            std::cout << "Claw Language REPL v0.2.0\n";
         } else if (cmd == ":keywords") {
             show_keywords();
         } else if (cmd == ":builtins") {

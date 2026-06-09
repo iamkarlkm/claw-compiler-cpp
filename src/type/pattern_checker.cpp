@@ -227,7 +227,22 @@ PatternCheckResult PatternChecker::check_exhaustiveness(
             }
         }
         if (already_covered) {
-            result.redundant_patterns.push_back(pattern_to_string(*patterns[i]));
+            // Don't report wildcard as redundant if covered by a variable pattern
+            // (supports if-let desugaring where variable binding matters)
+            if (patterns[i]->get_kind() == Pattern::Kind::Wildcard) {
+                bool covered_by_variable = false;
+                for (size_t j = 0; j < i; ++j) {
+                    if (patterns[j] && patterns[j]->get_kind() == Pattern::Kind::Variable) {
+                        covered_by_variable = true;
+                        break;
+                    }
+                }
+                if (!covered_by_variable) {
+                    result.redundant_patterns.push_back(pattern_to_string(*patterns[i]));
+                }
+            } else {
+                result.redundant_patterns.push_back(pattern_to_string(*patterns[i]));
+            }
         }
     }
 

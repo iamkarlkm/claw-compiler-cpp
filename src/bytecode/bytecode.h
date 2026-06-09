@@ -465,6 +465,7 @@ struct ExceptionHandler {
 struct Function {
     uint32_t id;
     std::string name;
+    std::string source_file;    // Source file path (for debugging)
     uint32_t arity;             // Number of parameters
     uint32_t local_count;       // Number of local variables
     std::vector<Instruction> code;
@@ -473,6 +474,9 @@ struct Function {
     std::vector<ValueType> param_types;    // Type of each parameter (for JIT)
     ValueType return_type = ValueType::I64; // Return type (for JIT)
     std::vector<ExceptionHandler> exception_handlers; // Try/catch handlers
+
+    // Debug info: maps instruction index to source line number
+    std::vector<int> line_numbers;
 
     Function() : id(0), name(""), arity(0), local_count(0) {}
     Function(uint32_t i, const std::string& n, uint32_t a)

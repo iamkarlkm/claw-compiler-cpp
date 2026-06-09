@@ -44,3 +44,58 @@ jobs:
 
       - name: Run tests
         run: make test CXX=clang++
+
+  benchmark:
+    runs-on: ubuntu-latest
+    needs: build-linux
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev
+
+      - name: Build
+        run: make all CXX=clang++
+
+      - name: Run benchmarks
+        run: |
+          chmod +x benchmark/run.sh
+          ./benchmark/run.sh
+
+      - name: Compare against baseline
+        run: |
+          chmod +x benchmark/compare.sh
+          ./benchmark/compare.sh benchmark/results/benchmark_*.json benchmark/results/baseline.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark/results/benchmark_*.json
+
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev lcov
+
+      - name: Build with coverage
+        run: make coverage CXX=clang++
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/html/

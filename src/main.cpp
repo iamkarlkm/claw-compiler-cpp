@@ -273,15 +273,15 @@ bool parse_args(int argc, char** argv, CompileOptions& opts) {
         else if (arg == "--diagnostics-json") {
             opts.diagnostics_json = true;
         }
-        else if (arg == "--mode" || arg == "-m") {
+        else if (arg == "--mode" || arg.rfind("--mode=", 0) == 0 || arg == "-m") {
             // 支持 --mode=xxx 或 -m xxx 格式
             std::string mode_arg;
-            if (arg == "--mode" && i + 1 < argc && argv[i+1][0] != '-') {
+            if (arg.rfind("--mode=", 0) == 0) {
+                mode_arg = arg.substr(7);
+            } else if (arg == "--mode" && i + 1 < argc && argv[i+1][0] != '-') {
                 mode_arg = argv[++i];
             } else if (arg == "-m" && i + 1 < argc) {
                 mode_arg = argv[++i];
-            } else if (arg.rfind("--mode=", 0) == 0) {
-                mode_arg = arg.substr(7);
             } else {
                 std::cerr << "Error: --mode requires a value (tokens|ast|interpret|bytecode|jit|hybrid|ccodegen)\n";
                 return false;
@@ -519,7 +519,6 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         std::cerr << "Error: Failed to load module into VM: " << vm.last_error << "\n";
         return false;
     }
-
     // Setup async event loop callback
     vm.runtime.on_future_resolved = [&rt = vm.runtime](std::shared_ptr<vm::FutureValue> future) {
         for (auto& coro : future->waiting_coroutines) {
@@ -1304,8 +1303,6 @@ int main(int argc, char** argv) {
 
     // 根据模式执行
     bool success = false;
-
-
     switch (opts.mode) {
         case CompileOptions::Mode::Interpret:
             success = run_interpreter(*program, opts.verbose);

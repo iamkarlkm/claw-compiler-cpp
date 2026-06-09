@@ -94,6 +94,9 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
         }
     }
 
+    // Record the end-of-function position for jumps that target past the last instruction
+    compile_state_.label_positions[func.code.size()] = generator_.getCode().size();
+
     // Resolve pending jumps: patch relative offsets
     for (const auto& [target_ip, positions] : compile_state_.pending_jumps) {
         auto it = compile_state_.label_positions.find(target_ip);

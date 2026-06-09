@@ -57,6 +57,7 @@ class Expression : public ASTNode {
 public:
     enum class Kind {
         Identifier,
+        Path,
         Literal,
         Binary,
         Unary,
@@ -68,6 +69,11 @@ public:
         Lambda,
         Tuple,
         Array,
+        ListComprehension,
+        Dict,
+        DictComprehension,
+        Set,
+        SetComprehension,
         Range,
         Ref,
         MutRef,
@@ -75,6 +81,7 @@ public:
         Await,
         TryQuestion,
         Command,
+        InterpolatedString,
     };
     
     Expression(Kind kind, const SourceSpan& span) : kind_(kind) { span_ = span; }
@@ -94,7 +101,8 @@ public:
         double,
         std::string,
         char,
-        bool
+        bool,
+        InterpolatedStringSegments
     >;
     
     LiteralExpr(const Value& value, const SourceSpan& span)
@@ -126,18 +134,71 @@ private:
     Value value_;
 };
 
+// Interpolated string expression: f"hello {name}!"
+class InterpolatedStringExpr : public Expression {
+public:
+    struct Segment {
+        bool is_expr;
+        std::string text;  // literal text (is_expr=false) or raw expr source (is_expr=true)
+        std::unique_ptr<Expression> expr;  // parsed expression (is_expr=true), set by parser
+    };
+
+    InterpolatedStringExpr(std::vector<Segment> segments, const SourceSpan& span)
+        : Expression(Kind::InterpolatedString, span), segments_(std::move(segments)) {}
+
+    const std::vector<Segment>& get_segments() const { return segments_; }
+    std::vector<Segment>& get_mutable_segments() { return segments_; }
+
+    std::string to_string() const override {
+        std::string result = "f\"";
+        for (const auto& seg : segments_) {
+            if (seg.is_expr) {
+                result += "{" + seg.text + "}";
+            } else {
+                result += seg.text;
+            }
+        }
+        result += "\"";
+        return result;
+    }
+
+private:
+    std::vector<Segment> segments_;
+};
+
 // Identifier expression
 class IdentifierExpr : public Expression {
 public:
     IdentifierExpr(const std::string& name, const SourceSpan& span)
         : Expression(Kind::Identifier, span), name_(name) {}
-    
+
     const std::string& get_name() const { return name_; }
-    
+
     std::string to_string() const override { return name_; }
-    
+
 private:
     std::string name_;
+};
+
+// Path expression (math::add, std::io::println)
+class PathExpr : public Expression {
+public:
+    PathExpr(std::vector<std::string> segments, const SourceSpan& span)
+        : Expression(Kind::Path, span), segments_(std::move(segments)) {}
+
+    const std::vector<std::string>& get_segments() const { return segments_; }
+
+    std::string to_string() const override {
+        std::string result;
+        for (size_t i = 0; i < segments_.size(); i++) {
+            if (i > 0) result += "::";
+            result += segments_[i];
+        }
+        return result;
+    }
+
+private:
+    std::vector<std::string> segments_;
 };
 
 // Binary expression (a op b)
@@ -435,6 +496,190 @@ private:
     std::vector<std::unique_ptr<Expression>> elements_;
 };
 
+// List comprehension expression [expr for x in iter if cond]
+class ListComprehensionExpr : public Expression {
+public:
+    ListComprehensionExpr(std::unique_ptr<Expression> element_expr,
+                          std::string loop_var,
+                          std::unique_ptr<Expression> iterable,
+                          std::unique_ptr<Expression> filter,
+                          const SourceSpan& span)
+        : Expression(Kind::ListComprehension, span),
+          element_expr_(std::move(element_expr)),
+          loop_var_(std::move(loop_var)),
+          iterable_(std::move(iterable)),
+          filter_(std::move(filter)) {}
+
+    Expression* get_element_expr() const { return element_expr_.get(); }
+    const std::string& get_loop_var() const { return loop_var_; }
+    Expression* get_iterable() const { return iterable_.get(); }
+    Expression* get_filter() const { return filter_.get(); }
+
+    std::string to_string() const override {
+        std::string s = "[" + element_expr_->to_string() + " for " + loop_var_ + " in " + iterable_->to_string();
+        if (filter_) {
+            s += " if " + filter_->to_string();
+        }
+        s += "]";
+        return s;
+    }
+
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+
+private:
+    std::unique_ptr<Expression> element_expr_;
+    std::string loop_var_;
+    std::unique_ptr<Expression> iterable_;
+    std::unique_ptr<Expression> filter_;
+};
+
+// Dict literal expression {key: value, ...}
+class DictExpr : public Expression {
+public:
+    DictExpr(std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> entries,
+             const SourceSpan& span)
+        : Expression(Kind::Dict, span), entries_(std::move(entries)) {}
+
+    const auto& get_entries() const { return entries_; }
+    auto& mutable_entries() { return entries_; }
+    size_t size() const { return entries_.size(); }
+
+    std::string to_string() const override {
+        std::string s = "{";
+        for (size_t i = 0; i < entries_.size(); i++) {
+            if (i > 0) s += ", ";
+            s += entries_[i].first->to_string() + ": " + entries_[i].second->to_string();
+        }
+        s += "}";
+        return s;
+    }
+
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+
+private:
+    std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> entries_;
+};
+
+// Set literal expression {elem1, elem2, ...}
+class SetExpr : public Expression {
+public:
+    SetExpr(std::vector<std::unique_ptr<Expression>> elements,
+            const SourceSpan& span)
+        : Expression(Kind::Set, span), elements_(std::move(elements)) {}
+
+    const auto& get_elements() const { return elements_; }
+    auto& mutable_elements() { return elements_; }
+    size_t size() const { return elements_.size(); }
+    Expression* get_element(size_t i) const {
+        return i < elements_.size() ? elements_[i].get() : nullptr;
+    }
+
+    std::string to_string() const override {
+        std::string s = "{";
+        for (size_t i = 0; i < elements_.size(); i++) {
+            if (i > 0) s += ", ";
+            s += elements_[i]->to_string();
+        }
+        s += "}";
+        return s;
+    }
+
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+
+private:
+    std::vector<std::unique_ptr<Expression>> elements_;
+};
+
+// Dict comprehension expression {k: v for x in iter if cond}
+class DictComprehensionExpr : public Expression {
+public:
+    DictComprehensionExpr(std::unique_ptr<Expression> key_expr,
+                          std::unique_ptr<Expression> value_expr,
+                          std::string loop_var,
+                          std::unique_ptr<Expression> iterable,
+                          std::unique_ptr<Expression> filter,
+                          const SourceSpan& span)
+        : Expression(Kind::DictComprehension, span),
+          key_expr_(std::move(key_expr)),
+          value_expr_(std::move(value_expr)),
+          loop_var_(std::move(loop_var)),
+          iterable_(std::move(iterable)),
+          filter_(std::move(filter)) {}
+
+    Expression* get_key_expr() const { return key_expr_.get(); }
+    Expression* get_value_expr() const { return value_expr_.get(); }
+    const std::string& get_loop_var() const { return loop_var_; }
+    Expression* get_iterable() const { return iterable_.get(); }
+    Expression* get_filter() const { return filter_.get(); }
+
+    std::string to_string() const override {
+        std::string s = "{" + key_expr_->to_string() + ": " + value_expr_->to_string() +
+                        " for " + loop_var_ + " in " + iterable_->to_string();
+        if (filter_) {
+            s += " if " + filter_->to_string();
+        }
+        s += "}";
+        return s;
+    }
+
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+
+private:
+    std::unique_ptr<Expression> key_expr_;
+    std::unique_ptr<Expression> value_expr_;
+    std::string loop_var_;
+    std::unique_ptr<Expression> iterable_;
+    std::unique_ptr<Expression> filter_;
+};
+
+// Set comprehension expression {x for x in iter if cond}
+class SetComprehensionExpr : public Expression {
+public:
+    SetComprehensionExpr(std::unique_ptr<Expression> element_expr,
+                         std::string loop_var,
+                         std::unique_ptr<Expression> iterable,
+                         std::unique_ptr<Expression> filter,
+                         const SourceSpan& span)
+        : Expression(Kind::SetComprehension, span),
+          element_expr_(std::move(element_expr)),
+          loop_var_(std::move(loop_var)),
+          iterable_(std::move(iterable)),
+          filter_(std::move(filter)) {}
+
+    Expression* get_element_expr() const { return element_expr_.get(); }
+    const std::string& get_loop_var() const { return loop_var_; }
+    Expression* get_iterable() const { return iterable_.get(); }
+    Expression* get_filter() const { return filter_.get(); }
+
+    std::string to_string() const override {
+        std::string s = "{" + element_expr_->to_string() +
+                        " for " + loop_var_ + " in " + iterable_->to_string();
+        if (filter_) {
+            s += " if " + filter_->to_string();
+        }
+        s += "}";
+        return s;
+    }
+
+    std::unique_ptr<ASTNode> clone() const override {
+        return nullptr;
+    }
+
+private:
+    std::unique_ptr<Expression> element_expr_;
+    std::string loop_var_;
+    std::unique_ptr<Expression> iterable_;
+    std::unique_ptr<Expression> filter_;
+};
+
 // Member access expression (expr.member)
 class MemberExpr : public Expression {
 public:
@@ -467,14 +712,27 @@ public:
     }
     void set_return_type(const std::string& ret) { return_type_ = ret; }
     void set_body(std::unique_ptr<ASTNode> body) { body_ = std::move(body); }
-    
+    void set_captures(std::vector<std::string> captures) { captures_ = std::move(captures); }
+    void set_lambda_name(const std::string& name) { lambda_name_ = name; }
+
     const auto& get_params() const { return params_; }
     const std::string& get_return_type() const { return return_type_; }
     ASTNode* get_body() const { return body_.get(); }
     std::unique_ptr<ASTNode> release_body() { return std::move(body_); }
+    const auto& get_captures() const { return captures_; }
+    const std::string& get_lambda_name() const { return lambda_name_; }
 
     std::string to_string() const override {
-        std::string result = "fn (";
+        std::string result = "fn ";
+        if (!captures_.empty()) {
+            result += "[";
+            for (size_t i = 0; i < captures_.size(); i++) {
+                result += captures_[i];
+                if (i < captures_.size() - 1) result += ", ";
+            }
+            result += "] ";
+        }
+        result += "(";
         for (size_t i = 0; i < params_.size(); i++) {
             result += params_[i].first + ": " + params_[i].second;
             if (i < params_.size() - 1) result += ", ";
@@ -484,11 +742,13 @@ public:
         result += " { ... }";
         return result;
     }
-    
+
 private:
     std::vector<std::pair<std::string, std::string>> params_;
     std::string return_type_;
     std::unique_ptr<ASTNode> body_;
+    std::vector<std::string> captures_;
+    std::string lambda_name_;
 };
 
 // Statement types
@@ -1378,6 +1638,30 @@ private:
     std::vector<EnumVariant> variants_;
     bool is_pub_;
     std::vector<std::string> type_params_;
+};
+
+// Type alias declaration - "type NewName = OldType"
+class TypeAliasStmt : public Statement {
+public:
+    TypeAliasStmt(const std::string& name, const std::string& target_type, const SourceSpan& span)
+        : Statement(Kind::TypeAlias, span), name_(name), target_type_(target_type), is_pub_(false) {}
+
+    void set_name(const std::string& name) { name_ = name; }
+    void set_target_type(const std::string& type) { target_type_ = type; }
+    void set_pub(bool pub) { is_pub_ = pub; }
+
+    const std::string& get_name() const { return name_; }
+    const std::string& get_target_type() const { return target_type_; }
+    bool is_pub() const { return is_pub_; }
+
+    std::string to_string() const override {
+        return (is_pub_ ? "pub " : "") + std::string("type ") + name_ + " = " + target_type_;
+    }
+
+private:
+    std::string name_;
+    std::string target_type_;
+    bool is_pub_;
 };
 
 // ============================================================

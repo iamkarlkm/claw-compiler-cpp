@@ -125,13 +125,15 @@ void jit_ext_println(void* value) {
 }
 
 // print_i64(value) - 打印整数
-void jit_ext_print_i64(int64_t value) {
+int64_t jit_ext_print_i64(int64_t value) {
     std::cout << value;
+    return 0;
 }
 
 // println_i64(value) - 打印整数并换行
-void jit_ext_println_i64(int64_t value) {
+int64_t jit_ext_println_i64(int64_t value) {
     std::cout << value << "\n";
+    return 0;
 }
 
 // input() - 读取一行输入
