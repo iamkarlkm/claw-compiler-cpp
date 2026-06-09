@@ -959,10 +959,8 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::ALLOC_OBJ_TYPE:
             case bytecode::OpCode::LOAD_FIELD:
             case bytecode::OpCode::STORE_FIELD:
-            case bytecode::OpCode::ENUM_TAG:
-            case bytecode::OpCode::ENUM_MATCH:
                 result.success = false;
-                result.error_message = "Struct/enum operations not yet supported in JIT";
+                result.error_message = "Struct operations not yet supported in JIT";
                 compiled_functions_.erase(func.name);
                 return result;
 

@@ -2025,7 +2025,7 @@ void ClawVM::error(const std::string& msg) {
 // Instruction Dispatch
 // ============================================================================
 
-bool ClawVM::dispatch() {
+[[gnu::hot]] bool ClawVM::dispatch() {
     if (!running || !current_function || ip >= static_cast<int32_t>(current_function->code.size())) {
         running = false;
         return false;

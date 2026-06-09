@@ -336,14 +336,12 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             set_error("Tuple operations not yet supported in AOT");
             return false;
 
-        // Structs and Enums
+        // Structs
         case Op::ALLOC_OBJ:
         case Op::ALLOC_OBJ_TYPE:
         case Op::LOAD_FIELD:
         case Op::STORE_FIELD:
-        case Op::ENUM_TAG:
-        case Op::ENUM_MATCH:
-            set_error("Struct and enum operations not yet supported in AOT");
+            set_error("Struct operations not yet supported in AOT");
             return false;
 
         // Tensors
