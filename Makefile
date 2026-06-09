@@ -901,6 +901,21 @@ TEST_STRUCT_BYTECODE_SOURCES = tests/test_struct_bytecode.cpp \
     src/stdlib/stdlib.cpp \
     src/stdlib/stdlib_bytecode_integration.cpp
 
+TEST_ENUM_BYTECODE_SOURCES = tests/test_enum_bytecode.cpp \
+    src/bytecode/bytecode_compiler.cpp \
+    src/bytecode/bytecode_executor.cpp \
+    src/vm/claw_vm.cpp \
+    src/vm/webtransport_backend.cpp \
+    src/bytecode/bytecode.cpp \
+    src/ast/ast.cpp \
+    src/ast/clone.cpp \
+    src/ast/ast_compact_repr.cpp \
+    src/type/type_checker.cpp \
+    src/type/pattern_checker.cpp \
+    src/type/type_inference.cpp \
+    src/stdlib/stdlib.cpp \
+    src/stdlib/stdlib_bytecode_integration.cpp
+
 TEST_PARSER_SOURCES = src/test/test_parser.cpp \
     src/ast/ast.cpp \
     src/ast/clone.cpp \
@@ -948,6 +963,14 @@ test-struct-bytecode: tests/test_struct_bytecode
 	@./tests/test_struct_bytecode
 
 .PHONY: test-struct-bytecode
+
+tests/test_enum_bytecode: tests/test_enum_bytecode.cpp src/lexer/lexer.h src/parser/parser.h src/bytecode/bytecode_compiler.h src/bytecode/bytecode_executor.h tests/claw_test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_ENUM_BYTECODE_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
+
+test-enum-bytecode: tests/test_enum_bytecode
+	@./tests/test_enum_bytecode
+
+.PHONY: test-enum-bytecode
 
 src/test/test_parser: src/test/test_parser.cpp src/lexer/lexer.h src/parser/parser.h src/test/test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ $(TEST_PARSER_SOURCES)

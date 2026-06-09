@@ -955,6 +955,17 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
+            case bytecode::OpCode::ALLOC_OBJ:
+            case bytecode::OpCode::ALLOC_OBJ_TYPE:
+            case bytecode::OpCode::LOAD_FIELD:
+            case bytecode::OpCode::STORE_FIELD:
+            case bytecode::OpCode::ENUM_TAG:
+            case bytecode::OpCode::ENUM_MATCH:
+                result.success = false;
+                result.error_message = "Struct/enum operations not yet supported in JIT";
+                compiled_functions_.erase(func.name);
+                return result;
+
             default:
                 // 未知操作码，跳过
                 break;

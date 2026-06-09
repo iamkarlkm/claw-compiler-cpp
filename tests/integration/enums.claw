@@ -1,0 +1,19 @@
+enum Color { Red, Green, Blue }
+enum Option { Some(i64), None }
+
+fn main() {
+    let c = Green()
+    match c {
+        Red() => println(1),
+        Green() => println(2),
+        Blue() => println(3),
+        _ => println(0)
+    }
+
+    let o = Some(42)
+    match o {
+        Some(x) => println(x),
+        None => println(0),
+        _ => println(99)
+    }
+}
