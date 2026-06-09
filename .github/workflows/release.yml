@@ -117,6 +117,41 @@ jobs:
           name: claw-windows-amd64
           path: claw-windows-amd64.zip
 
+  build-windows-msi:
+    needs: [build-windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: claw-windows-amd64
+
+      - name: Extract binaries
+        shell: powershell
+        run: |
+          Expand-Archive -Path claw-windows-amd64.zip -DestinationPath .\extracted
+          Copy-Item .\extracted\claw-windows\bin\claw.exe .
+          Copy-Item .\extracted\claw-windows\bin\claw-lsp.exe .
+          Copy-Item .\extracted\claw-windows\bin\claw-repl.exe .
+          Copy-Item .\extracted\claw-windows\bin\claw-debugger.exe .
+
+      - name: Install WiX
+        run: dotnet tool install --global wix
+
+      - name: Build MSI
+        shell: powershell
+        run: |
+          $env:PATH = "$env:PATH;$env:USERPROFILE\.dotnet\tools"
+          wix build scripts\claw.wxs -o claw-windows-amd64.msi
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-windows-msi
+          path: claw-windows-amd64.msi
+
   build-deb:
     needs: [build-linux]
     runs-on: ubuntu-latest
@@ -190,8 +225,16 @@ jobs:
           name: claw-vscode
           path: editors/vscode/*.vsix
 
+      - name: Publish to VSCode Marketplace
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          cd editors/vscode
+          npx vsce publish --pat "$VSCE_PAT" --no-dependencies
+
   checksums:
-    needs: [build-macos, build-linux, build-windows, build-deb, build-rpm, build-vscode]
+    needs: [build-macos, build-linux, build-windows, build-deb, build-rpm, build-vscode, build-windows-msi]
     runs-on: ubuntu-latest
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
@@ -211,7 +254,7 @@ jobs:
         id: hash
         run: |
           cd artifacts
-          sha256sum */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz */*.zip 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz > ../SHA256SUMS
+          sha256sum */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix */*.msi 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz */*.zip 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz > ../SHA256SUMS
           cat ../SHA256SUMS
           echo "hashes=$(cat ../SHA256SUMS | base64 -w0)" >> "$GITHUB_OUTPUT"
 
@@ -220,7 +263,7 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd artifacts
-          for f in */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix 2>/dev/null; do
+          for f in */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix */*.msi 2>/dev/null; do
             [ -f "$f" ] || continue
             gpg --detach-sign --armor --passphrase "$GPG_PASSPHRASE" --batch --yes --pinentry-mode loopback "$f"
           done

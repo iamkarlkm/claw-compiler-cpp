@@ -78,6 +78,31 @@ jobs:
           name: benchmark-results
           path: benchmark/results/benchmark_*.json
 
+  llvm-matrix:
+    runs-on: ubuntu-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm-version: [16, 17, 18, 19]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo add-apt-repository "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-${{ matrix.llvm-version }} main" || true
+          sudo apt-get update
+          sudo apt-get install -y clang-${{ matrix.llvm-version }} lld-${{ matrix.llvm-version }} llvm-${{ matrix.llvm-version }} libreadline-dev
+
+      - name: Build
+        run: make all CXX=clang++-${{ matrix.llvm-version }} LLVM_PREFIX=/usr/lib/llvm-${{ matrix.llvm-version }}
+
+      - name: Run tests
+        run: make test CXX=clang++-${{ matrix.llvm-version }} LLVM_PREFIX=/usr/lib/llvm-${{ matrix.llvm-version }}
+
   coverage:
     runs-on: ubuntu-latest
     env:

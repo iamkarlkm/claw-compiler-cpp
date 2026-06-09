@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Claw Compiler"
+           Language="1033"
+           Version="0.2.0"
+           Manufacturer="Claw Compiler Team"
+           UpgradeCode="a1b2c3d4-e5f6-7890-abcd-ef1234567890">
+
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Claw Compiler is already installed." />
+    <MediaTemplate />
+
+    <Feature Id="ProductFeature" Title="Claw Compiler" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="PathComponents" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Claw" />
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="ClawExe" Guid="*">
+        <File Id="ClawEXE" Name="claw.exe" Source="claw.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="ClawLspExe" Guid="*">
+        <File Id="ClawLspEXE" Name="claw-lsp.exe" Source="claw-lsp.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="ClawReplExe" Guid="*">
+        <File Id="ClawReplEXE" Name="claw-repl.exe" Source="claw-repl.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="ClawDebuggerExe" Guid="*">
+        <File Id="ClawDebuggerEXE" Name="claw-debugger.exe" Source="claw-debugger.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="PathComponents" Directory="TARGETDIR">
+      <Component Id="PathEnv" Guid="b2c3d4e5-f6a7-8901-bcde-f23456789012" KeyPath="yes">
+        <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+      </Component>
+    </ComponentGroup>
+
+  </Product>
+</Wix>
