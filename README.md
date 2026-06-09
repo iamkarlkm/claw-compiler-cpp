@@ -87,7 +87,7 @@ claw_free  → pool_release
 
 ```bash
 cd claw-compiler
-make all          # 编译 claw + claw-lsp + claw-repl
+make all          # 编译 claw + claw-lsp + claw-repl + claw-debugger
 ```
 
 Makefile 会自动探测 LLVM 路径（通过 `llvm-config`）。如果探测失败，可手动指定：
@@ -110,7 +110,41 @@ make install PREFIX=/opt  # 自定义安装路径
 make uninstall            # 移除已安装的二进制文件
 ```
 
-### Docker
+### 包管理器安装
+
+#### Debian / Ubuntu
+
+```bash
+wget https://github.com/yourusername/claw-compiler/releases/latest/download/claw-compiler_0.2.0_amd64.deb
+sudo dpkg -i claw-compiler_0.2.0_amd64.deb
+```
+
+#### Fedora / RHEL
+
+```bash
+wget https://github.com/yourusername/claw-compiler/releases/latest/download/claw-compiler-0.2.0-1.x86_64.rpm
+sudo dnf install claw-compiler-0.2.0-1.x86_64.rpm
+```
+
+#### Windows (MSI)
+
+下载 `claw-windows-amd64.msi` 并双击安装，或 PowerShell：
+
+```powershell
+msiexec /i claw-windows-amd64.msi /qn
+```
+
+安装后 `claw`、`claw-lsp`、`claw-repl`、`claw-debugger` 会自动加入系统 PATH。
+
+#### macOS (Homebrew)
+
+```bash
+brew tap yourusername/claw
+brew install claw --with-libmsquic   # 启用 WebTransport
+brew install claw                    # 禁用 WebTransport
+```
+
+#### Docker
 
 ```bash
 # 本地构建
@@ -122,14 +156,6 @@ docker pull ghcr.io/yourusername/claw-compiler:v0.2.0
 docker run --rm -v $(pwd):/src ghcr.io/yourusername/claw-compiler:v0.2.0 --run /src/program.claw
 ```
 
-### Homebrew (草稿)
-
-```bash
-brew tap yourusername/claw
-brew install claw --with-libmsquic   # 启用 WebTransport
-brew install claw                    # 禁用 WebTransport
-```
-
 ### 发布流程
 
 ```bash
@@ -139,11 +165,14 @@ git push origin main --tags
 ```
 
 发布工作流会自动：
-1. 在 macOS / Linux 上构建并测试
-2. 打包二进制文件并上传到 GitHub Release
-3. 构建并推送 Docker 镜像到 ghcr.io
-4. 生成 Release Notes
-5. 生成 SHA256 校验和并对产物进行 GPG 签名
+1. 在 macOS / Linux / Windows 上构建并测试
+2. 打包 macOS / Linux / Windows 二进制文件并上传到 GitHub Release
+3. 构建 Debian (`.deb`) 和 RPM (`.rpm`) 包
+4. 构建 Windows MSI 安装器
+5. 构建并推送 Docker 镜像到 ghcr.io
+6. 打包 VSCode 扩展 (`.vsix`) 并发布到 Marketplace
+7. 生成 Release Notes
+8. 生成 SHA256 校验和并对所有产物进行 GPG 签名
 
 #### 验证发布产物
 
@@ -184,6 +213,23 @@ gcc program.c -o program
 
 # REPL 交互式环境
 ./claw-repl
+```
+
+### VSCode 扩展
+
+安装 [Claw Language Support](https://marketplace.visualstudio.com/items?itemName=yourusername.claw) 扩展以获得：
+
+- 语法高亮
+- 自动补全 (via `claw-lsp`)
+- 悬停信息、跳转定义
+- 诊断与错误提示
+
+扩展会自动探测 PATH 中的 `claw-lsp`。也可手动配置：
+
+```json
+{
+  "claw.languageServerPath": "/usr/local/bin/claw-lsp"
+}
 ```
 
 ### 文档
@@ -407,6 +453,12 @@ make test-compact-ast         # 紧凑 AST 序列化
 - [x] Phase 30: 精准错误处理（Error Effect Tracking）
 - [x] Phase 31: 零开销迭代器（编译期脱糖）
 - [x] Phase 32: AI 原生设计（结构化诊断 / 类型推断 / 紧凑 AST）
+- [x] Phase 33: 生产部署完善（CI/CD / 发布流程 / 包管理器 / 文档）
+  - [x] 多平台 CI: macOS + Linux + Windows
+  - [x] 发布产物: tar.gz / zip + .deb + .rpm + MSI + .vsix + Docker
+  - [x] 产物签名: SHA256 + GPG
+  - [x] VSCode Marketplace 自动发布
+  - [x] LLVM 版本兼容性矩阵 (16-19)
 
 ### 进行中 / 待完善
 - [ ] WebAssembly 后端完整编译链
