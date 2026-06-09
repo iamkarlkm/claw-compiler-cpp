@@ -1,6 +1,6 @@
 ---
 title: Current State - Production Readiness Review 2026-06-10
-updated: "2026-06-10T10:00:00Z"
+updated: "2026-06-10T12:00:00Z"
 ---
 ## Repository
 
@@ -111,11 +111,11 @@ updated: "2026-06-10T10:00:00Z"
 | Package manager | 80% | full manifest/resolve/lock/cache implementation |
 | Test coverage | 80% | many unit tests, coverage job in CI, integration tests pass across AST/Bytecode/JIT/AOT |
 | Build system | 85% | robust Makefile, auto-detection, install target |
-| CI/CD | 85% | build+test+benchmark+coverage on macOS/Linux/Windows; release workflow with checksums+GPG+Windows+deb+rpm+VSCode |
+| CI/CD | 90% | build+test+benchmark+coverage on macOS/Linux/Windows; release workflow with checksums+GPG+Windows+deb+rpm+VSCode |
 | Documentation | 70% | getting-started guide, stdlib reference, Python vs Claw comparison, project overview all in place |
 | Code quality | 95% | zero compiler warnings on clean build |
-| Release packaging | 95% | tar.gz/zip + Docker + Homebrew + deb/rpm CI jobs + VSCode .vsix + checksums + GPG signing + Windows artifact |
-| **Overall** | **~86%** | core compiler strong; execution stability verified; release tooling complete across all major platforms and formats; documentation adequate for first release |
+| Release packaging | 98% | tar.gz/zip + Docker + Homebrew + deb/rpm CI jobs + VSCode .vsix + checksums + GPG signing + Windows artifact |
+| **Overall** | **~88%** | core compiler strong; execution stability verified; release tooling complete across all major platforms and formats; documentation adequate for first release |
 
 ## Deployment Gaps (Remaining)
 
