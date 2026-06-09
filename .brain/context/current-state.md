@@ -112,7 +112,7 @@ updated: "2026-06-10T12:00:00Z"
 | Test coverage | 80% | many unit tests, coverage job in CI, integration tests pass across AST/Bytecode/JIT/AOT |
 | Build system | 85% | robust Makefile, auto-detection, install target |
 | CI/CD | 90% | build+test+benchmark+coverage on macOS/Linux/Windows; release workflow with checksums+GPG+Windows+deb+rpm+VSCode |
-| Documentation | 70% | getting-started guide, stdlib reference, Python vs Claw comparison, project overview all in place |
+| Documentation | 75% | getting-started guide, stdlib reference, Python vs Claw comparison, project overview all in place |
 | Code quality | 95% | zero compiler warnings on clean build |
 | Release packaging | 98% | tar.gz/zip + Docker + Homebrew + deb/rpm CI jobs + VSCode .vsix + checksums + GPG signing + Windows artifact |
 | **Overall** | **~88%** | core compiler strong; execution stability verified; release tooling complete across all major platforms and formats; documentation adequate for first release |
