@@ -1,6 +1,6 @@
 ---
-title: Current State - Production Readiness Review 2026-06-05
-updated: "2026-06-09T10:00:00Z"
+title: Current State - Production Readiness Review 2026-06-10
+updated: "2026-06-10T10:00:00Z"
 ---
 ## Repository
 
@@ -15,8 +15,8 @@ updated: "2026-06-09T10:00:00Z"
 
 - **Makefile**: healthy, dependency auto-detection works (clang++, LLVM, readline, libmsquic)
 - **Compiler warnings**: 0 warnings on clean build (down from 182 in April)
-- **Binaries built**: `claw` (5.9M), `claw-lsp` (6.0M), `claw-repl` (5.8M), `claw-debugger` (5.8M)
-- **CI/CD**: GitHub Actions with macOS + Linux + Windows build + test + benchmark; release workflow with checksums
+- **Binaries built**: `claw` (5.8M), `claw-lsp` (5.9M), `claw-repl` (5.7M), `claw-debugger` (5.7M)
+- **CI/CD**: GitHub Actions with macOS + Linux + Windows build + test + benchmark + coverage; release workflow with checksums + GPG + deb/rpm + VSCode extension
 
 ## Test Summary (all passing)
 
@@ -80,7 +80,7 @@ updated: "2026-06-09T10:00:00Z"
 
 - **Self receiver syntax**: `obj.method()` parses and executes correctly; `self` is injected as first argument for impl methods
 - **Implicit returns**: function and impl method bodies now capture the last expression value as implicit return (matching lambda behavior)
-- **Release automation**: release.yml workflow builds, packages, and publishes macOS/Linux tar.gz + Docker image on tag push
+- **Release automation**: release.yml workflow builds, packages, and publishes macOS/Linux/Windows tar.gz/zip + .deb + .rpm + VSCode .vsix + Docker image + SHA256SUMS + GPG signatures on tag push
 - **claw-debugger**: added to `make all`; core execution commands (run/step/continue/print) functional; fixed segfault on exit
 - **Coverage**: `make coverage` works with lcov 2.x; coverage job added to CI
 - **Windows CI**: new ci-windows.yml for MSYS2/MinGW builds
@@ -95,6 +95,9 @@ updated: "2026-06-09T10:00:00Z"
 - **LSP/REPL version bumped**: Version strings updated from 0.1.0 to 0.2.0 across LSP server and REPL binaries
 - **BytecodeCompiler crash fixed**: Execution pipeline now uses real `BytecodeCompiler` instead of stub; `compileFunction` ctx save/restore no longer crashes; `debugInfo_` defaults to `false` to avoid debug info corruption
 - **AOT jump target out of range fixed**: `compileIfStmt` no longer emits dead JMPs after branches ending in RET/RET_NULL; native codegen records end-of-function label position for defensive jump resolution; `make test-aot` passes all 17 test cases
+- **deb/rpm release integration**: `build-deb` and `build-rpm` jobs added to release.yml; scripts updated to use git tag for version instead of removed VERSION file
+- **VSCode extension release integration**: `build-vscode` job added to release.yml; extension.ts fixed to use `command` instead of `module` for native `claw-lsp` executable
+- **Documentation polish**: `docs/getting-started.md` and `docs/stdlib-reference.md` verified complete and accurate
 
 ## Production Deployment Readiness
 
@@ -108,16 +111,17 @@ updated: "2026-06-09T10:00:00Z"
 | Package manager | 80% | full manifest/resolve/lock/cache implementation |
 | Test coverage | 80% | many unit tests, coverage job in CI, integration tests pass across AST/Bytecode/JIT/AOT |
 | Build system | 85% | robust Makefile, auto-detection, install target |
-| CI/CD | 80% | build+test+benchmark+coverage on macOS/Linux/Windows; release workflow with checksums+GPG+Windows+deb |
-| Documentation | 60% | extensive design docs, getting-started guides, API reference started |
+| CI/CD | 85% | build+test+benchmark+coverage on macOS/Linux/Windows; release workflow with checksums+GPG+Windows+deb+rpm+VSCode |
+| Documentation | 70% | getting-started guide, stdlib reference, Python vs Claw comparison, project overview all in place |
 | Code quality | 95% | zero compiler warnings on clean build |
-| Release packaging | 90% | tar.gz/zip + Docker + Homebrew + deb/rpm scripts + checksums + GPG signing + Windows artifact |
-| **Overall** | **~84%** | core compiler strong; execution stability verified; release tooling largely complete; zero-warning clean build; LSP feature-complete for core operations |
+| Release packaging | 95% | tar.gz/zip + Docker + Homebrew + deb/rpm CI jobs + VSCode .vsix + checksums + GPG signing + Windows artifact |
+| **Overall** | **~86%** | core compiler strong; execution stability verified; release tooling complete across all major platforms and formats; documentation adequate for first release |
 
 ## Deployment Gaps (Remaining)
 
 1. ~~Integration test consistency~~: Fixed `--mode=bytecode` parsing, VM string quoting, and added missing AST builtins
 2. ~~Debugger source-level breakpoints~~: Bytecode compiler emits `source_file` and `line_numbers`; debugger `current_vm_location()` resolves actual source locations; execution loop checks breakpoints against resolved location
-3. ~~No deb/rpm packages~~: `scripts/build-deb.sh` and `scripts/build-rpm.sh` added; release workflow includes `.deb` build job
+3. ~~No deb/rpm packages~~: `scripts/build-deb.sh` and `scripts/build-rpm.sh` added; release workflow includes `build-deb` and `build-rpm` jobs
 4. ~~No Windows installer~~: Windows zip packaging added to release workflow; MSI installer could be a future enhancement
 5. ~~CHANGELOG automation~~: `scripts/generate-changelog.sh` generates changelog entries from git commits
+6. ~~VSCode extension publishing~~: `build-vscode` job packages `.vsix` artifact; manual publish to VSCode Marketplace remains a future step

@@ -40,10 +40,11 @@ const vscode_1 = require("vscode");
 const node_1 = require("vscode-languageclient/node");
 let client;
 function activate(context) {
-    const serverModule = context.asAbsolutePath(path.join('..', '..', 'claw-lsp'));
+    // claw-lsp is a native executable, not a Node.js module
+    const serverCommand = context.asAbsolutePath(path.join('..', '..', 'claw-lsp'));
     const serverOptions = {
-        run: { module: serverModule, transport: node_1.TransportKind.stdio },
-        debug: { module: serverModule, transport: node_1.TransportKind.stdio }
+        run: { command: serverCommand, transport: node_1.TransportKind.stdio },
+        debug: { command: serverCommand, transport: node_1.TransportKind.stdio }
     };
     const clientOptions = {
         documentSelector: [{ scheme: 'file', language: 'claw' }],

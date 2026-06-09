@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "0.2.0")}"
+VERSION="${1:-$(git describe --tags --abbrev=0 2>/dev/null || echo "0.2.0")}"
 RELEASE="1"
 ARCH="$(uname -m)"
 PKG_NAME="claw-compiler"

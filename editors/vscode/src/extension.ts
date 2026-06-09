@@ -10,13 +10,14 @@ import {
 let client: LanguageClient;
 
 export function activate(context: ExtensionContext) {
-    const serverModule = context.asAbsolutePath(
+    // claw-lsp is a native executable, not a Node.js module
+    const serverCommand = context.asAbsolutePath(
         path.join('..', '..', 'claw-lsp')
     );
 
     const serverOptions: ServerOptions = {
-        run: { module: serverModule, transport: TransportKind.stdio },
-        debug: { module: serverModule, transport: TransportKind.stdio }
+        run: { command: serverCommand, transport: TransportKind.stdio },
+        debug: { command: serverCommand, transport: TransportKind.stdio }
     };
 
     const clientOptions: LanguageClientOptions = {

@@ -144,8 +144,54 @@ jobs:
           name: claw-deb
           path: dist/*.deb
 
+  build-rpm:
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y clang llvm make readline-devel rpm-build git tar gzip
+
+      - name: Build .rpm package
+        run: |
+          chmod +x scripts/build-rpm.sh
+          ./scripts/build-rpm.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-rpm
+          path: dist/*.rpm
+
+  build-vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Package VSCode extension
+        run: |
+          cd editors/vscode
+          npm ci
+          npm run compile
+          npx vsce package --no-dependencies
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claw-vscode
+          path: editors/vscode/*.vsix
+
   checksums:
-    needs: [build-macos, build-linux, build-windows]
+    needs: [build-macos, build-linux, build-windows, build-deb, build-rpm, build-vscode]
     runs-on: ubuntu-latest
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
@@ -165,7 +211,7 @@ jobs:
         id: hash
         run: |
           cd artifacts
-          sha256sum */*.tar.gz */*.zip */*.deb 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz */*.zip 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz > ../SHA256SUMS
+          sha256sum */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz */*.zip 2>/dev/null > ../SHA256SUMS || sha256sum */*.tar.gz > ../SHA256SUMS
           cat ../SHA256SUMS
           echo "hashes=$(cat ../SHA256SUMS | base64 -w0)" >> "$GITHUB_OUTPUT"
 
@@ -174,7 +220,7 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd artifacts
-          for f in */*.tar.gz */*.zip */*.deb 2>/dev/null; do
+          for f in */*.tar.gz */*.zip */*.deb */*.rpm */*.vsix 2>/dev/null; do
             [ -f "$f" ] || continue
             gpg --detach-sign --armor --passphrase "$GPG_PASSPHRASE" --batch --yes --pinentry-mode loopback "$f"
           done
