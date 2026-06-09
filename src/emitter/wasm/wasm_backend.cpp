@@ -549,11 +549,28 @@ WasmCodeGenerator::WasmCodeGenerator(WasmModule& module) : module_(module) {}
 // ============================================================================
 
 bool WasmCodeGenerator::generate(const ast::Program& program, std::string& output, bool verbose) {
-    (void)program;
-    (void)output;
-    (void)verbose;
-    // TODO: re-implement using current AST (ast::Module was removed)
-    return false;
+    // Step 1: AST -> IR
+    claw::IRGenerator ir_gen;
+    auto ir_module = ir_gen.generate(const_cast<ast::Program*>(&program));
+    if (!ir_module) {
+        if (verbose) {
+            std::cerr << "[WASM] IR generation failed\n";
+        }
+        return false;
+    }
+
+    // Step 2: IR -> WASM
+    if (!generate(*ir_module)) {
+        if (verbose) {
+            std::cerr << "[WASM] WASM code generation failed\n";
+        }
+        return false;
+    }
+
+    // Step 3: Encode WASM module to binary
+    auto binary = module_.encode();
+    output.assign(reinterpret_cast<const char*>(binary.data()), binary.size());
+    return true;
 }
 
 // bool WasmCodeGenerator::generate_from_module(std::shared_ptr<ast::Module> module, std::string& output, bool verbose) {
@@ -777,9 +794,10 @@ bool WasmRuntime::load_module(const WasmModule& module) {
 
 bool WasmRuntime::load_module(const std::string& wat_text) {
     clear_error();
-    // TODO: Implement WAT parsing (use wabt in production)
+    // WAT parsing is provided by external tools (wabt) in production.
+    // Use wasm-as or wat2wasm to convert WAT to binary, then call load_module(binary).
     (void)wat_text;
-    error_ = "WAT parsing not implemented yet";
+    error_ = "WAT parsing not implemented in runtime; use wabt (wat2wasm) to convert WAT to binary";
     return false;
 }
 

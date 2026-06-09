@@ -163,8 +163,11 @@ bool WasmCodeGenerator::generate_instruction(const ir::Instruction* inst) {
             return true;
             
         case ir::OpCode::BNOT:
-            emit_opcode(WasmOpcode::I32Const);
-            // TODO: Implement bitwise not
+            if (inst->operands.empty()) return false;
+            generate_value(inst->operands[0]);
+            // Bitwise not: XOR with -1 (all bits set)
+            emit_i32_const(-1);
+            emit_opcode(WasmOpcode::I32Xor);
             return true;
             
         default:
