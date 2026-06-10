@@ -172,16 +172,19 @@ private:
     
     // Emit function call
     void emit_call(void* target);
-    
+
+    // Emit external call with dynamic stack alignment
+    void emit_external_call(const std::string& symbol);
+
     // Emit function return
     void emit_return();
-    
+
     // Emit stack frame setup
     void emit_stack_setup(size_t locals_size);
-    
+
     // Emit stack frame teardown
     void emit_stack_teardown(size_t locals_size);
-    
+
     // Get native register for bytecode slot
     X86Reg get_slot_register(int slot);
     

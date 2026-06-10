@@ -190,6 +190,22 @@ int64_t tuple_get(void* tuple, int index);
 void tuple_set(void* tuple, int index, int64_t value);
 
 // ============================================================================
+// 结构体/对象操作
+// ============================================================================
+
+// 分配空对象
+void* alloc_obj();
+
+// 分配带类型名的对象
+void* alloc_obj_type(const char* type_name);
+
+// 加载对象字段 (返回 int64_t 用于 JIT 栈)
+int64_t load_field(const char* field_name, void* obj);
+
+// 存储对象字段 (返回对象指针用于 JIT 栈)
+void* store_field(const char* field_name, int64_t value, void* obj);
+
+// ============================================================================
 // 字符串操作
 // ============================================================================
 

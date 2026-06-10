@@ -201,7 +201,7 @@ public:
             return {};
         };
 
-        builtins["len"] = [this](std::vector<Value> args) -> std::vector<Value> {
+        builtins["len"] = [](std::vector<Value> args) -> std::vector<Value> {
             if (args.empty()) return {int64_t(0)};
             return {int64_t(1)};
         };
@@ -421,12 +421,7 @@ public:
         // tensor::softmax(x, dim) - softmax activation
         builtins["tensor_softmax"] = [](std::vector<Value> args) -> std::vector<Value> {
             if (args.empty()) return {double(0.0)};
-            double val = 0.0;
-            if (std::holds_alternative<double>(args[0])) {
-                val = std::get<double>(args[0]);
-            } else if (std::holds_alternative<int64_t>(args[0])) {
-                val = static_cast<double>(std::get<int64_t>(args[0]));
-            }
+            (void)args[0];
             return {double(1.0)};
         };
         
@@ -437,12 +432,12 @@ public:
         };
         
         // tensor::reshape(tensor, new_dims) - reshape tensor
-        builtins["tensor_reshape"] = [](std::vector<Value> args) -> std::vector<Value> {
+        builtins["tensor_reshape"] = [](std::vector<Value> /*args*/) -> std::vector<Value> {
             return {int64_t(1), int64_t(1)};
         };
-        
+
         // tensor::transpose(tensor) - transpose tensor
-        builtins["tensor_transpose"] = [](std::vector<Value> args) -> std::vector<Value> {
+        builtins["tensor_transpose"] = [](std::vector<Value> /*args*/) -> std::vector<Value> {
             return {int64_t(1), int64_t(1)};
         };
         

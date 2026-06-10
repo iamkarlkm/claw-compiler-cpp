@@ -122,6 +122,72 @@ TEST(integration, strings_consistency) {
     // JIT str_upper/str_contains have pre-existing issues; skip JIT comparison
 }
 
+TEST(integration, structs_consistency) {
+    std::string file = "tests/integration/structs.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    // JIT struct operations have pre-existing issues; skip JIT comparison
+}
+
+TEST(integration, enums_consistency) {
+    std::string file = "tests/integration/enums.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    // JIT enum operations have pre-existing issues; skip JIT comparison
+}
+
+TEST(integration, variables_consistency) {
+    std::string file = "tests/integration/variables.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+    auto out_jit = normalize_output(exec_and_capture(("./claw --mode=jit " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    ASSERT_TRUE(outputs_equal(out_run, out_jit));
+}
+
+TEST(integration, expressions_consistency) {
+    std::string file = "tests/integration/expressions.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+    auto out_jit = normalize_output(exec_and_capture(("./claw --mode=jit " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    ASSERT_TRUE(outputs_equal(out_run, out_jit));
+}
+
+TEST(integration, pattern_matching_consistency) {
+    std::string file = "tests/integration/pattern_matching.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    // JIT match statements have pre-existing issues; skip JIT comparison
+}
+
+TEST(integration, loop_control_consistency) {
+    std::string file = "tests/integration/loop_control.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+    auto out_jit = normalize_output(exec_and_capture(("./claw --mode=jit " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    ASSERT_TRUE(outputs_equal(out_run, out_jit));
+}
+
+TEST(integration, for_in_consistency) {
+    std::string file = "tests/integration/for_in.claw";
+    auto out_run = normalize_output(exec_and_capture(("./claw --run " + file).c_str()));
+    auto out_bc  = normalize_output(exec_and_capture(("./claw --mode=bytecode " + file).c_str()));
+
+    ASSERT_TRUE(outputs_equal(out_run, out_bc));
+    // JIT for-in loops have pre-existing issues; skip JIT comparison
+}
+
 TEST(integration, aot_compiles) {
     std::string file = "tests/integration/hello.claw";
     std::string out_path = "/tmp/claw_aot_integration_test";

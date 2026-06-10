@@ -554,8 +554,8 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         }
     }
 
-    // 输出返回值或错误信息
-    if (result.tag != vm::ValueTag::NIL) {
+    // 输出返回值或错误信息 (仅在 verbose 模式下)
+    if (verbose && result.tag != vm::ValueTag::NIL) {
         std::cout << "Return value: " << result.to_string() << "\n";
     }
 
@@ -846,6 +846,7 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
 
 bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
                   const std::string& output_file) {
+    std::cerr << "[DEBUG] generate_aot called\n";
     if (verbose) {
         std::cout << "  Compiling to AOT executable...\n";
     }
@@ -899,6 +900,11 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
         for (const auto& ext : cf.external_calls) {
             external_syms.insert(ext.symbol_name);
         }
+    }
+
+    // DEBUG: print external symbols
+    for (const auto& sym : external_syms) {
+        std::cerr << "[AOT-EXT] " << sym << "\n";
     }
 
     // Merge all functions into a single __text section
@@ -968,6 +974,14 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
     // 4. Link with system linker
     auto t_link_start = high_resolution_clock::now();
     claw::codegen::LinkerIntegration linker;
+
+    // Pass string constants to linker for AOT string literal support
+    std::vector<std::string> string_constants;
+    for (const auto& cv : module->constants.values) {
+        string_constants.push_back(cv.str);
+    }
+    linker.set_string_constants(string_constants);
+
     if (!linker.link_with_runtime(obj_path, output_file)) {
         std::cerr << "Error: Linking failed: " << linker.get_error() << "\n";
         return false;

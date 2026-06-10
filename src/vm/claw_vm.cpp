@@ -337,7 +337,7 @@ void VMRuntime::setup_builtins() {
     };
 
     // Input function
-    builtins["input"] = [](VMRuntime& rt) {
+    builtins["input"] = [](VMRuntime& /*rt*/) {
         std::string line;
         std::getline(std::cin, line);
         return Value::string_v(line);
@@ -1701,7 +1701,7 @@ void GarbageCollector::collect(VMRuntime& runtime) {
     sweep(runtime);
 }
 
-void GarbageCollector::sweep(VMRuntime& runtime) {
+void GarbageCollector::sweep(VMRuntime& /*runtime*/) {
     // For simplicity, just reset marked flags
     // Full implementation would free unmarked objects
     // Note: gc_cycles is now in ClawVM, not VMRuntime

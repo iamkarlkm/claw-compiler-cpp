@@ -197,6 +197,9 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
         const auto& inst = func.code[i];
         instruction_addrs[i] = current;
 
+        // DEBUG: print opcode
+        fprintf(stderr, "[JIT-COMPILE] %s @ %zu: op=%d operand=%u\n", func.name.c_str(), i, (int)inst.op, inst.operand);
+
         // 根据 OpCode 分发到对应的指令发射函数
         switch (inst.op) {
             // 栈操作
@@ -955,14 +958,116 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 sim_alloc_stack_.push_back(std::nullopt);
                 break;
 
-            case bytecode::OpCode::ALLOC_OBJ:
-            case bytecode::OpCode::ALLOC_OBJ_TYPE:
-            case bytecode::OpCode::LOAD_FIELD:
-            case bytecode::OpCode::STORE_FIELD:
-                result.success = false;
-                result.error_message = "Struct operations not yet supported in JIT";
-                compiled_functions_.erase(func.name);
-                return result;
+            case bytecode::OpCode::ALLOC_OBJ: {
+                // alloc_obj() -> void*
+                // xor rdi, rdi; call alloc_obj; push rax
+                uint8_t* code = static_cast<uint8_t*>(current);
+                code[0] = 0x48; code[1] = 0x31; code[2] = 0xff;  // xor rdi, rdi
+                code[3] = 0xe8;  // call rel32
+                void* func_addr = get_runtime_function_by_name("alloc_obj");
+                if (func_addr) {
+                    int32_t offset = static_cast<int32_t>(
+                        reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[8])
+                    );
+                    *reinterpret_cast<int32_t*>(&code[4]) = offset;
+                } else {
+                    *reinterpret_cast<int32_t*>(&code[4]) = 0;
+                }
+                code[8] = 0x50;  // push rax
+                current = &code[9];
+                type_stack_.push_back(bytecode::ValueType::OBJECT);
+                last_pushed_type_ = bytecode::ValueType::OBJECT;
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::ALLOC_OBJ_TYPE: {
+                // alloc_obj_type(type_name) -> void*
+                // Load string ptr from constant pool to rdi, call, push rax
+                uint8_t* code = static_cast<uint8_t*>(current);
+                uint32_t str_idx = inst.operand;
+                const char* type_name = "";
+                if (current_module_ && str_idx < current_module_->constants.values.size()) {
+                    type_name = current_module_->constants.values[str_idx].str.c_str();
+                }
+                code[0] = 0x48; code[1] = 0xB8;
+                *reinterpret_cast<uint64_t*>(&code[2]) = reinterpret_cast<uint64_t>(type_name);
+                code[10] = 0x48; code[11] = 0x89; code[12] = 0xC7;  // mov rdi, rax
+                code[13] = 0xe8;  // call rel32
+                void* func_addr = get_runtime_function_by_name("alloc_obj_type");
+                if (func_addr) {
+                    int32_t offset = static_cast<int32_t>(
+                        reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[18])
+                    );
+                    *reinterpret_cast<int32_t*>(&code[14]) = offset;
+                } else {
+                    *reinterpret_cast<int32_t*>(&code[14]) = 0;
+                }
+                code[18] = 0x50;  // push rax
+                current = &code[19];
+                type_stack_.push_back(bytecode::ValueType::OBJECT);
+                last_pushed_type_ = bytecode::ValueType::OBJECT;
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::LOAD_FIELD: {
+                // load_field(field_name, obj) -> int64_t
+                // pop rdi (field_name); pop rsi (obj); call; push rax
+                uint8_t* code = static_cast<uint8_t*>(current);
+                code[0] = 0x5f;  // pop rdi (field_name)
+                code[1] = 0x5e;  // pop rsi (obj)
+                code[2] = 0xe8;  // call rel32
+                void* func_addr = get_runtime_function_by_name("load_field");
+                if (func_addr) {
+                    int32_t offset = static_cast<int32_t>(
+                        reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
+                    );
+                    *reinterpret_cast<int32_t*>(&code[3]) = offset;
+                } else {
+                    *reinterpret_cast<int32_t*>(&code[3]) = 0;
+                }
+                code[7] = 0x50;  // push rax
+                current = &code[8];
+                if (type_stack_.size() >= 2) {
+                    type_stack_.resize(type_stack_.size() - 2);
+                }
+                type_stack_.push_back(bytecode::ValueType::I64);
+                last_pushed_type_ = bytecode::ValueType::I64;
+                if (sim_alloc_stack_.size() >= 2) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 2);
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
+            }
+            case bytecode::OpCode::STORE_FIELD: {
+                // store_field(field_name, value, obj) -> void*
+                // pop rdi (field_name); pop rsi (value); pop rdx (obj); call; push rax
+                uint8_t* code = static_cast<uint8_t*>(current);
+                code[0] = 0x5f;  // pop rdi (field_name)
+                code[1] = 0x5e;  // pop rsi (value)
+                code[2] = 0x5a;  // pop rdx (obj)
+                code[3] = 0xe8;  // call rel32
+                void* func_addr = get_runtime_function_by_name("store_field");
+                if (func_addr) {
+                    int32_t offset = static_cast<int32_t>(
+                        reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[8])
+                    );
+                    *reinterpret_cast<int32_t*>(&code[4]) = offset;
+                } else {
+                    *reinterpret_cast<int32_t*>(&code[4]) = 0;
+                }
+                code[8] = 0x50;  // push rax
+                current = &code[9];
+                if (type_stack_.size() >= 3) {
+                    type_stack_.resize(type_stack_.size() - 3);
+                }
+                type_stack_.push_back(bytecode::ValueType::OBJECT);
+                last_pushed_type_ = bytecode::ValueType::OBJECT;
+                if (sim_alloc_stack_.size() >= 3) {
+                    sim_alloc_stack_.resize(sim_alloc_stack_.size() - 3);
+                }
+                sim_alloc_stack_.push_back(std::nullopt);
+                break;
+            }
 
             default:
                 // 未知操作码，跳过
@@ -2015,7 +2120,7 @@ void MethodJITCompiler::emit_tensor_op(void*& code_ptr, bytecode::OpCode op) {
 // 闭包操作实现
 // ============================================================================
 
-void MethodJITCompiler::emit_closure_op(void*& code_ptr, const bytecode::Function& func) {
+void MethodJITCompiler::emit_closure_op(void*& code_ptr, const bytecode::Function& /*func*/) {
     // 闭包创建: 分配闭包对象并捕获 upvalues
     // 需要运行时支持: closure_create(func_ptr, upvalue_count)
     uint8_t* code = static_cast<uint8_t*>(code_ptr);
@@ -2271,7 +2376,7 @@ void OptimizingJITCompiler::clear_cache() {
     code_cache_->clear();
 }
 
-void OptimizingJITCompiler::emit_prologue(void*& code_ptr, size_t local_count, uint32_t arity) {
+void OptimizingJITCompiler::emit_prologue(void*& code_ptr, size_t local_count, uint32_t /*arity*/) {
     // x86-64 函数序言 (优化版本)
     // push rbp
     // mov rbp, rsp
@@ -2913,7 +3018,6 @@ bool OptimizingJITCompiler::can_inline(const bytecode::Function& caller,
     // 2. 调用点不多
     // 3. 没有递归
     
-    size_t caller_size = caller.code.size();
     size_t callee_size = callee.code.size();
     
     // 计算调用次数
@@ -3312,7 +3416,10 @@ void RuntimeFunctionRegistry::register_builtin_functions() {
     // 内存操作
     register_function("alloc_array", reinterpret_cast<void*>(&runtime::alloc_array));
     register_function("alloc_tuple", reinterpret_cast<void*>(&runtime::alloc_tuple));
-    register_function("alloc_obj", nullptr);
+    register_function("alloc_obj", reinterpret_cast<void*>(&runtime::alloc_obj));
+    register_function("alloc_obj_type", reinterpret_cast<void*>(&runtime::alloc_obj_type));
+    register_function("load_field", reinterpret_cast<void*>(&runtime::load_field));
+    register_function("store_field", reinterpret_cast<void*>(&runtime::store_field));
     register_function("gc_alloc", nullptr);
     register_function("gc_mark", nullptr);
     
@@ -3545,7 +3652,7 @@ void MethodJITCompiler::emit_instruction_emitter(const bytecode::Instruction& in
     }
 }
 
-void MethodJITCompiler::emit_arithmetic_emitter(bytecode::OpCode op) {
+void MethodJITCompiler::emit_arithmetic_emitter(bytecode::OpCode /*op*/) {
     if (!emitter_) return;
     // 简化实现 - 使用 RAX/RDX 作为临时寄存器
 }

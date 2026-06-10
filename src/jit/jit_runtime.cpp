@@ -548,6 +548,52 @@ void tuple_set(void* t_ptr, int index, int64_t value) {
 }
 
 // ============================================================================
+// 结构体/对象操作实现
+// ============================================================================
+
+struct JITObjectValue {
+    std::string type_name;
+    std::unordered_map<std::string, Value> fields;
+};
+
+// alloc_obj() -> void*
+void* alloc_obj() {
+    auto* obj = new JITObjectValue();
+    g_runtime.total_allocated += sizeof(JITObjectValue);
+    g_runtime.alloc_count++;
+    return obj;
+}
+
+// alloc_obj_type(type_name) -> void*
+void* alloc_obj_type(const char* type_name) {
+    auto* obj = new JITObjectValue();
+    obj->type_name = type_name ? type_name : "";
+    g_runtime.total_allocated += sizeof(JITObjectValue);
+    g_runtime.alloc_count++;
+    return obj;
+}
+
+// load_field(field_name, obj) -> int64_t
+int64_t load_field(const char* field_name, void* obj_ptr) {
+    auto* obj = static_cast<JITObjectValue*>(obj_ptr);
+    if (!obj || !field_name) return 0;
+    auto it = obj->fields.find(field_name);
+    if (it != obj->fields.end()) {
+        return value_to_int64(it->second);
+    }
+    return 0;
+}
+
+// store_field(field_name, value, obj) -> void*
+void* store_field(const char* field_name, int64_t value, void* obj_ptr) {
+    auto* obj = static_cast<JITObjectValue*>(obj_ptr);
+    if (obj && field_name) {
+        obj->fields[field_name] = Value(value);
+    }
+    return obj_ptr;
+}
+
+// ============================================================================
 // 字符串操作实现
 // ============================================================================
 

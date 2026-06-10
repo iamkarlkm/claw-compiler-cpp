@@ -94,8 +94,14 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
         }
     }
 
-    // Record the end-of-function position for jumps that target past the last instruction
-    compile_state_.label_positions[func.code.size()] = generator_.getCode().size();
+    // Record the end-of-function position for jumps that target past the last instruction.
+    // If jumps target the end, emit a shared epilogue first so they land on valid code.
+    size_t end_label_pos = generator_.getCode().size();
+    if (compile_state_.pending_jumps.count(func.code.size()) > 0) {
+        emit_epilogue();
+        generator_.emitRET();
+    }
+    compile_state_.label_positions[func.code.size()] = end_label_pos;
 
     // Resolve pending jumps: patch relative offsets
     for (const auto& [target_ip, positions] : compile_state_.pending_jumps) {
@@ -123,6 +129,7 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
 // ============================================================================
 
 bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst) {
+    std::cerr << "[AOT-COMPILE] op=" << static_cast<int>(inst.op) << " opnd=" << inst.operand << "\n";
     using Op = bytecode::OpCode;
     uint32_t opnd = inst.operand;
     
@@ -150,7 +157,11 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
                         generator_.emitADD_RI(X86Reg::RAX, 1);
                     }
                     generator_.emitPUSH(X86Reg::RAX);
+                } else if (val.type == bytecode::ValueType::STRING) {
+                    std::cerr << "[AOT-PUSH-STRING] idx=" << opnd << " str=" << val.str << "\n";
+                    emit_external_call("_claw_str_" + std::to_string(opnd));
                 } else {
+                    std::cerr << "[AOT-PUSH-OTHER] idx=" << opnd << " type=" << static_cast<int>(val.type) << "\n";
                     // Fallback: push immediate (index)
                     generator_.emitPUSH_imm(static_cast<int64_t>(opnd));
                 }
@@ -210,13 +221,15 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             set_error("FMOD not yet supported in AOT");
             return false;
 
-        // Integer comparison
+        // Integer / generic comparison
         case Op::IEQ:
         case Op::INE:
         case Op::ILT:
         case Op::ILE:
         case Op::IGT:
         case Op::IGE:
+        case Op::EQ:
+        case Op::NE:
             if (!compile_comparison(inst)) return false;
             break;
 
@@ -337,12 +350,33 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             return false;
 
         // Structs
-        case Op::ALLOC_OBJ:
-        case Op::ALLOC_OBJ_TYPE:
-        case Op::LOAD_FIELD:
-        case Op::STORE_FIELD:
-            set_error("Struct operations not yet supported in AOT");
-            return false;
+        case Op::ALLOC_OBJ: {
+            emit_external_call("_claw_alloc_obj");
+            break;
+        }
+        case Op::ALLOC_OBJ_TYPE: {
+            // For AOT, passing string pointers requires a data section.
+            // Fall back to claw_alloc_obj (type name not needed for field access).
+            emit_external_call("_claw_alloc_obj");
+            break;
+        }
+        case Op::LOAD_FIELD: {
+            // Stack: ..., obj, field_name (top)
+            // claw_load_field(field_name, obj)
+            generator_.emitPOP(X86Reg::RDI);   // field_name
+            generator_.emitPOP(X86Reg::RSI);   // obj
+            emit_external_call("_claw_load_field");
+            break;
+        }
+        case Op::STORE_FIELD: {
+            // Stack: ..., obj, value, field_name (top)
+            // claw_store_field(field_name, value, obj)
+            generator_.emitPOP(X86Reg::RDI);   // field_name
+            generator_.emitPOP(X86Reg::RSI);   // value
+            generator_.emitPOP(X86Reg::RDX);   // obj
+            emit_external_call("_claw_store_field");
+            break;
+        }
 
         // Tensors
         case Op::TENSOR_CREATE:
@@ -425,9 +459,11 @@ bool NativeCodeGenerator::compile_comparison(const bytecode::Instruction& inst) 
     Condition cond;
     switch (inst.op) {
         case Op::IEQ:
+        case Op::EQ:
             cond = Condition::E;
             break;
         case Op::INE:
+        case Op::NE:
             cond = Condition::NE;
             break;
         case Op::ILT:
@@ -693,20 +729,15 @@ bool NativeCodeGenerator::compile_call(const bytecode::Instruction& inst) {
             }
 
             if (!target_func.empty()) {
-                generator_.emitCALL_rel32(0);
-                current_external_calls_.push_back({
-                    generator_.getCode().size() - 4,
-                    "_" + target_func
-                });
+                emit_external_call("_" + target_func);
             } else {
                 set_error("AOT: dynamic or indirect function calls not yet supported");
                 return false;
             }
 
-            generator_.emitPUSH(X86Reg::RAX);
             break;
         }
-            
+
         case Op::CALL_EXT: {
             // Decode operands: lower 16 bits = str_idx, upper 16 bits = arg_count
             uint32_t str_idx = inst.operand & 0xFFFF;
@@ -735,20 +766,18 @@ bool NativeCodeGenerator::compile_call(const bytecode::Instruction& inst) {
                 }
             }
 
-            // Emit call with relocation placeholder
-            generator_.emitCALL_rel32(0);
-
-            // Track external call for AOT object file generation
+            // Emit call with relocation placeholder and dynamic stack alignment
             if (!func_name.empty()) {
-                std::string symbol = "_claw_" + func_name;
-                current_external_calls_.push_back({
-                    generator_.getCode().size() - 4,
-                    symbol
-                });
+                emit_external_call("_claw_" + func_name);
+            } else {
+                // Still need alignment even for unresolved symbols
+                generator_.emitMOV_RR(X86Reg::R12, X86Reg::RSP);
+                generator_.emitAND_RI(X86Reg::R12, 8);
+                generator_.emitSUB_RR(X86Reg::RSP, X86Reg::R12);
+                generator_.emitCALL_rel32(0);
+                generator_.emitADD_RR(X86Reg::RSP, X86Reg::R12);
+                generator_.emitPUSH(X86Reg::RAX);
             }
-
-            // Push return value (functions may return nil, but push RAX anyway)
-            generator_.emitPUSH(X86Reg::RAX);
             break;
         }
             
@@ -878,6 +907,8 @@ bool NativeCodeGenerator::compile_conversion(const bytecode::Instruction& inst) 
 // ============================================================================
 
 void NativeCodeGenerator::emit_prologue(int arity, int local_count) {
+    // Push r12 (callee-saved, used for stack alignment)
+    generator_.emitPUSH(X86Reg::R12);
     // Push rbp
     generator_.emitPUSH(X86Reg::RBP);
     // Move rsp to rbp
@@ -900,11 +931,31 @@ void NativeCodeGenerator::emit_prologue(int arity, int local_count) {
     }
 }
 
+void NativeCodeGenerator::emit_external_call(const std::string& symbol) {
+    // Dynamically align RSP to 16 bytes before external calls.
+    // macOS System V ABI requires RSP % 16 == 0 at the call instruction.
+    // R12 is callee-saved, so it survives the call.
+    generator_.emitMOV_RR(X86Reg::R12, X86Reg::RSP);
+    generator_.emitAND_RI(X86Reg::R12, 8);
+    generator_.emitSUB_RR(X86Reg::RSP, X86Reg::R12);
+
+    generator_.emitCALL_rel32(0);
+    current_external_calls_.push_back({
+        generator_.getCode().size() - 4,
+        symbol
+    });
+
+    generator_.emitADD_RR(X86Reg::RSP, X86Reg::R12);
+    generator_.emitPUSH(X86Reg::RAX);
+}
+
 void NativeCodeGenerator::emit_epilogue() {
     // Move rbp to rsp
     generator_.emitMOV_RR(X86Reg::RSP, X86Reg::RBP);
     // Pop rbp
     generator_.emitPOP(X86Reg::RBP);
+    // Pop r12 (callee-saved, used for stack alignment)
+    generator_.emitPOP(X86Reg::R12);
 }
 
 void NativeCodeGenerator::emit_call(void* target) {

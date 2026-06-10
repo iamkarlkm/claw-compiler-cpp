@@ -29,6 +29,9 @@ public:
     bool link_with_runtime(const std::string& object_file,
                            const std::string& output_file);
 
+    // Set string constants for AOT string literal support
+    void set_string_constants(const std::vector<std::string>& strings);
+
     // Get the last error message
     const std::string& get_error() const { return error_; }
 
@@ -38,6 +41,7 @@ public:
 private:
     std::string error_;
     std::string runtime_object_path_; // cached path to compiled runtime stub
+    std::vector<std::string> string_constants_;
 
     bool compile_runtime_stub();
     bool invoke_linker(const std::vector<std::string>& args);

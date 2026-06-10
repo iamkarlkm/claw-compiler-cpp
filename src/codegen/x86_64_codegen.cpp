@@ -237,7 +237,7 @@ X86Reg X86_64CodeGenerator::reg32(X86Reg r) {
 // ========== ModRM 发射 ==========
 
 void X86_64CodeGenerator::emitModRM(uint8_t mod, uint8_t reg, uint8_t rm) {
-    emitByte((mod << 6) | (reg << 3) | rm);
+    emitByte((mod << 6) | ((reg & 0x7) << 3) | (rm & 0x7));
 }
 
 void X86_64CodeGenerator::emitModRMSIB(uint8_t mod, uint8_t reg, 
@@ -268,7 +268,7 @@ void X86_64CodeGenerator::encodeMemory(const Operand& mem, uint8_t reg, [[maybe_
     
     // [base + index*scale + disp]
     if (base == X86Reg::RSP) {
-        // 需要 SIB 字节
+        // 需要 SIB 字节 (RSP as base always requires SIB)
         if (index != X86Reg::NONE) {
             // [base + index*scale + disp]
             uint8_t scale_idx = 0;
@@ -278,7 +278,7 @@ void X86_64CodeGenerator::encodeMemory(const Operand& mem, uint8_t reg, [[maybe_
                 case 4: scale_idx = 2; break;
                 case 8: scale_idx = 3; break;
             }
-            if (disp == 0 && base != X86Reg::RBP) {
+            if (disp == 0) {
                 emitModRM(0, reg, 4);
                 emitByte((scale_idx << 6) | (sibCode(index) << 3) | sibCode(base));
             } else if (disp >= INT8_MIN && disp <= INT8_MAX) {
@@ -291,14 +291,17 @@ void X86_64CodeGenerator::encodeMemory(const Operand& mem, uint8_t reg, [[maybe_
                 emitDword(static_cast<uint32_t>(disp));
             }
         } else {
-            // [disp] (no base, no index)
-            if (disp >= INT8_MIN && disp <= INT8_MAX) {
+            // [RSP + disp] (no index)
+            if (disp == 0) {
+                emitModRM(0, reg, 4);
+                emitByte(0x24);  // SIB: scale=0, index=none(4), base=RSP(4)
+            } else if (disp >= INT8_MIN && disp <= INT8_MAX) {
                 emitModRM(1, reg, 4);
-                emitByte(0x25);  // SIB with no base
+                emitByte(0x24);  // SIB: scale=0, index=none(4), base=RSP(4)
                 emitByte(static_cast<uint8_t>(disp));
             } else {
                 emitModRM(2, reg, 4);
-                emitByte(0x25);  // SIB with no base
+                emitByte(0x24);  // SIB: scale=0, index=none(4), base=RSP(4)
                 emitDword(static_cast<uint32_t>(disp));
             }
         }
@@ -345,14 +348,14 @@ void X86_64CodeGenerator::emitNOP() {
 // ========== 数据传输指令 ==========
 
 void X86_64CodeGenerator::emitMOV_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x89);  // MOV r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
 
 void X86_64CodeGenerator::emitMOV_RI(X86Reg dst, int64_t imm) {
     emitREX(true, false, false, regCode(dst) >= 8);
-    emitByte(0xB8 | regCode(dst));  // MOV r64, imm64
+    emitByte(0xB8 | (regCode(dst) & 0x7));  // MOV r64, imm64
     emitQword(static_cast<uint64_t>(imm));
 }
 
@@ -414,7 +417,7 @@ void X86_64CodeGenerator::emitXCHG_RR(X86Reg dst, X86Reg src) {
         // XCHG rax, r64
         X86Reg other = (dst == X86Reg::RAX) ? src : dst;
         emitREX(true, false, false, regCode(other) >= 8);
-        emitByte(0x90 | regCode(other));
+        emitByte(0x90 | (regCode(other) & 0x7));
     } else {
         emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
         emitByte(0x87);
@@ -425,7 +428,7 @@ void X86_64CodeGenerator::emitXCHG_RR(X86Reg dst, X86Reg src) {
 // ========== 算术指令 ==========
 
 void X86_64CodeGenerator::emitADD_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x01);  // ADD r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -438,7 +441,7 @@ void X86_64CodeGenerator::emitADD_RI(X86Reg dst, int32_t imm) {
 }
 
 void X86_64CodeGenerator::emitADD_RM(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x03);  // ADD r64, r/m64
     encodeMemory(mem, regCode(dst));
 }
@@ -450,7 +453,7 @@ void X86_64CodeGenerator::emitADD_MR(const Operand& mem, X86Reg src) {
 }
 
 void X86_64CodeGenerator::emitSUB_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x29);  // SUB r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -495,7 +498,7 @@ void X86_64CodeGenerator::emitIDIV(X86Reg div) {
 }
 
 void X86_64CodeGenerator::emitAND_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x21);  // AND r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -508,7 +511,7 @@ void X86_64CodeGenerator::emitAND_RI(X86Reg dst, int32_t imm) {
 }
 
 void X86_64CodeGenerator::emitAND_RM(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x23);  // AND r64, r/m64
     encodeMemory(mem, regCode(dst));
 }
@@ -520,7 +523,7 @@ void X86_64CodeGenerator::emitAND_MR(const Operand& mem, X86Reg src) {
 }
 
 void X86_64CodeGenerator::emitOR_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x09);  // OR r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -533,7 +536,7 @@ void X86_64CodeGenerator::emitOR_RI(X86Reg dst, int32_t imm) {
 }
 
 void X86_64CodeGenerator::emitOR_RM(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x0B);  // OR r64, r/m64
     encodeMemory(mem, regCode(dst));
 }
@@ -545,7 +548,7 @@ void X86_64CodeGenerator::emitOR_MR(const Operand& mem, X86Reg src) {
 }
 
 void X86_64CodeGenerator::emitXOR_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x31);  // XOR r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -628,7 +631,7 @@ void X86_64CodeGenerator::emitROR_RI(X86Reg dst, uint8_t imm) {
 // ========== 比较指令 ==========
 
 void X86_64CodeGenerator::emitCMP_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x39);  // CMP r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -641,13 +644,13 @@ void X86_64CodeGenerator::emitCMP_RI(X86Reg dst, int32_t imm) {
 }
 
 void X86_64CodeGenerator::emitCMP_RM(X86Reg dst, const Operand& mem) {
-    emitREX(true, false, false, regCode(dst) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(mem.mem_val.base) >= 8);
     emitByte(0x3B);  // CMP r64, r/m64
     encodeMemory(mem, regCode(dst));
 }
 
 void X86_64CodeGenerator::emitTEST_RR(X86Reg dst, X86Reg src) {
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(src) >= 8, false, regCode(dst) >= 8);
     emitByte(0x85);  // TEST r/m64, r64
     emitModRM(3, regCode(src), regCode(dst));
 }
@@ -899,7 +902,7 @@ void X86_64CodeGenerator::emitPopCalleeSaved() {
 
 void X86_64CodeGenerator::emitPUSH(X86Reg reg) {
     emitREX(true, false, false, regCode(reg) >= 8);
-    emitByte(0x50 | regCode(reg));
+    emitByte(0x50 | (regCode(reg) & 0x7));
 }
 
 void X86_64CodeGenerator::emitPUSH_imm(int32_t imm) {
@@ -915,7 +918,7 @@ void X86_64CodeGenerator::emitPUSH_M(const Operand& mem) {
 
 void X86_64CodeGenerator::emitPOP(X86Reg reg) {
     emitREX(true, false, false, regCode(reg) >= 8);
-    emitByte(0x58 | regCode(reg));
+    emitByte(0x58 | (regCode(reg) & 0x7));
 }
 
 void X86_64CodeGenerator::emitPOP_M(const Operand& mem) {
@@ -1108,7 +1111,7 @@ void X86_64CodeGenerator::emitMAXSD(X86Reg dst, X86Reg src) {
 
 void X86_64CodeGenerator::emitCVTSI2SS(X86Reg dst, X86Reg src) {
     emitByte(0xF3);
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(src) >= 8);
     emitByte(0x0F);
     emitByte(0x2A);  // CVTSI2SS xmm, r/m32
     emitModRM(3, regCode(dst), regCode(src));
@@ -1116,7 +1119,7 @@ void X86_64CodeGenerator::emitCVTSI2SS(X86Reg dst, X86Reg src) {
 
 void X86_64CodeGenerator::emitCVTSI2SD(X86Reg dst, X86Reg src) {
     emitByte(0xF2);
-    emitREX(true, false, false, regCode(dst) >= 8 || regCode(src) >= 8);
+    emitREX(true, regCode(dst) >= 8, false, regCode(src) >= 8);
     emitByte(0x0F);
     emitByte(0x2A);  // CVTSI2SD xmm, r/m32
     emitModRM(3, regCode(dst), regCode(src));

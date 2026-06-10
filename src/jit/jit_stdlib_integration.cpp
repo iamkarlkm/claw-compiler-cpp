@@ -660,6 +660,12 @@ static const std::vector<JitRuntimeFunction> g_jit_runtime_functions = {
     {"tuple_get", reinterpret_cast<void*>(&runtime::tuple_get), 64, "int64_t tuple_get(t, idx)"},
     {"tuple_set", reinterpret_cast<void*>(&runtime::tuple_set), 69, "void tuple_set(t, idx, val)"},
 
+    // 结构体运行时 (供 JIT 调用)
+    {"alloc_obj", reinterpret_cast<void*>(&runtime::alloc_obj), 95, "void* alloc_obj()"},
+    {"alloc_obj_type", reinterpret_cast<void*>(&runtime::alloc_obj_type), 96, "void* alloc_obj_type(name)"},
+    {"load_field", reinterpret_cast<void*>(&runtime::load_field), 97, "int64_t load_field(name, obj)"},
+    {"store_field", reinterpret_cast<void*>(&runtime::store_field), 98, "void* store_field(name, val, obj)"},
+
     // 数组 高级函数
     {"arr_len", reinterpret_cast<void*>(&jit_ext_arr_len), 70, "int arr_len(arr)"},
     {"arr_push", reinterpret_cast<void*>(&jit_ext_arr_push), 71, "array arr_push(arr, val)"},
