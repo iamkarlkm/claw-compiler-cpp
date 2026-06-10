@@ -14,7 +14,7 @@
 namespace claw {
 namespace scheduler {
 
-using namespace tensorir;
+// Note: tensorir types are explicitly qualified to avoid namespace pollution
 
 // ============================================================================
 // 调度决策 - 单个变换操作
@@ -76,7 +76,7 @@ struct ScheduleConfig {
     void clear() { decisions.clear(); estimated_score = -1.0; measured_time = -1.0; is_measured = false; }
     
     // 应用到 TensorIR Schedule
-    bool apply(Schedule& sched) const;
+    bool apply(tensorir::Schedule& sched) const;
     
     // 生成唯一签名（用于缓存）
     std::string signature() const;
@@ -131,7 +131,7 @@ struct TransformRule {
 
 class ScheduleSpace {
 public:
-    ScheduleSpace(TensorOp* op, const TensorIRModule* module);
+    ScheduleSpace(tensorir::TensorOp* op, const tensorir::TensorIRModule* module);
     
     // 获取所有合法变换规则
     const std::vector<TransformRule>& get_rules() const { return rules_; }
@@ -168,8 +168,8 @@ public:
     std::string to_string() const;
 
 private:
-    TensorOp* op_;
-    const TensorIRModule* module_;
+    tensorir::TensorOp* op_;
+    const tensorir::TensorIRModule* module_;
     std::vector<TransformRule> rules_;
     
     void build_rules();
@@ -194,15 +194,15 @@ private:
 // ============================================================================
 
 struct ModuleScheduleSpace {
-    TensorIRModule* module;
-    std::unordered_map<TensorOp*, std::unique_ptr<ScheduleSpace>> op_spaces;
-    
-    explicit ModuleScheduleSpace(TensorIRModule* mod);
-    
-    ScheduleSpace* get_space(TensorOp* op);
-    
+    tensorir::TensorIRModule* module;
+    std::unordered_map<tensorir::TensorOp*, std::unique_ptr<ScheduleSpace>> op_spaces;
+
+    explicit ModuleScheduleSpace(tensorir::TensorIRModule* mod);
+
+    ScheduleSpace* get_space(tensorir::TensorOp* op);
+
     // 采样完整模块配置
-    std::unordered_map<TensorOp*, ScheduleConfig> random_sample(std::mt19937& rng) const;
+    std::unordered_map<tensorir::TensorOp*, ScheduleConfig> random_sample(std::mt19937& rng) const;
     
     size_t estimated_total_size() const;
 };

@@ -19,6 +19,13 @@
 namespace claw {
 namespace scheduler {
 
+using tensorir::TensorOp;
+using tensorir::TensorIRModule;
+using tensorir::MatmulOp;
+using tensorir::ReduceOp;
+using tensorir::ComputeOp;
+using tensorir::Conv2dOp;
+
 // ============================================================================
 // VM 评估器配置
 // ============================================================================

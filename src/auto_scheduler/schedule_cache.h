@@ -13,6 +13,10 @@
 namespace claw {
 namespace scheduler {
 
+using tensorir::TensorOp;
+using tensorir::TensorIRModule;
+using tensorir::DimList;
+
 // ============================================================================
 // 缓存条目
 // ============================================================================

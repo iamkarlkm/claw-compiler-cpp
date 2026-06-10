@@ -635,7 +635,7 @@ ScheduleConfig ScheduleSpace::random_sample(std::mt19937& rng) const {
     return config;
 }
 
-ScheduleConfig ScheduleSpace::random_sample_greedy(std::mt19937& rng, int max_depth) const {
+ScheduleConfig ScheduleSpace::random_sample_greedy(std::mt19937& /*rng*/, int max_depth) const {
     ScheduleConfig config;
     std::vector<bool> used(rules_.size(), false);
     
