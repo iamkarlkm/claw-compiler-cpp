@@ -1,0 +1,19 @@
+fn main() {
+    let i = 0
+    while i < 10 {
+        i = i + 1
+        break;
+    }
+    println(i)
+
+    let sum = 0
+    let j = 0
+    while j < 5 {
+        j = j + 1
+        if j == 3 {
+            continue;
+        }
+        sum = sum + j
+    }
+    println(sum)
+}

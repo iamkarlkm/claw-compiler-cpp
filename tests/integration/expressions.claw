@@ -1,0 +1,10 @@
+fn calc(a, b, c) {
+    return a + b * c
+}
+
+fn main() {
+    println(calc(1, 2, 3))
+    println((1 + 2) * 3)
+    println(10 - 3 - 2)
+    println(20 / 4 / 2)
+}

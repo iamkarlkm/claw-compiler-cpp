@@ -1,0 +1,13 @@
+fn main() {
+    let sum = 0
+    for v in [1, 2, 3, 4, 5] {
+        sum = sum + v
+    }
+    println(sum)
+
+    let total = 0
+    for i in 1..4 {
+        total = total + i
+    }
+    println(total)
+}

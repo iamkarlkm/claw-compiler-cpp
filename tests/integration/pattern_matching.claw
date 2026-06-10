@@ -1,0 +1,16 @@
+fn main() {
+    let x = 2
+    match x {
+        1 => println(10),
+        2 => println(20),
+        3 => println(30),
+        _ => println(0)
+    }
+
+    let s = "world"
+    match s {
+        "hello" => println(1),
+        "world" => println(2),
+        _ => println(0)
+    }
+}
