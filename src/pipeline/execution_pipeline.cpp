@@ -7,6 +7,7 @@
 #include "../pipeline/execution_engine.h"
 #include "../vm/claw_vm.h"
 #include "../jit/jit_compiler.h"
+#include "../emitter/wasm/wasm_backend.h"
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -168,32 +169,61 @@ Value ExecutionPipeline::run_bytecode(const bytecode::Module& module) {
 
 std::string ExecutionPipeline::run_c_codegen(std::shared_ptr<ast::Program> ast) {
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     // 使用 CCodeGenerator 生成 C 代码
     claw::codegen::CCodeGenerator cgen;
-    
+
     // 尝试使用新的 API (Program*)
     ast::Program* program_ptr = ast.get();
     bool success = cgen.generate(program_ptr);
-    
+
     if (!success) {
         if (verbose_) {
             std::cerr << "  [CCodeGen] Code generation failed\n";
         }
         return "";
     }
-    
+
     std::string c_code = cgen.get_code();
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    
+
     if (verbose_) {
         std::cout << "  [CCodeGen] Generated " << c_code.size() << " bytes of C code\n";
         std::cout << "  [CCodeGen] Completed in " << duration.count() << "us\n";
     }
-    
+
     return c_code;
+}
+
+std::vector<uint8_t> ExecutionPipeline::run_wasm(std::shared_ptr<ast::Program> ast) {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    claw::wasm::WasmModule wasm_module;
+    claw::wasm::WasmCodeGenerator wasm_gen(wasm_module);
+
+    std::string output;
+    bool success = wasm_gen.generate_from_program(ast, output, verbose_);
+
+    if (!success) {
+        if (verbose_) {
+            std::cerr << "  [WebAssembly] Code generation failed\n";
+        }
+        return {};
+    }
+
+    std::vector<uint8_t> wasm_bytes(output.begin(), output.end());
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+    if (verbose_) {
+        std::cout << "  [WebAssembly] Generated " << wasm_bytes.size() << " bytes of WASM\n";
+        std::cout << "  [WebAssembly] Completed in " << duration.count() << "us\n";
+    }
+
+    return wasm_bytes;
 }
 
 Value ExecutionPipeline::run_jit(const bytecode::Module& module) {
@@ -330,7 +360,22 @@ CompilationResult ExecutionPipeline::execute(const std::string& source_code,
                 }
             }
             break;
-            
+
+        case ExecutionMode::WebAssembly:
+            {
+                auto wasm_bytes = run_wasm(ast);
+                if (!wasm_bytes.empty()) {
+                    result.generated_wasm = std::move(wasm_bytes);
+                    if (verbose_) {
+                        std::cout << "  [WebAssembly] Generated WASM successfully\n";
+                    }
+                } else {
+                    result.success = false;
+                    result.error_message = "WebAssembly generation failed";
+                }
+            }
+            break;
+
         default:
             break;
     }

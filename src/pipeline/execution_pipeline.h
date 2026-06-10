@@ -26,12 +26,13 @@ using Value = interpreter::Value;
 // ============================================================================
 
 enum class ExecutionMode {
-    Tokens,      // 仅词法分析
-    AST,         // 仅解析到 AST
-    Interpret,   // AST 解释器
-    Bytecode,    // 字节码 + VM
-    JIT,         // JIT 编译执行
-    CCodeGen     // C 代码生成
+    Tokens,       // 仅词法分析
+    AST,          // 仅解析到 AST
+    Interpret,    // AST 解释器
+    Bytecode,     // 字节码 + VM
+    JIT,          // JIT 编译执行
+    CCodeGen,     // C 代码生成
+    WebAssembly   // WebAssembly 代码生成
 };
 
 // ============================================================================
@@ -53,7 +54,10 @@ struct CompilationResult {
     
     // C 代码生成结果
     std::string generated_ccode;
-    
+
+    // WebAssembly 生成结果
+    std::vector<uint8_t> generated_wasm;
+
     // 统计信息
     size_t lex_time_us = 0;
     size_t parse_time_us = 0;
@@ -111,6 +115,7 @@ private:
     Value run_bytecode(const bytecode::Module& module);
     Value run_jit(const bytecode::Module& module);
     std::string run_c_codegen(std::shared_ptr<ast::Program> ast);
+    std::vector<uint8_t> run_wasm(std::shared_ptr<ast::Program> ast);
 };
 
 // ============================================================================
