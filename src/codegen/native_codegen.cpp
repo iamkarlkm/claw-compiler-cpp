@@ -334,13 +334,47 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
             return false;
 
         // Arrays
-        case Op::ALLOC_ARRAY:
-        case Op::LOAD_INDEX:
-        case Op::STORE_INDEX:
-        case Op::ARRAY_LEN:
-        case Op::ARRAY_PUSH:
-            set_error("Array operations not yet supported in AOT");
-            return false;
+        case Op::ALLOC_ARRAY: {
+            // operand = initial element count hint
+            generator_.emitMOV_RI(X86Reg::RDI, static_cast<int64_t>(inst.operand));
+            emit_external_call("_claw_alloc_array");
+            break;
+        }
+        case Op::LOAD_INDEX: {
+            // Stack: ..., arr, idx (top)
+            // claw_array_get(arr, idx)
+            generator_.emitPOP(X86Reg::RSI);   // idx
+            generator_.emitPOP(X86Reg::RDI);   // arr
+            emit_external_call("_claw_array_get");
+            break;
+        }
+        case Op::STORE_INDEX: {
+            // Stack: ..., arr, idx, val (top)
+            // claw_array_set(arr, idx, val)
+            generator_.emitPOP(X86Reg::RDX);   // val
+            generator_.emitPOP(X86Reg::RSI);   // idx
+            generator_.emitPOP(X86Reg::RDI);   // arr
+            emit_external_call("_claw_array_set");
+            // VM pushes the stored value back
+            generator_.emitPUSH(X86Reg::RDX);
+            break;
+        }
+        case Op::ARRAY_LEN: {
+            // Stack: ..., arr (top)
+            generator_.emitPOP(X86Reg::RDI);   // arr
+            emit_external_call("_claw_array_len");
+            break;
+        }
+        case Op::ARRAY_PUSH: {
+            // Stack: ..., arr, val (top)
+            // claw_array_push(arr, val)
+            generator_.emitPOP(X86Reg::RSI);   // val
+            generator_.emitPOP(X86Reg::RDI);   // arr
+            emit_external_call("_claw_array_push");
+            // Push arr back (same reference, modified in-place)
+            generator_.emitPUSH(X86Reg::RDI);
+            break;
+        }
 
         // Tuples
         case Op::CREATE_TUPLE:

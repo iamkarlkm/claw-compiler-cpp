@@ -87,18 +87,49 @@ void* claw_store_field(const char* field_name, long long value, void* obj_ptr) {
     return obj_ptr;
 }
 
-// Array helpers (simplified: void** with nullptr terminator)
+} // extern "C"
+
+#include <vector>
+
+extern "C" {
+
+// AOT array representation: std::vector<long long>*
+void* claw_alloc_array(long long size) {
+    auto* arr = new std::vector<long long>();
+    arr->reserve(static_cast<size_t>(size));
+    return arr;
+}
+
+long long claw_array_get(void* arr, long long idx) {
+    auto* v = static_cast<std::vector<long long>*>(arr);
+    if (!v || idx < 0 || idx >= (long long)v->size()) return 0;
+    return (*v)[idx];
+}
+
+void claw_array_set(void* arr, long long idx, long long val) {
+    auto* v = static_cast<std::vector<long long>*>(arr);
+    if (!v || idx < 0) return;
+    if (idx >= (long long)v->size()) v->resize(idx + 1);
+    (*v)[idx] = val;
+}
+
+long long claw_array_len(void* arr) {
+    auto* v = static_cast<std::vector<long long>*>(arr);
+    return v ? (long long)v->size() : 0;
+}
+
+void claw_array_push(void* arr, long long val) {
+    auto* v = static_cast<std::vector<long long>*>(arr);
+    if (v) v->push_back(val);
+}
+
+// Legacy helpers (used by CALL_EXT arr_len / arr_push / arr_range)
 long long claw_arr_len(void* arr) {
-    if (!arr) return 0;
-    void** a = (void**)arr;
-    long long len = 0;
-    while (a[len]) len++;
-    return len;
+    return claw_array_len(arr);
 }
 
 void* claw_arr_push(void* arr, void* val) {
-    // Simplified stub: AOT array push not fully implemented
-    (void)arr; (void)val;
+    claw_array_push(arr, (long long)val);
     return arr;
 }
 
@@ -110,14 +141,36 @@ void* claw_arr_range(long long start, long long end, long long step) {
     } else {
         count = (end < start) ? ((start - end + (-step) - 1) / (-step)) : 0;
     }
-    void** result = (void**)malloc((count + 1) * sizeof(void*));
+    auto* v = new std::vector<long long>();
+    v->reserve(static_cast<size_t>(count));
     long long val = start;
     for (long long i = 0; i < count; i++) {
-        result[i] = (void*)val;
+        v->push_back(val);
         val += step;
     }
-    result[count] = nullptr;
-    return result;
+    return v;
+}
+
+// String helpers (simplified)
+long long claw_str_len(const char* s) {
+    if (!s) return 0;
+    return (long long)strlen(s);
+}
+
+const char* claw_str_upper(const char* s) {
+    if (!s) return "";
+    char* out = (char*)malloc(strlen(s) + 1);
+    if (!out) return s;
+    for (size_t i = 0; s[i]; i++) {
+        out[i] = (s[i] >= 'a' && s[i] <= 'z') ? (s[i] - 'a' + 'A') : s[i];
+    }
+    out[strlen(s)] = '\0';
+    return out;
+}
+
+long long claw_str_contains(const char* s, const char* substr) {
+    if (!s || !substr) return 0;
+    return strstr(s, substr) ? 1 : 0;
 }
 
 } // extern "C"
