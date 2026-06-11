@@ -87,6 +87,39 @@ void* claw_store_field(const char* field_name, long long value, void* obj_ptr) {
     return obj_ptr;
 }
 
+// Array helpers (simplified: void** with nullptr terminator)
+long long claw_arr_len(void* arr) {
+    if (!arr) return 0;
+    void** a = (void**)arr;
+    long long len = 0;
+    while (a[len]) len++;
+    return len;
+}
+
+void* claw_arr_push(void* arr, void* val) {
+    // Simplified stub: AOT array push not fully implemented
+    (void)arr; (void)val;
+    return arr;
+}
+
+void* claw_arr_range(long long start, long long end, long long step) {
+    if (step == 0) step = 1;
+    long long count = 0;
+    if (step > 0) {
+        count = (end > start) ? ((end - start + step - 1) / step) : 0;
+    } else {
+        count = (end < start) ? ((start - end + (-step) - 1) / (-step)) : 0;
+    }
+    void** result = (void**)malloc((count + 1) * sizeof(void*));
+    long long val = start;
+    for (long long i = 0; i < count; i++) {
+        result[i] = (void*)val;
+        val += step;
+    }
+    result[count] = nullptr;
+    return result;
+}
+
 } // extern "C"
 )";
 
