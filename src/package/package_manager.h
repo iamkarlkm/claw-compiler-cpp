@@ -92,6 +92,7 @@ enum class PackageCommand {
     Remove,         // Remove a dependency
     Add,            // Add a dependency
     Search,         // Search for packages
+    Build,          // Compile package
     Publish,        // Publish package to registry
     Clean,          // Clean cache
     List,           // List installed packages

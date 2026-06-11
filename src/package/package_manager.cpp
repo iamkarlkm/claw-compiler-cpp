@@ -2,6 +2,7 @@
 // Central orchestrator for all package operations
 
 #include "package/package_manager.h"
+#include "../pipeline/execution_pipeline.h"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -308,7 +309,6 @@ std::vector<std::string> PackageManager::search(const std::string& query, size_t
 }
 
 bool PackageManager::build(const std::filesystem::path& manifest_path) {
-    // Simplified build - in production, invoke compiler pipeline
     ManifestParser parser;
     auto manifest = parser.parse_file(manifest_path);
     if (!manifest.parsed) {
@@ -321,8 +321,119 @@ bool PackageManager::build(const std::filesystem::path& manifest_path) {
         return false;
     }
 
-    // TODO: Invoke actual compiler build
-    return true;
+    auto pkg_root = manifest_path.parent_path();
+    auto build_dir = pkg_root / "build";
+    std::filesystem::create_directories(build_dir);
+
+    bool any_built = false;
+    for (const auto& target : manifest.targets) {
+        auto target_src = target.path.is_relative()
+            ? pkg_root / target.path
+            : target.path;
+
+        std::vector<std::filesystem::path> source_files;
+        if (std::filesystem::is_directory(target_src)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(target_src)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".claw") {
+                    source_files.push_back(entry.path());
+                }
+            }
+        } else if (std::filesystem::is_regular_file(target_src) && target_src.extension() == ".claw") {
+            source_files.push_back(target_src);
+        }
+
+        if (source_files.empty()) {
+            if (config_.verbose) {
+                std::cerr << "[build] No .claw source files found for target: " << target.name << "\n";
+            }
+            continue;
+        }
+
+        pipeline::ExecutionPipeline pipeline;
+        pipeline.set_verbose(config_.verbose);
+        pipeline.set_optimize_level(2);
+        if (target.kind == TargetKind::Binary) {
+            pipeline.set_mode(pipeline::ExecutionMode::WebAssembly);
+        } else {
+            pipeline.set_mode(pipeline::ExecutionMode::Bytecode);
+        }
+
+        for (const auto& src_file : source_files) {
+            if (config_.verbose) {
+                std::cout << "[build] Compiling: " << src_file << "\n";
+            }
+
+            auto result = pipeline.execute_file(src_file.string());
+            if (!result.success) {
+                last_error_ = "Build failed for " + src_file.string() +
+                              ": " + result.error_message;
+                return false;
+            }
+
+            auto out_name = src_file.stem().string();
+            if (target.kind == TargetKind::Binary) {
+                auto out_path = build_dir / (out_name + ".wasm");
+                if (!result.generated_wasm.empty()) {
+                    std::ofstream out(out_path, std::ios::binary);
+                    if (out.is_open()) {
+                        out.write(reinterpret_cast<const char*>(result.generated_wasm.data()),
+                                  static_cast<std::streamsize>(result.generated_wasm.size()));
+                        any_built = true;
+                        if (config_.verbose) {
+                            std::cout << "[build] -> " << out_path << "\n";
+                        }
+                    }
+                } else {
+                    last_error_ = "WASM generation produced no output for " + src_file.string();
+                    return false;
+                }
+            } else {
+                // Library targets: output bytecode module for now
+                if (result.bytecode_module) {
+                    auto out_path = build_dir / (out_name + ".clawbc");
+                    // Write bytecode module binary
+                    // TODO: implement bytecode serialization to file
+                    any_built = true;
+                    if (config_.verbose) {
+                        std::cout << "[build] -> " << out_path << " (bytecode placeholder)\n";
+                    }
+                }
+            }
+        }
+    }
+
+    if (!any_built && manifest.targets.empty()) {
+        // No explicit targets: try to find a default src/main.claw
+        auto default_src = pkg_root / "src" / "main.claw";
+        if (std::filesystem::is_regular_file(default_src)) {
+            pipeline::ExecutionPipeline pipeline;
+            pipeline.set_verbose(config_.verbose);
+            pipeline.set_optimize_level(2);
+            pipeline.set_mode(pipeline::ExecutionMode::WebAssembly);
+            auto result = pipeline.execute_file(default_src.string());
+            if (!result.success) {
+                last_error_ = "Build failed for default target: " + result.error_message;
+                return false;
+            }
+            auto out_path = build_dir / "main.wasm";
+            if (!result.generated_wasm.empty()) {
+                std::ofstream out(out_path, std::ios::binary);
+                if (out.is_open()) {
+                    out.write(reinterpret_cast<const char*>(result.generated_wasm.data()),
+                              static_cast<std::streamsize>(result.generated_wasm.size()));
+                    any_built = true;
+                    if (config_.verbose) {
+                        std::cout << "[build] -> " << out_path << "\n";
+                    }
+                }
+            } else {
+                last_error_ = "WASM generation produced no output for default target";
+                return false;
+            }
+        }
+    }
+
+    return any_built;
 }
 
 bool PackageManager::verify(const std::filesystem::path& manifest_path) {
@@ -464,9 +575,17 @@ bool PackageManager::download_and_install(const ResolvedPackage& pkg) {
 }
 
 bool PackageManager::build_package(const ResolvedPackage& pkg) {
-    // Placeholder: In production, invoke compiler on package source
-    (void)pkg;
-    return true;
+    auto manifest_path = pkg.path / "Claw.toml";
+    if (!std::filesystem::is_regular_file(manifest_path)) {
+        last_error_ = "No manifest found for package: " + pkg.name;
+        return false;
+    }
+
+    if (config_.verbose) {
+        std::cout << "[build] Building dependency: " << pkg.name << " v" << pkg.version.to_string() << "\n";
+    }
+
+    return build(manifest_path);
 }
 
 bool PackageManager::update_manifest_dependencies(const std::filesystem::path& manifest_path,
@@ -637,6 +756,21 @@ PackageCommandResult PackageManagerCLI::run_command(PackageCommand cmd,
             result.message = result.success ? "Lockfile is valid" : "Lockfile is outdated";
             break;
         }
+        case PackageCommand::Build: {
+            result.success = pm.build(*manifest_path);
+            if (result.success) {
+                result.message = "Build succeeded";
+            } else {
+                result.message = pm.get_last_error();
+                result.exit_code = 1;
+            }
+            break;
+        }
+        case PackageCommand::Publish: {
+            result.message = "Publish not yet implemented";
+            result.exit_code = 1;
+            break;
+        }
         case PackageCommand::Audit: {
             auto issues = pm.audit();
             if (issues.empty()) {
@@ -667,6 +801,7 @@ std::string PackageManagerCLI::get_command_help(PackageCommand cmd) {
         case PackageCommand::Remove: return "remove <package> - Remove a dependency";
         case PackageCommand::Add: return "add <package> <version> [kind] - Add dependency";
         case PackageCommand::Search: return "search <query> - Search packages";
+        case PackageCommand::Build: return "build - Compile package targets";
         case PackageCommand::Publish: return "publish - Publish package to registry";
         case PackageCommand::Clean: return "clean - Clean package cache";
         case PackageCommand::List: return "list - List installed packages";
