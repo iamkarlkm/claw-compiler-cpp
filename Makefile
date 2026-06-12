@@ -45,6 +45,9 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     # macOS specific flags
     CXXFLAGS += -stdlib=libc++
+    # Allow test binaries to link against a subset of object files without
+    # resolving all transitive symbols (e.g. package_manager -> pipeline).
+    TEST_LDFLAGS_DARWIN = -Wl,-undefined,dynamic_lookup
 endif
 
 # Build directories
@@ -294,7 +297,7 @@ test-cuda:
 	@./test_cuda
 
 test-package:
-	$(CXX) $(CXXFLAGS) -o test_package $(TEST_PACKAGE_SOURCES)
+	$(CXX) $(CXXFLAGS) -o test_package $(TEST_PACKAGE_SOURCES) $(TEST_LDFLAGS_DARWIN)
 	@./test_package
 
 test-debugger:
@@ -601,7 +604,7 @@ uninstall:
 # ============================================================================
 # 测试目标
 # ============================================================================
-TEST_CXXFLAGS = -std=c++17 -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT
+TEST_CXXFLAGS = -std=c++17 -O1 -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT
 
 tests/test_lexer: tests/test_lexer.cpp src/lexer/lexer.h src/lexer/token.h tests/claw_test.h
 	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_lexer.cpp

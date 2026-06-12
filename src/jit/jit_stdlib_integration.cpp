@@ -440,10 +440,23 @@ int64_t jit_ext_arr_len(void* arr) {
 
 // arr_push - 添加元素
 void* jit_ext_arr_push(void* arr, void* val) {
-    // 简化实现
-    (void)arr;
-    (void)val;
-    return arr;
+    if (!arr) {
+        void** result = new void*[2];
+        result[0] = val;
+        result[1] = nullptr;
+        return result;
+    }
+    void** a = static_cast<void**>(arr);
+    int64_t len = 0;
+    while (a[len] != nullptr) len++;
+    void** result = new void*[len + 2];
+    for (int64_t i = 0; i < len; i++) {
+        result[i] = a[i];
+    }
+    result[len] = val;
+    result[len + 1] = nullptr;
+    delete[] a;
+    return result;
 }
 
 // arr_pop - 移除最后一个元素

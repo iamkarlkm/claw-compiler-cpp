@@ -74,8 +74,10 @@ static uint64_t fnv1a_hash(const std::string& data) {
 }
 
 static std::string build_cache_key(const std::string& source) {
-    // Hash source + compiler version to auto-invalidate on compiler updates
-    return std::to_string(fnv1a_hash(source + CLAW_VERSION));
+    // Hash source + compiler version + AOT runtime source to auto-invalidate
+    // on compiler/runtime updates.
+    return std::to_string(fnv1a_hash(source + CLAW_VERSION +
+                                     claw::codegen::LinkerIntegration::runtime_hash()));
 }
 
 static std::string build_cache_path(const std::string& key) {

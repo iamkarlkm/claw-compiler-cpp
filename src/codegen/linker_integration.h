@@ -38,6 +38,10 @@ public:
     // Check if the system linker (cc) is available
     static bool has_system_linker();
 
+    // Hash of the embedded AOT runtime source; used to invalidate stale
+    // build-cache entries when the runtime stub changes.
+    static std::string runtime_hash();
+
 private:
     std::string error_;
     std::string runtime_object_path_; // cached path to compiled runtime stub

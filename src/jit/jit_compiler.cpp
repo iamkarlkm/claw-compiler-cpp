@@ -343,7 +343,10 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::ILT:
             case bytecode::OpCode::ILE:
             case bytecode::OpCode::IGT:
-            case bytecode::OpCode::IGE: {
+            case bytecode::OpCode::IGE:
+            // 通用比较 (JIT栈存储raw 64-bit值，按整数/指针比较处理)
+            case bytecode::OpCode::EQ:
+            case bytecode::OpCode::NE: {
                 bool is_float = false;
                 if (type_stack_.size() >= 2) {
                     bytecode::ValueType right = type_stack_[type_stack_.size() - 1];
@@ -738,6 +741,7 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::CALL_EXT: {
                 emit_call_op(current, inst);
                 // Pop args, push return value
+                uint32_t str_idx = inst.operand & 0xFFFF;
                 uint32_t ext_arg_count = (inst.operand >> 16) & 0xFFFF;
                 if (type_stack_.size() >= ext_arg_count) {
                     type_stack_.resize(type_stack_.size() - ext_arg_count);
@@ -745,8 +749,16 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 if (sim_alloc_stack_.size() >= ext_arg_count) {
                     sim_alloc_stack_.resize(sim_alloc_stack_.size() - ext_arg_count);
                 }
-                type_stack_.push_back(bytecode::ValueType::I64);
-                last_pushed_type_ = bytecode::ValueType::I64;
+                bytecode::ValueType ret_type = bytecode::ValueType::I64;
+                if (current_module_ && str_idx < current_module_->constants.values.size()) {
+                    const std::string& ext_name = current_module_->constants.values[str_idx].str;
+                    if (ext_name == "str_upper" || ext_name == "str_lower" ||
+                        ext_name == "str_replace" || ext_name == "str_substring") {
+                        ret_type = bytecode::ValueType::STRING;
+                    }
+                }
+                type_stack_.push_back(ret_type);
+                last_pushed_type_ = ret_type;
                 sim_alloc_stack_.push_back(std::nullopt);
                 break;
             }
@@ -1075,6 +1087,10 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
         }
     }
 
+    // 生成共享函数结尾，供指向函数末尾的跳转使用
+    uint8_t* end_epilogue_addr = static_cast<uint8_t*>(current);
+    emit_epilogue(current);
+
     // 回填前向跳转
     for (const auto& pj : pending_jumps) {
         if (pj.target_idx < instruction_addrs.size() && instruction_addrs[pj.target_idx]) {
@@ -1082,14 +1098,12 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
                 static_cast<uint8_t*>(instruction_addrs[pj.target_idx]) -
                 (static_cast<uint8_t*>(pj.patch_addr) + pj.jump_size));
             *reinterpret_cast<int32_t*>(pj.patch_addr) = offset;
+        } else if (pj.target_idx == instruction_addrs.size()) {
+            // Jump targets end of function (after last bytecode instruction)
+            int32_t offset = static_cast<int32_t>(
+                end_epilogue_addr - (static_cast<uint8_t*>(pj.patch_addr) + pj.jump_size));
+            *reinterpret_cast<int32_t*>(pj.patch_addr) = offset;
         }
-    }
-    
-    // 生成函数结尾 (仅当最后一条指令不是返回时)
-    if (func.code.empty() ||
-        (func.code.back().op != bytecode::OpCode::RET &&
-         func.code.back().op != bytecode::OpCode::RET_NULL)) {
-        emit_epilogue(current);
     }
 
     // 计算实际生成的代码大小并设置可执行权限
@@ -1347,6 +1361,7 @@ void MethodJITCompiler::emit_comparison_op(void*& code_ptr, bytecode::OpCode op)
 
     switch (op) {
         case bytecode::OpCode::IEQ:
+        case bytecode::OpCode::EQ:
             code[0] = 0x5a; // pop rdx
             code[1] = 0x58; // pop rax
             code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0; // cmp rax, rdx
@@ -1356,6 +1371,7 @@ void MethodJITCompiler::emit_comparison_op(void*& code_ptr, bytecode::OpCode op)
             code_ptr = &code[12];
             break;
         case bytecode::OpCode::INE:
+        case bytecode::OpCode::NE:
             code[0] = 0x5a; code[1] = 0x58;
             code[2] = 0x48; code[3] = 0x39; code[4] = 0xd0;
             code[5] = 0x0f; code[6] = 0x95; code[7] = 0xc0; // setne al
@@ -1718,17 +1734,20 @@ void MethodJITCompiler::emit_array_op(void*& code_ptr, bytecode::OpCode op) {
             // array_push(void* arr_ptr, int64_t value)
             code[0] = 0x5e;  // pop rsi (value)
             code[1] = 0x5f;  // pop rdi (array_ptr)
-            code[2] = 0xe8;  // call
+            code[2] = 0x57;  // push rdi (save array_ptr; RDI is caller-saved)
+            code[3] = 0xe8;  // call
             void* func_addr = get_runtime_function_by_name("array_push");
             if (func_addr) {
                 int32_t offset = static_cast<int32_t>(
-                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[7])
+                    reinterpret_cast<int64_t>(func_addr) - reinterpret_cast<int64_t>(&code[8])
                 );
-                *reinterpret_cast<int32_t*>(&code[3]) = offset;
+                *reinterpret_cast<int32_t*>(&code[4]) = offset;
             } else {
-                *reinterpret_cast<int32_t*>(&code[3]) = 0;
+                *reinterpret_cast<int32_t*>(&code[4]) = 0;
             }
-            code_ptr = &code[7];
+            code[8] = 0x5f;  // pop rdi (restore array_ptr)
+            code[9] = 0x57;  // push rdi (push arr back)
+            code_ptr = &code[10];
             break;
         }
         default:
