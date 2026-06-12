@@ -344,7 +344,6 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
             case bytecode::OpCode::ILE:
             case bytecode::OpCode::IGT:
             case bytecode::OpCode::IGE:
-            // 通用比较 (JIT栈存储raw 64-bit值，按整数/指针比较处理)
             case bytecode::OpCode::EQ:
             case bytecode::OpCode::NE: {
                 bool is_float = false;

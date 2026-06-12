@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <memory>
 #include <random>
 #include <chrono>
 #include <fstream>
@@ -441,22 +442,21 @@ int64_t jit_ext_arr_len(void* arr) {
 // arr_push - 添加元素
 void* jit_ext_arr_push(void* arr, void* val) {
     if (!arr) {
-        void** result = new void*[2];
+        auto result = std::make_unique<void*[]>(2);
         result[0] = val;
         result[1] = nullptr;
-        return result;
+        return result.release();
     }
-    void** a = static_cast<void**>(arr);
+    auto a = std::unique_ptr<void*[]>(static_cast<void**>(arr));
     int64_t len = 0;
     while (a[len] != nullptr) len++;
-    void** result = new void*[len + 2];
+    auto result = std::make_unique<void*[]>(len + 2);
     for (int64_t i = 0; i < len; i++) {
         result[i] = a[i];
     }
     result[len] = val;
     result[len + 1] = nullptr;
-    delete[] a;
-    return result;
+    return result.release();
 }
 
 // arr_pop - 移除最后一个元素

@@ -189,10 +189,9 @@ std::string LinkerIntegration::runtime_hash() {
     // FNV-1a hash of the embedded runtime source. This changes whenever
     // AOT_RUNTIME_SOURCE is edited, ensuring AOT build-cache entries are
     // invalidated along with compiler updates.
-    static const std::string source(AOT_RUNTIME_SOURCE);
     uint64_t hash = 0xcbf29ce484222325ULL;
-    for (unsigned char c : source) {
-        hash ^= c;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(AOT_RUNTIME_SOURCE); *p; ++p) {
+        hash ^= *p;
         hash *= 0x100000001b3ULL;
     }
     return std::to_string(hash);
