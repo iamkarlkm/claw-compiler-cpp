@@ -3,6 +3,7 @@
 #include "jit_compiler.h"
 #include "jit_runtime.h"
 #include "jit_stdlib_integration.h"
+#include "common/log.h"
 #include <cstring>
 #include <cmath>
 #include <chrono>
@@ -198,7 +199,8 @@ CompilationResult MethodJITCompiler::compile(const bytecode::Function& func) {
         instruction_addrs[i] = current;
 
         // DEBUG: print opcode
-        fprintf(stderr, "[JIT-COMPILE] %s @ %zu: op=%d operand=%u\n", func.name.c_str(), i, (int)inst.op, inst.operand);
+        CLAW_LOG_DEBUG("[JIT-COMPILE] {} @ {}: op={} operand={}",
+                       func.name, i, static_cast<int>(inst.op), inst.operand);
 
         // 根据 OpCode 分发到对应的指令发射函数
         switch (inst.op) {

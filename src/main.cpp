@@ -10,12 +10,14 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lexer/lexer.h"
 #include "lexer/token.h"
 #include "parser/parser.h"
 #include "common/common.h"
+#include "common/log.h"
 #include "type/type_system.h"
 #include "type/error_effect_analyzer.h"
 #include "interpreter/interpreter.h"
@@ -110,7 +112,7 @@ static bool check_build_cache(const std::string& source,
     chmod(output_file.c_str(), st.st_mode | 0111);
 
     if (verbose) {
-        std::cout << "  Build cache hit: copied from " << cached << "\n";
+        CLAW_LOG_INFO("Build cache hit: copied from {}", cached);
     }
     return true;
 }
@@ -355,7 +357,7 @@ std::vector<Token> lex(const std::string& source, const std::string& filename, b
     if (cache.has_cache(source, filename)) {
         auto tokens = cache.load_tokens();
         if (verbose) {
-            std::cout << "  Loaded " << tokens.size() << " tokens from cache\n";
+            CLAW_LOG_INFO("Loaded {} tokens from cache", tokens.size());
         }
         return tokens;
     }
@@ -363,7 +365,7 @@ std::vector<Token> lex(const std::string& source, const std::string& filename, b
     Lexer lexer(source);
     auto tokens = lexer.scan_all();
     if (verbose) {
-        std::cout << "  Lexed " << tokens.size() << " tokens\n";
+        CLAW_LOG_INFO("Lexed {} tokens", tokens.size());
     }
 
     cache.save_tokens(source, filename, tokens);
@@ -387,7 +389,7 @@ std::shared_ptr<ast::Program> parse(const std::vector<Token>& tokens,
     }
     
     if (verbose) {
-        std::cout << "  Parsed " << program->get_declarations().size() << " declarations\n";
+        CLAW_LOG_INFO("Parsed {} declarations", program->get_declarations().size());
     }
     return program;
 }
@@ -432,7 +434,7 @@ bool type_check(ast::Program& program, bool verbose,
     }
 
     if (verbose) {
-        std::cout << "  Type checking passed\n";
+        CLAW_LOG_INFO("Type checking passed");
     }
     return true;
 }
@@ -443,7 +445,7 @@ bool type_check(ast::Program& program, bool verbose,
 
 bool run_interpreter(ast::Program& program, bool verbose) {
     if (verbose) {
-        std::cout << "  Running AST interpreter...\n";
+        CLAW_LOG_INFO("Running AST interpreter...");
     }
 
     interpreter::Interpreter interp;
@@ -473,14 +475,14 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         module = comp_cache.load_module();
         if (module) {
             if (verbose) {
-                std::cout << "  Loaded compiled module from cache\n";
+                CLAW_LOG_INFO("Loaded compiled module from cache");
             }
         }
     }
 
     if (!module) {
         if (verbose) {
-            std::cout << "  Compiling to bytecode...\n";
+            CLAW_LOG_INFO("Compiling to bytecode...");
         }
 
         // 字节码编译 - 使用兼容层
@@ -493,13 +495,12 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         }
 
         if (verbose) {
-            std::cout << "  Compiled " << module->functions.size() << " functions\n";
-            std::cout << "  Total bytecode instructions: ";
             size_t total = 0;
             for (const auto& func : module->functions) {
                 total += func.code.size();
             }
-            std::cout << total << "\n";
+            CLAW_LOG_INFO("Compiled {} functions, {} bytecode instructions",
+                          module->functions.size(), total);
         }
 
         // Bytecode peephole optimization
@@ -507,8 +508,8 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
             optimizer::PeepholeStats peep_stats;
             bool optimized = optimizer::optimize_peephole(*module, &peep_stats);
             if (verbose && optimized) {
-                std::cout << "  Peephole: " << peep_stats.instructions_removed << " instructions removed ("
-                          << peep_stats.patterns_matched << " patterns)\n";
+                CLAW_LOG_INFO("Peephole: {} instructions removed ({} patterns)",
+                              peep_stats.instructions_removed, peep_stats.patterns_matched);
             }
         }
 
@@ -559,14 +560,12 @@ bool run_bytecode(std::shared_ptr<ast::Program> program, bool verbose, bool show
         }
     }
 
-    // 输出返回值或错误信息 (仅在 verbose 模式下)
     if (verbose && result.tag != vm::ValueTag::NIL) {
-        std::cout << "Return value: " << result.to_string() << "\n";
+        CLAW_LOG_INFO("Return value: {}", result.to_string());
     }
 
     if (verbose) {
-        // 从 runtime 获取执行统计
-        std::cout << "  VM execution completed\n";
+        CLAW_LOG_INFO("VM execution completed");
     }
 
     return true;
@@ -590,7 +589,7 @@ bool run_bytecode(ast::Program& program, bool verbose, bool show_ir,
 
 bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
     if (verbose) {
-        std::cout << "  Running in JIT mode...\n";
+        CLAW_LOG_INFO("Running in JIT mode...");
     }
 
     // 读取源码文件用于 JIT 编译
@@ -607,7 +606,7 @@ bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
     source_content = buffer.str();
 
     if (verbose) {
-        std::cout << "  Loaded " << source_content.size() << " bytes of source code\n";
+        CLAW_LOG_INFO("Loaded {} bytes of source code", source_content.size());
     }
 
     // 使用 ExecutionEngine 执行 JIT 模式
@@ -653,7 +652,7 @@ bool run_jit(const std::string& input_file, bool verbose, bool show_ir) {
 
 bool run_hybrid(const std::string& input_file, bool verbose, bool show_ir) {
     if (verbose) {
-        std::cout << "  Running in Hybrid mode (VM + JIT)...\n";
+        CLAW_LOG_INFO("Running in Hybrid mode (VM + JIT)...");
     }
     
     std::string source_content;
@@ -711,7 +710,7 @@ bool run_hybrid(const std::string& input_file, bool verbose, bool show_ir) {
 bool generate_c(ast::Program& program, bool verbose, bool show_ir, 
                 const std::string& output_file) {
     if (verbose) {
-        std::cout << "  Generating C code...\n";
+        CLAW_LOG_INFO("Generating C code...");
     }
     
     codegen::CCodeGenerator codegen;
@@ -737,7 +736,7 @@ bool generate_c(ast::Program& program, bool verbose, bool show_ir,
         out << codegen.get_code();
         out.close();
         if (verbose) {
-            std::cout << "  C code written to: " << output_file << "\n";
+            CLAW_LOG_INFO("C code written to {}", output_file);
         }
     }
     
@@ -751,7 +750,7 @@ bool generate_c(ast::Program& program, bool verbose, bool show_ir,
 bool generate_native(ast::Program& program, bool verbose, bool show_ir,
                      const std::string& output_file) {
     if (verbose) {
-        std::cout << "  Compiling to x86-64 native code...\n";
+        CLAW_LOG_INFO("Compiling to x86-64 native code...");
     }
     
     // First compile to bytecode
@@ -764,13 +763,12 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
     }
     
     if (verbose) {
-        std::cout << "  Compiled " << module->functions.size() << " functions\n";
-        std::cout << "  Total bytecode instructions: ";
         size_t total = 0;
         for (const auto& func : module->functions) {
             total += func.code.size();
         }
-        std::cout << total << "\n";
+        CLAW_LOG_INFO("Compiled {} functions, {} bytecode instructions",
+                      module->functions.size(), total);
     }
     
     // Then compile bytecode to native code
@@ -787,7 +785,7 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
     }
     
     if (verbose) {
-        std::cout << "  Generated " << native_codegen.get_code().size() << " bytes of native code\n";
+        CLAW_LOG_INFO("Generated {} bytes of native code", native_codegen.get_code().size());
     }
     
     // Get the compiled code
@@ -817,12 +815,12 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
         out.close();
         
         // Make executable (Unix)
-        std::string chmod_cmd = "chmod +x " + output_file;
-        system(chmod_cmd.c_str());
+        std::filesystem::permissions(output_file,
+                                     std::filesystem::perms::owner_exec,
+                                     std::filesystem::perm_options::add);
         
         if (verbose) {
-            std::cout << "  Native code written to: " << output_file << "\n";
-            std::cout << "  (Run with: " << output_file << ")\n";
+            CLAW_LOG_INFO("Native code written to {} (run with: {})", output_file, output_file);
         }
     }
     
@@ -851,9 +849,9 @@ bool generate_native(ast::Program& program, bool verbose, bool show_ir,
 
 bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
                   const std::string& output_file) {
-    std::cerr << "[DEBUG] generate_aot called\n";
+    CLAW_LOG_DEBUG("generate_aot called");
     if (verbose) {
-        std::cout << "  Compiling to AOT executable...\n";
+        CLAW_LOG_INFO("Compiling to AOT executable...");
     }
 
     // 1. Compile to bytecode
@@ -862,8 +860,11 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
     auto module = bc_compiler.compile(program);
     auto t_bc_end = high_resolution_clock::now();
     if (verbose) {
-        std::cout << "  Bytecode: " << module->functions.size() << " functions ("
-                  << duration_cast<microseconds>(t_bc_end - t_bc_start).count() / 1000.0 << " ms)\n";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << duration_cast<microseconds>(t_bc_end - t_bc_start).count() / 1000.0;
+        CLAW_LOG_INFO("Bytecode: {} functions ({} ms)",
+                      module->functions.size(), oss.str());
     }
 
     if (!module) {
@@ -885,7 +886,10 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
     }
     auto t_native_end = high_resolution_clock::now();
     if (verbose) {
-        std::cout << "  Native: " << duration_cast<microseconds>(t_native_end - t_native_start).count() / 1000.0 << " ms\n";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << duration_cast<microseconds>(t_native_end - t_native_start).count() / 1000.0;
+        CLAW_LOG_INFO("Native: {} ms", oss.str());
     }
 
     const auto& compiled_funcs = native_codegen.get_compiled_functions();
@@ -907,9 +911,8 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
         }
     }
 
-    // DEBUG: print external symbols
     for (const auto& sym : external_syms) {
-        std::cerr << "[AOT-EXT] " << sym << "\n";
+        CLAW_LOG_DEBUG("AOT external symbol: {}", sym);
     }
 
     // Merge all functions into a single __text section
@@ -973,7 +976,10 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
     }
     auto t_macho_end = high_resolution_clock::now();
     if (verbose) {
-        std::cout << "  Mach-O: " << duration_cast<microseconds>(t_macho_end - t_macho_start).count() / 1000.0 << " ms\n";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << duration_cast<microseconds>(t_macho_end - t_macho_start).count() / 1000.0;
+        CLAW_LOG_INFO("Mach-O: {} ms", oss.str());
     }
 
     // 4. Link with system linker
@@ -993,14 +999,17 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
     }
     auto t_link_end = high_resolution_clock::now();
     if (verbose) {
-        std::cout << "  Link: " << duration_cast<microseconds>(t_link_end - t_link_start).count() / 1000.0 << " ms\n";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << duration_cast<microseconds>(t_link_end - t_link_start).count() / 1000.0;
+        CLAW_LOG_INFO("Link: {} ms", oss.str());
     }
 
     // Clean up temporary object file
-    std::remove(obj_path.c_str());
+    std::filesystem::remove(obj_path);
 
     if (verbose) {
-        std::cout << "  AOT executable written to: " << output_file << "\n";
+        CLAW_LOG_INFO("AOT executable written to {}", output_file);
     }
 
     return true;
@@ -1012,7 +1021,7 @@ bool generate_aot(ast::Program& program, bool verbose, bool show_ir,
 
 bool run_repl(bool verbose) {
     if (verbose) {
-        std::cout << "  Starting REPL...\n";
+        CLAW_LOG_INFO("Starting REPL...");
     }
     
     claw::repl::REPLConfig config;

@@ -7,6 +7,7 @@
 #include "../bytecode/bytecode_compiler.h"
 #include "../vm/claw_vm.h"
 #include "../jit/jit_compiler.h"
+#include "common/log.h"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -270,7 +271,7 @@ void ASTInterpreter::set_ast(std::shared_ptr<ast::ASTNode> root) {
 
 ExecutionResult ASTInterpreter::execute(const std::string& entry) {
     if (trace_enabled_) {
-        std::cout << "[ASTInterpreter] Starting execution at: " << entry << "\n";
+        CLAW_LOG_DEBUG("[ASTInterpreter] Starting execution at: {}", entry);
     }
     
     ExecutionResult result;

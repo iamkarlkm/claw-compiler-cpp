@@ -1,5 +1,14 @@
 # Claw Compiler 生产就绪路线图
 
+> **⚠️ 本文档已过期 (2026-04-29)**
+>
+> 当前代码库已实现本文档中标记为“未完成/桩”的许多能力：
+> - CI/CD 已通过 GitHub Actions 覆盖 macOS / Linux / Windows（见 `.github/workflows/`）
+> - 测试框架包含 25+ 个测试套件，`make test` 在 CI 中通过
+> - Parser、Bytecode/VM、JIT、AOT、包管理器、LSP、Debugger 等均已实现基础版本
+>
+> 本文档保留为历史参考，最新状态请以 `README.md`、`.github/workflows/ci.yml` 和实际源码为准。
+
 > 分析时间: 2026-04-29 | 代码量: 105K LoC | 64 个模块 | 编译状态: ✅ PASSING
 
 ## 当前能力矩阵

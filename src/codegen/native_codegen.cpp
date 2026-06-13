@@ -2,6 +2,7 @@
 // Compiles Claw bytecode to x86-64 native machine code
 
 #include "codegen/native_codegen.h"
+#include "common/log.h"
 #include <cstring>
 #include <algorithm>
 #include <iostream>
@@ -129,7 +130,7 @@ bool NativeCodeGenerator::compile_function(const bytecode::Function& func) {
 // ============================================================================
 
 bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst) {
-    std::cerr << "[AOT-COMPILE] op=" << static_cast<int>(inst.op) << " opnd=" << inst.operand << "\n";
+    CLAW_LOG_DEBUG("[AOT-COMPILE] op={} opnd={}", static_cast<int>(inst.op), inst.operand);
     using Op = bytecode::OpCode;
     uint32_t opnd = inst.operand;
     
@@ -158,10 +159,10 @@ bool NativeCodeGenerator::compile_instruction(const bytecode::Instruction& inst)
                     }
                     generator_.emitPUSH(X86Reg::RAX);
                 } else if (val.type == bytecode::ValueType::STRING) {
-                    std::cerr << "[AOT-PUSH-STRING] idx=" << opnd << " str=" << val.str << "\n";
+                    CLAW_LOG_DEBUG("[AOT-PUSH-STRING] idx={} str={}", opnd, val.str);
                     emit_external_call("_claw_str_" + std::to_string(opnd));
                 } else {
-                    std::cerr << "[AOT-PUSH-OTHER] idx=" << opnd << " type=" << static_cast<int>(val.type) << "\n";
+                    CLAW_LOG_DEBUG("[AOT-PUSH-OTHER] idx={} type={}", opnd, static_cast<int>(val.type));
                     // Fallback: push immediate (index)
                     generator_.emitPUSH_imm(static_cast<int64_t>(opnd));
                 }

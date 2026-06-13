@@ -5,12 +5,12 @@
 CXX = clang++
 LLVM_PREFIX := $(shell llvm-config --prefix 2>/dev/null || /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
 LLVM_LIBDIR := $(shell llvm-config --libdir 2>/dev/null || echo $(LLVM_PREFIX)/lib)
-CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS $(CXXFLAGS_EXTRA)
 DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 # readline: prefer pkg-config, fall back to -lreadline
 READLINE_LIBS := $(shell pkg-config --libs readline 2>/dev/null || echo -lreadline)
 READLINE_CFLAGS := $(shell pkg-config --cflags readline 2>/dev/null || echo)
-LDFLAGS = -lpthread $(READLINE_LIBS) -L$(LLVM_LIBDIR) -lLLVM
+LDFLAGS = -lpthread $(READLINE_LIBS) -L$(LLVM_LIBDIR) -lLLVM $(LDFLAGS_EXTRA)
 
 # Link-time optimization (optional)
 LTO ?= 0
@@ -66,6 +66,8 @@ endif
 
 CORE_SOURCES = \
     src/common/common.h \
+    src/common/log.h \
+    src/common/log.cpp \
     src/common/parse_cache.cpp \
     src/common/compilation_cache.cpp \
     src/lexer/lexer.h \

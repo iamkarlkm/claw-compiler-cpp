@@ -103,6 +103,51 @@ jobs:
       - name: Run tests
         run: make test CXX=clang++-${{ matrix.llvm-version }} LLVM_PREFIX=/usr/lib/llvm-${{ matrix.llvm-version }}
 
+  sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      CLAW_ENABLE_WEBTRANSPORT: 0
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm libreadline-dev
+
+      - name: Build with AddressSanitizer
+        if: matrix.sanitizer == 'asan'
+        run: |
+          make clean
+          make all CXX=clang++ CXXFLAGS_EXTRA="-fsanitize=address -fno-omit-frame-pointer" LDFLAGS_EXTRA="-fsanitize=address"
+
+      - name: Build with UndefinedBehaviorSanitizer
+        if: matrix.sanitizer == 'ubsan'
+        run: |
+          make clean
+          make all CXX=clang++ CXXFLAGS_EXTRA="-fsanitize=undefined -fno-omit-frame-pointer" LDFLAGS_EXTRA="-fsanitize=undefined"
+
+      - name: Run tests
+        continue-on-error: true
+        run: make test CXX=clang++
+
+      - name: Upload sanitizer logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.sanitizer }}-logs
+          path: |
+            claw
+            test_*
+            /tmp/_claw_*
+            /tmp/_jit_*
+            /tmp/_bc_*
+
   coverage:
     runs-on: ubuntu-latest
     env:

@@ -1,6 +1,7 @@
 // codegen/linker_integration.cpp - System linker integration
 
 #include "linker_integration.h"
+#include "common/log.h"
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -344,7 +345,7 @@ bool LinkerIntegration::invoke_linker(const std::vector<std::string>& args) {
     }
 
     if (std::getenv("CLAW_VERBOSE_LINK")) {
-        std::cout << "[linker] " << cmd << "\n";
+        CLAW_LOG_INFO("[linker] {}", cmd);
     }
 
     int ret = std::system(cmd.c_str());
