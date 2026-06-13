@@ -9,6 +9,7 @@
 #include <memory>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lexer/lexer.h"
@@ -59,9 +60,12 @@ constexpr const char* CLAW_BUILD_DATE = __DATE__;
 // ============================================================================
 
 static std::string get_build_cache_dir() {
+    if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg) {
+        return std::string(xdg) + "/claw/builds";
+    }
     const char* home = getenv("HOME");
     if (!home) home = ".";
-    return std::string(home) + "/.claw/cache/builds";
+    return std::string(home) + "/.cache/claw/builds";
 }
 
 static uint64_t fnv1a_hash(const std::string& data) {
@@ -114,8 +118,7 @@ static bool check_build_cache(const std::string& source,
 static void save_build_cache(const std::string& source,
                               const std::string& output_file) {
     std::string cache_dir = get_build_cache_dir();
-    std::string mkdir_cmd = "mkdir -p " + cache_dir;
-    std::system(mkdir_cmd.c_str());
+    std::filesystem::create_directories(cache_dir);
 
     std::string key = build_cache_key(source);
     std::string cached = build_cache_path(key);

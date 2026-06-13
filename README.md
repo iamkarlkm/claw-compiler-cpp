@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![CI](https://github.com/yourusername/claw-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/claw-compiler/actions/workflows/ci.yml)
+[![CI](https://github.com/iamkarlkm/claw-compiler-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/iamkarlkm/claw-compiler-cpp/actions/workflows/ci.yml)
 
 ---
 
@@ -115,14 +115,14 @@ make uninstall            # 移除已安装的二进制文件
 #### Debian / Ubuntu
 
 ```bash
-wget https://github.com/yourusername/claw-compiler/releases/latest/download/claw-compiler_0.2.0_amd64.deb
+wget https://github.com/iamkarlkm/claw-compiler-cpp/releases/latest/download/claw-compiler_0.2.0_amd64.deb
 sudo dpkg -i claw-compiler_0.2.0_amd64.deb
 ```
 
 #### Fedora / RHEL
 
 ```bash
-wget https://github.com/yourusername/claw-compiler/releases/latest/download/claw-compiler-0.2.0-1.x86_64.rpm
+wget https://github.com/iamkarlkm/claw-compiler-cpp/releases/latest/download/claw-compiler-0.2.0-1.x86_64.rpm
 sudo dnf install claw-compiler-0.2.0-1.x86_64.rpm
 ```
 
@@ -139,7 +139,7 @@ msiexec /i claw-windows-amd64.msi /qn
 #### macOS (Homebrew)
 
 ```bash
-brew tap yourusername/claw
+brew tap iamkarlkm/claw
 brew install claw --with-libmsquic   # 启用 WebTransport
 brew install claw                    # 禁用 WebTransport
 ```
@@ -152,8 +152,8 @@ docker build -t claw .
 docker run --rm -v $(pwd):/src claw --run /src/program.claw
 
 # 使用 GitHub Container Registry
-docker pull ghcr.io/yourusername/claw-compiler:v0.2.0
-docker run --rm -v $(pwd):/src ghcr.io/yourusername/claw-compiler:v0.2.0 --run /src/program.claw
+docker pull ghcr.io/iamkarlkm/claw-compiler-cpp:v0.2.0
+docker run --rm -v $(pwd):/src ghcr.io/iamkarlkm/claw-compiler-cpp:v0.2.0 --run /src/program.claw
 ```
 
 ### 发布流程

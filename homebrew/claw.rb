@@ -1,7 +1,9 @@
 class Claw < Formula
   desc "Deterministic memory management programming language compiler"
-  homepage "https://github.com/yourusername/claw-compiler"
-  url "https://github.com/yourusername/claw-compiler/archive/refs/tags/v#{version}.tar.gz"
+  homepage "https://github.com/iamkarlkm/claw-compiler-cpp"
+  url "https://github.com/iamkarlkm/claw-compiler-cpp/archive/refs/tags/v#{version}.tar.gz"
+  # NOTE: sha256 must be updated to the GitHub auto-generated tarball digest
+  # after the release tag is pushed. Run: shasum -a 256 v${VERSION}.tar.gz
   sha256 "PLACEHOLDER_SHA256"
   license "MIT"
   version "0.2.0"

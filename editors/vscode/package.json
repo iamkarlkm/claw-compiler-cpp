@@ -3,7 +3,7 @@
   "displayName": "Claw Language Support",
   "description": "Language support for the Claw programming language",
   "version": "0.2.0",
-  "publisher": "yourusername",
+  "publisher": "iamkarlkm",
   "license": "MIT",
   "engines": {
     "vscode": "^1.74.0"

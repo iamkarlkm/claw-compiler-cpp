@@ -61,7 +61,7 @@ cp README.md LICENSE %{buildroot}%{_docdir}/%{name}/ 2>/dev/null || true
 %{_docdir}/%{name}
 
 %changelog
-* $(date '+%a %b %d %Y') Claw Compiler Team <claw@example.com> - ${VERSION}-${RELEASE}
+* $(date '+%a %b %d %Y') Claw Compiler Team <iamkarlkm@users.noreply.github.com> - ${VERSION}-${RELEASE}
 - Release ${VERSION}
 EOF
 

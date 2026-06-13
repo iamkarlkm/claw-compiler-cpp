@@ -47,7 +47,7 @@ Priority: optional
 Architecture: ${ARCH}
 Depends: libreadline8, libc6
 Recommends: llvm, clang
-Maintainer: Claw Compiler Team <claw@example.com>
+Maintainer: Claw Compiler Team <iamkarlkm@users.noreply.github.com>
 Description: Claw programming language compiler
  The Claw compiler is an AI-native language compiler with
  multiple backends: C, LLVM, AOT native, Bytecode VM, JIT,

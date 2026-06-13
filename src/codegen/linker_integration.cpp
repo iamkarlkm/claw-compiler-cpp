@@ -3,9 +3,24 @@
 #include "linker_integration.h"
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <sstream>
+
+namespace {
+std::string unique_temp_path(const std::string& prefix) {
+    static std::mt19937 rng(static_cast<unsigned long>(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream oss;
+    oss << std::filesystem::temp_directory_path().string()
+        << "/" << prefix << "_" << dist(rng);
+    return oss.str();
+}
+} // namespace
 
 namespace claw {
 namespace codegen {
@@ -198,9 +213,12 @@ std::string LinkerIntegration::runtime_hash() {
 }
 
 static std::string get_cache_dir() {
+    if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg) {
+        return std::string(xdg) + "/claw";
+    }
     const char* home = getenv("HOME");
     if (!home) home = ".";
-    return std::string(home) + "/.claw/cache";
+    return std::string(home) + "/.cache/claw";
 }
 
 std::string LinkerIntegration::detect_fast_linker() {
@@ -225,18 +243,19 @@ std::string LinkerIntegration::detect_fast_linker() {
     };
     std::string chosen = "c++";
     for (const char* candidate : candidates) {
+        std::string probe_out = unique_temp_path("claw_linker_probe");
         std::string probe = "echo 'int main(){}' | " + std::string(candidate) +
-                            " -x c - -o /tmp/_claw_linker_probe > /dev/null 2>&1";
+                            " -x c - -o " + probe_out + " > /dev/null 2>&1";
         if (std::system(probe.c_str()) == 0) {
-            std::remove("/tmp/_claw_linker_probe");
+            std::filesystem::remove(probe_out);
             chosen = candidate;
             break;
         }
+        std::filesystem::remove(probe_out);
     }
 
     // Write cache
-    std::string cmd = "mkdir -p " + get_cache_dir();
-    std::system(cmd.c_str());
+    std::filesystem::create_directories(get_cache_dir());
     std::ofstream out(cache_file);
     if (out) out << chosen;
 
@@ -275,8 +294,8 @@ bool LinkerIntegration::compile_runtime_stub() {
         std::remove(runtime_object_path_.c_str());
     }
 
-    // Write runtime source to temp file
-    const char* tmp_src = "/tmp/claw_aot_runtime.cpp";
+    // Write runtime source to a unique temp file
+    std::string tmp_src = unique_temp_path("claw_aot_runtime") + ".cpp";
     std::ofstream src(tmp_src);
     if (!src.is_open()) {
         error_ = "Failed to write runtime source file";
@@ -297,8 +316,8 @@ bool LinkerIntegration::compile_runtime_stub() {
 
     src.close();
 
-    // Compile to object
-    runtime_object_path_ = "/tmp/claw_aot_runtime.o";
+    // Compile to object in a unique temp path
+    runtime_object_path_ = unique_temp_path("claw_aot_runtime") + ".o";
     std::string cmd = "c++ -c -O2 ";
 #ifdef __APPLE__
     cmd += "-mmacosx-version-min=10.15 ";
@@ -308,7 +327,9 @@ bool LinkerIntegration::compile_runtime_stub() {
     cmd += runtime_object_path_;
 
     int ret = std::system(cmd.c_str());
+    std::filesystem::remove(tmp_src);
     if (ret != 0) {
+        std::filesystem::remove(runtime_object_path_);
         error_ = "Failed to compile AOT runtime stub";
         return false;
     }
