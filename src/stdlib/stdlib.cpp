@@ -400,7 +400,7 @@ namespace math {
 
 Value abs(const std::vector<Value>& args) {
     if (args.empty()) return Value(0);
-    if (args[0].is_int()) return Value(std::llabs(args[0].int_val));
+    if (args[0].is_int()) return Value(static_cast<int64_t>(std::llabs(args[0].int_val)));
     return Value(std::fabs(args[0].to_number()));
 }
 
