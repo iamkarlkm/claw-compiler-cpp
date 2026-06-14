@@ -16,20 +16,11 @@ node_modules/
 # 调试/测试二进制
 src/debug_*
 src/test_debug*
-src/test_*
-!src/test/run_tests.cpp
-!src/test/test_lexer.cpp
-!src/test/test_parser.cpp
-!src/test/test_iterator_desugarer.cpp
-!src/test/test_type_inference.cpp
-!src/test/test_compact_ast.cpp
-!src/test/integration_test.h
-!src/test/test.h
 src/bytecode/test_*
 
 # 临时测试文件
-test_*.cpp
-test_*.claw
+/test_*.cpp
+/test_*.claw
 
 # macOS
 .DS_Store
@@ -58,7 +49,7 @@ cmake_install.cmake
 *.log
 
 dev-logs/
-test/
+/test/
 dev-reports/
 
 # 基准测试结果（保留 baseline.json）
@@ -66,7 +57,7 @@ benchmark/results/benchmark_*.json
 !benchmark/results/baseline.json
 AGENTS.md
 CLAUDE.md
-**/test_*
+/test_*
 !tests/test_integration.cpp
 **/*.ba*
 **/*.new*

@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <variant>
 #include <optional>
+#include <mutex>
 
 #include "../common/common.h"
 #include "../bytecode/bytecode.h"
