@@ -21,6 +21,9 @@
 #include <algorithm>
 #include <limits>
 #include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #include "bytecode/bytecode.h"
 #include "common/object_pool.h"
