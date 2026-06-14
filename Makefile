@@ -196,7 +196,7 @@ TEST_VM_EVALUATOR_SOURCES = src/auto_scheduler/vm_evaluator.cpp src/auto_schedul
 TEST_WASM_SOURCES = src/emitter/wasm/wasm_backend.cpp src/emitter/wasm/wasm_ir_generator.cpp src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_generator.cpp src/ir/ir_generator_enhanced.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/test/test_wasm_ir.cpp
 TEST_ATTRIBUTE_SOURCES = src/frontend/attribute.cpp src/test/test_attribute.cpp
 TEST_DOCGEN_SOURCES = src/tools/doc_generator.cpp src/ast/ast.cpp src/ast/clone.cpp src/ast/ast_compact_repr.cpp src/type/type_checker.cpp src/type/pattern_checker.cpp src/type/type_inference.cpp src/test/test_doc_generator.cpp
-TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp test/benchmark_ir_passes.cpp
+TEST_IR_PASSES_SOURCES = src/ir/ir.cpp src/ir/ir_enhanced.cpp src/ir/ir_optimizer.cpp src/benchmark/benchmark.cpp tests/benchmark_ir_passes.cpp
 TEST_TREE_SHAKER_SOURCES = src/optimizer/tree_shaker.cpp src/test/test_tree_shaker.cpp
 TEST_CONSTANT_FOLDER_SOURCES = src/optimizer/constant_folder.cpp src/test/test_constant_folder.cpp
 TEST_CONSTANT_PROPAGATOR_SOURCES = src/optimizer/constant_propagator.cpp src/ast/clone.cpp src/ast/ast.cpp src/test/test_constant_propagator.cpp
@@ -289,7 +289,15 @@ claw-debugger: src/debugger_main.cpp $(CORE_NON_MAIN_OBJECTS)
 # Tests
 # ============================================================================
 
-test: test-integration test-benchmark test-cuda test-package test-debugger test-auto-scheduler test-wasm test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-coroutine-vm test-async-parser test-async-bytecode test-async-types test-error-effect test-webtransport-mock test-aot test-enum test-struct test-impl-methods test-for-in test-struct-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+CORE_TESTS = test-integration test-benchmark test-cuda test-package test-debugger test-wasm test-attribute test-docgen test-ir-passes test-lexer test-tree-shaker test-constant-folder test-constant-propagator test-control-flow-simplifier test-dead-code-eliminator test-bytecode-opt test-peephole-optimizer test-function-inliner test-tail-call-optimizer test-algebraic-simplifier test-pattern-checker test-monomorphizer test-iterator-desugarer test-iterator-benchmark test-type-inference test-implicit-generic test-compact-ast test-diagnostics test-async-parser test-async-types test-error-effect test-aot test-enum test-struct test-impl-methods test-for-in test-parser
+
+ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
+    WEBTRANSPORT_TESTS = test-auto-scheduler test-vm-evaluator test-coroutine-vm test-async-bytecode test-webtransport-mock test-struct-bytecode test-enum-bytecode test-channel test-event-stream test-stream test-command-stream test-webtransport-bridge test-stream-operators
+endif
+
+TEST_TARGETS = $(CORE_TESTS) $(WEBTRANSPORT_TESTS)
+
+test: $(TEST_TARGETS)
 	@echo ""
 	@echo "=== All Tests Completed ==="
 
@@ -309,6 +317,7 @@ test-debugger:
 	$(CXX) $(CXXFLAGS) -o test_debugger $(TEST_DEBUGGER_SOURCES)
 	@./test_debugger
 
+ifeq ($(CLAW_ENABLE_WEBTRANSPORT),1)
 test-auto-scheduler:
 	$(CXX) $(CXXFLAGS) -o test_auto_scheduler $(TEST_AUTO_SCHEDULER_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 	@./test_auto_scheduler
@@ -316,6 +325,13 @@ test-auto-scheduler:
 test-vm-evaluator:
 	$(CXX) $(CXXFLAGS) -o test_vm_evaluator $(TEST_VM_EVALUATOR_SOURCES) -L$(MSQUIC_PREFIX)/lib -lmsquic
 	@./test_vm_evaluator
+else
+test-auto-scheduler:
+	@echo "Skipping auto-scheduler tests (WebTransport disabled)"
+
+test-vm-evaluator:
+	@echo "Skipping VM evaluator tests (WebTransport disabled)"
+endif
 
 test-wasm:
 	$(CXX) $(CXXFLAGS) -o test_wasm $(TEST_WASM_SOURCES)
@@ -615,11 +631,11 @@ uninstall:
 # ============================================================================
 TEST_CXXFLAGS = -std=c++17 -O1 -I. -Isrc -DCLAW_ENABLE_WEBTRANSPORT
 
-tests/test_lexer: tests/test_lexer.cpp src/lexer/lexer.h src/lexer/token.h tests/claw_test.h
-	$(CXX) $(TEST_CXXFLAGS) -o $@ tests/test_lexer.cpp
+src/test/test_lexer: src/test/test_lexer.cpp src/lexer/lexer.h src/lexer/token.h src/test/test.h
+	$(CXX) $(TEST_CXXFLAGS) -o $@ src/test/test_lexer.cpp
 
-test-lexer: tests/test_lexer
-	@./tests/test_lexer
+test-lexer: src/test/test_lexer
+	@./src/test/test_lexer
 
 .PHONY: test-lexer
 

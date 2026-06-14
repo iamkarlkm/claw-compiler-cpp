@@ -9,6 +9,7 @@
 #include <vector>
 #include <tuple>
 #include <unordered_map>
+#include <cstring>
 
 namespace claw {
 namespace jit {
