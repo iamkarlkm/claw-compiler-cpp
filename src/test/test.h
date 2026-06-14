@@ -11,6 +11,7 @@
 #include <memory>
 #include <sstream>
 #include <cassert>
+#include <chrono>
 
 namespace claw {
 namespace test {

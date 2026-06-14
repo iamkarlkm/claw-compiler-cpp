@@ -178,9 +178,7 @@ CORE_NON_MAIN_OBJECTS = $(filter-out $(BUILD_DIR)/src/main.o,$(CORE_OBJECTS))
 
 TEST_BENCHMARK_SOURCES = src/benchmark/benchmark.cpp src/test/test_benchmark.cpp
 TEST_PACKAGE_SOURCES = src/package/package_manager.cpp src/package/manifest_parser.cpp \
-    src/package/dependency_resolver.cpp src/package/lock_file.cpp \
-    src/pipeline/execution_pipeline.cpp \
-    src/test/test_package_manager.cpp
+    src/package/dependency_resolver.cpp src/package/lock_file.cpp src/test/test_package_manager.cpp
 TEST_CUDA_SOURCES = src/backend/cuda_codegen.cpp src/tensorir/tensor_ir.cpp src/test/test_cuda_codegen.cpp
 TEST_DEBUGGER_SOURCES = src/jit/deoptimization.cpp src/jit/stack_frame.cpp \
     src/emitter/x86_64_emitter.cpp src/test/test_deoptimization.cpp src/test/test_stack_frame.cpp
@@ -312,8 +310,8 @@ test-cuda:
 	$(CXX) $(CXXFLAGS) -o test_cuda $(TEST_CUDA_SOURCES)
 	@./test_cuda
 
-test-package:
-	$(CXX) $(CXXFLAGS) -o test_package $(TEST_PACKAGE_SOURCES) $(TEST_LDFLAGS_DARWIN)
+test-package: $(CORE_NON_MAIN_OBJECTS) src/test/test_package_manager.cpp
+	$(CXX) $(CXXFLAGS) -o test_package $(CORE_NON_MAIN_OBJECTS) src/test/test_package_manager.cpp $(TEST_LDFLAGS_DARWIN)
 	@./test_package
 
 test-debugger:
