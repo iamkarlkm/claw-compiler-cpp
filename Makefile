@@ -8,12 +8,13 @@ CXX = clang++
 LLVM_PREFIX ?= $(shell llvm-config --prefix 2>/dev/null || /usr/local/opt/llvm/bin/llvm-config --prefix 2>/dev/null || /opt/homebrew/opt/llvm/bin/llvm-config --prefix 2>/dev/null || echo /usr/local/opt/llvm)
 LLVM_CONFIG ?= $(shell which llvm-config 2>/dev/null || echo $(LLVM_PREFIX)/bin/llvm-config)
 LLVM_LIBDIR ?= $(shell $(LLVM_CONFIG) --libdir 2>/dev/null || echo $(LLVM_PREFIX)/lib)
+LLVM_LIBS ?= $(shell $(LLVM_CONFIG) --libs 2>/dev/null || echo -lLLVM)
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include $(READLINE_CFLAGS) -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS $(CXXFLAGS_EXTRA)
 DEBUG_FLAGS = -std=c++17 -g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-private-field -Wno-unused-function -Wno-unused-local-typedef -Wno-unused-lambda-capture -Wno-missing-field-initializers -Wno-mismatched-tags -Wno-missing-braces -I. -Isrc -I$(LLVM_PREFIX)/include -DCLAW_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 # readline: prefer pkg-config, fall back to -lreadline
 READLINE_LIBS := $(shell pkg-config --libs readline 2>/dev/null || echo -lreadline)
 READLINE_CFLAGS := $(shell pkg-config --cflags readline 2>/dev/null || echo)
-LDFLAGS = -lpthread $(READLINE_LIBS) -L$(LLVM_LIBDIR) -lLLVM $(LDFLAGS_EXTRA)
+LDFLAGS = -lpthread $(READLINE_LIBS) -L$(LLVM_LIBDIR) $(LLVM_LIBS) $(LDFLAGS_EXTRA)
 
 # Link-time optimization (optional)
 LTO ?= 0

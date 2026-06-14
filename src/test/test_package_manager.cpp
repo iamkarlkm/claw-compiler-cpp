@@ -8,6 +8,7 @@
 #include "../src/test/test.h"
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 
 using namespace claw::package;
 
