@@ -9,6 +9,7 @@
 #include "schedule_cache.h"
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 namespace claw {
 namespace scheduler {

@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <fstream>
+#include <optional>
+#include <chrono>
 #include <json/json.h>  // 可选：JSON序列化
 
 namespace claw {

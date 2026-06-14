@@ -13,6 +13,8 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <mutex>
+#include <optional>
 
 namespace claw {
 
