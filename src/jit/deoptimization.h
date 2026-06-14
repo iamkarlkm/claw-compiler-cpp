@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include "../bytecode/bytecode.h"
 
 namespace claw {
