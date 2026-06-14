@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <shared_mutex>
 
 namespace claw {
 namespace scheduler {
