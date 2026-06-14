@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <iostream>
 #include <sstream>
+#include <functional>
 
 // Forward declarations
 namespace claw {

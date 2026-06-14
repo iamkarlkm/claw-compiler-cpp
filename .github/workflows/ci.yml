@@ -19,6 +19,7 @@ jobs:
         run: |
           brew install llvm
           echo "LLVM_PREFIX=$(brew --prefix llvm)" >> $GITHUB_ENV
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Build
         run: make all
@@ -85,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llvm-version: [16, 17, 18, 19]
+        llvm-version: [18, 19]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
