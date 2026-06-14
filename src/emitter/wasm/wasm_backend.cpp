@@ -7,6 +7,7 @@
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 
 namespace claw {
 namespace wasm {

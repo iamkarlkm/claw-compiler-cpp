@@ -11,6 +11,7 @@
 #include <optional>
 #include <algorithm>
 #include <limits>
+#include <string>
 
 namespace claw {
 namespace jit {
